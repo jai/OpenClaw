@@ -62,6 +62,17 @@ export const ChatInjectParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const ChatIngressParamsSchema = Type.Object(
+  {
+    channel: NonEmptyString,
+    payload: Type.Object({}, { additionalProperties: true }),
+    runId: Type.Optional(NonEmptyString),
+    accountId: Type.Optional(NonEmptyString),
+    verbose: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
 export const ChatEventSchema = Type.Object(
   {
     runId: NonEmptyString,

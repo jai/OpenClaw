@@ -279,7 +279,10 @@ function buildForwardedContextFromChat(params: {
     params.type === "channel" || params.type === "legacy_channel" ? "channel" : "chat";
   const { display, title, username, id } = normalizeForwardedChatLabel(params.chat, fallbackKind);
   if (!display) return null;
-  const signature = params.signature?.trim() || undefined;
+  let signature = params.signature?.trim() || undefined;
+  if (signature && signature.toLowerCase() === display.toLowerCase()) {
+    signature = undefined;
+  }
   const from = signature ? `${display} (${signature})` : display;
   return {
     from,

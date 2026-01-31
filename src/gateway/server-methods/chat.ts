@@ -2,20 +2,55 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import type { proto } from "@whiskeysockets/baileys";
 import { CURRENT_SESSION_VERSION } from "@mariozechner/pi-coding-agent";
-import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import type { Bot } from "grammy";
+import { resolveDefaultAgentId, resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { resolveEffectiveMessagesConfig, resolveIdentityName } from "../../agents/identity.js";
 import { resolveThinkingDefault } from "../../agents/model-selection.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
 import { dispatchInboundMessage } from "../../auto-reply/dispatch.js";
+import { getReplyFromConfig } from "../../auto-reply/reply.js";
+import { DEFAULT_GROUP_HISTORY_LIMIT } from "../../auto-reply/reply/history.js";
 import { createReplyDispatcher } from "../../auto-reply/reply/reply-dispatcher.js";
 import {
   extractShortModelName,
   type ResponsePrefixContext,
 } from "../../auto-reply/reply/response-prefix-template.js";
-import type { MsgContext } from "../../auto-reply/templating.js";
+import type { FinalizedMsgContext, MsgContext } from "../../auto-reply/templating.js";
+import { formatLocationText } from "../../channels/location.js";
+import { loadConfig } from "../../config/config.js";
+import type { DmPolicy, GroupPolicy } from "../../config/types.base.js";
+import { resolveChannelGroupRequireMention } from "../../config/group-policy.js";
+import { loadSessionStore, resolveStorePath } from "../../config/sessions.js";
+import { registerAgentRunContext } from "../../infra/agent-events.js";
+import { getChildLogger } from "../../logging.js";
+import { resolveAgentRoute } from "../../routing/resolve-route.js";
+import { DEFAULT_ACCOUNT_ID, buildGroupHistoryKey } from "../../routing/session-key.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
+import { resolveTelegramAccount } from "../../telegram/accounts.js";
+import { buildTelegramMessageContext } from "../../telegram/bot-message-context.js";
+import { buildTelegramGroupPeerId } from "../../telegram/bot/helpers.js";
+import type { TelegramMessage } from "../../telegram/bot/types.js";
+import { readTelegramAllowFromStore } from "../../telegram/pairing-store.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
+import { normalizeE164 } from "../../utils.js";
+import { resolveWhatsAppAccount } from "../../web/accounts.js";
+import { DEFAULT_WEB_MEDIA_BYTES } from "../../web/auto-reply/constants.js";
+import { createEchoTracker } from "../../web/auto-reply/monitor/echo.js";
+import { applyGroupGating } from "../../web/auto-reply/monitor/group-gating.js";
+import { resolvePeerId } from "../../web/auto-reply/monitor/peer.js";
+import { processMessage } from "../../web/auto-reply/monitor/process-message.js";
+import { buildMentionConfig } from "../../web/auto-reply/mentions.js";
+import type { WebInboundMsg } from "../../web/auto-reply/types.js";
+import { checkInboundAccessControl } from "../../web/inbound/access-control.js";
+import {
+  describeReplyContext,
+  extractLocationData,
+  extractMediaPlaceholder,
+  extractMentionedJids,
+  extractText,
+} from "../../web/inbound/extract.js";
 import {
   abortChatRunById,
   abortChatRunsForSessionKey,
@@ -29,6 +64,7 @@ import {
   formatValidationErrors,
   validateChatAbortParams,
   validateChatHistoryParams,
+  validateChatIngressParams,
   validateChatInjectParams,
   validateChatSendParams,
 } from "../protocol/index.js";
@@ -178,6 +214,577 @@ function broadcastChatError(params: {
   };
   params.context.broadcast("chat", payload);
   params.context.nodeSendToSession(params.sessionKey, "chat", payload);
+}
+
+type ChatIngressResult = {
+  runId: string;
+  status: "accepted" | "blocked";
+  sessionKey?: string;
+  summary?: string;
+  meta?: Record<string, unknown>;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function buildIngressMeta(ctx: FinalizedMsgContext): Record<string, unknown> {
+  return {
+    rawBody: ctx.RawBody,
+    body: ctx.Body,
+    commandAuthorized: ctx.CommandAuthorized,
+    forwardedFrom: ctx.ForwardedFrom,
+    forwardedFromType: ctx.ForwardedFromType,
+    forwardedFromId: ctx.ForwardedFromId,
+    forwardedFromUsername: ctx.ForwardedFromUsername,
+    forwardedFromTitle: ctx.ForwardedFromTitle,
+    forwardedFromSignature: ctx.ForwardedFromSignature,
+    forwardedDate: ctx.ForwardedDate,
+    chatType: ctx.ChatType,
+    senderId: ctx.SenderId,
+    senderE164: ctx.SenderE164,
+    groupSubject: ctx.GroupSubject,
+    wasMentioned: ctx.WasMentioned,
+  };
+}
+
+function createIngressDispatcher(context: Pick<GatewayRequestContext, "logGateway">) {
+  return createReplyDispatcher({
+    deliver: async () => {},
+    onError: (err) => {
+      context.logGateway.warn(`ingress dispatch failed: ${formatForLog(err)}`);
+    },
+  });
+}
+
+async function handleTelegramIngress(params: {
+  cfg: ReturnType<typeof loadConfig>;
+  runId: string;
+  payload: unknown;
+  accountId?: string;
+  verbose?: boolean;
+  context: Pick<GatewayRequestContext, "logGateway">;
+}): Promise<ChatIngressResult> {
+  const payload = isRecord(params.payload) ? params.payload : {};
+  const update = isRecord(payload.update) ? payload.update : undefined;
+  const callbackQuery = isRecord(payload.callback_query)
+    ? payload.callback_query
+    : update && isRecord(update) && isRecord(update.callback_query)
+      ? update.callback_query
+      : undefined;
+  const messageCandidate =
+    (payload.message && isRecord(payload.message) ? payload.message : undefined) ??
+    (update && isRecord(update) && isRecord(update.message) ? update.message : undefined) ??
+    (update && isRecord(update) && isRecord(update.edited_message) ? update.edited_message : undefined) ??
+    (update && isRecord(update) && isRecord(update.channel_post) ? update.channel_post : undefined) ??
+    (update && isRecord(update) && isRecord(update.edited_channel_post)
+      ? update.edited_channel_post
+      : undefined);
+  const me = isRecord(payload.me) ? payload.me : undefined;
+  const getFile = async () => ({});
+
+  const options: { forceWasMentioned?: boolean; messageIdOverride?: string } = {};
+  let message = messageCandidate;
+  if (callbackQuery && isRecord(callbackQuery)) {
+    const data = typeof callbackQuery.data === "string" ? callbackQuery.data.trim() : "";
+    const callbackMessage = isRecord(callbackQuery.message) ? callbackQuery.message : undefined;
+    if (data && callbackMessage) {
+      const from = isRecord(callbackQuery.from) ? callbackQuery.from : callbackMessage.from;
+      message = {
+        ...callbackMessage,
+        from,
+        text: data,
+        caption: undefined,
+        caption_entities: undefined,
+        entities: undefined,
+      };
+      options.forceWasMentioned = true;
+      if (typeof callbackQuery.id === "string" && callbackQuery.id.trim()) {
+        options.messageIdOverride = callbackQuery.id;
+      }
+    }
+  }
+
+  if (!message) {
+    return {
+      runId: params.runId,
+      status: "blocked",
+      summary: "telegram payload missing message",
+    };
+  }
+
+  const resolvedAccountId =
+    typeof params.accountId === "string" && params.accountId.trim()
+      ? params.accountId.trim()
+      : typeof payload.accountId === "string" && payload.accountId.trim()
+        ? payload.accountId.trim()
+        : DEFAULT_ACCOUNT_ID;
+  const account = resolveTelegramAccount({
+    cfg: params.cfg,
+    accountId: resolvedAccountId,
+  });
+  const telegramCfg = account.config;
+  const storeAllowFrom = await readTelegramAllowFromStore().catch(() => []);
+  const allowFrom = Array.isArray(payload.allowFrom)
+    ? payload.allowFrom.filter(
+        (entry): entry is string | number => typeof entry === "string" || typeof entry === "number",
+      )
+    : telegramCfg.allowFrom;
+  const groupAllowFrom = Array.isArray(payload.groupAllowFrom)
+    ? payload.groupAllowFrom.filter(
+        (entry): entry is string | number => typeof entry === "string" || typeof entry === "number",
+      )
+    : telegramCfg.groupAllowFrom ??
+      (telegramCfg.allowFrom && telegramCfg.allowFrom.length > 0 ? telegramCfg.allowFrom : undefined);
+  const dmPolicy =
+    typeof payload.dmPolicy === "string" &&
+    (payload.dmPolicy === "pairing" ||
+      payload.dmPolicy === "allowlist" ||
+      payload.dmPolicy === "open" ||
+      payload.dmPolicy === "disabled")
+      ? (payload.dmPolicy as DmPolicy)
+      : telegramCfg.dmPolicy ?? "pairing";
+  const historyLimit = Math.max(
+    0,
+    telegramCfg.historyLimit ??
+      params.cfg.messages?.groupChat?.historyLimit ??
+      DEFAULT_GROUP_HISTORY_LIMIT,
+  );
+  const groupHistories = new Map();
+  const bot = {
+    api: {
+      sendChatAction: async () => {},
+      setMessageReaction: async () => {},
+    },
+  } as unknown as Bot;
+  const logger = {
+    info: () => {},
+  };
+  const resolveGroupActivation = (activationParams: {
+    chatId: string | number;
+    agentId?: string;
+    messageThreadId?: number;
+    sessionKey?: string;
+  }) => {
+    const agentId = activationParams.agentId ?? resolveDefaultAgentId(params.cfg);
+    const sessionKey =
+      activationParams.sessionKey ??
+      `agent:${agentId}:telegram:group:${buildTelegramGroupPeerId(
+        activationParams.chatId,
+        activationParams.messageThreadId,
+      )}`;
+    const storePath = resolveStorePath(params.cfg.session?.store, { agentId });
+    try {
+      const store = loadSessionStore(storePath);
+      const entry = store[sessionKey];
+      if (entry?.groupActivation === "always") return false;
+      if (entry?.groupActivation === "mention") return true;
+    } catch {
+      return undefined;
+    }
+    return undefined;
+  };
+  const resolveGroupRequireMention = (chatId: string | number) =>
+    resolveChannelGroupRequireMention({
+      cfg: params.cfg,
+      channel: "telegram",
+      accountId: account.accountId,
+      groupId: String(chatId),
+    });
+  const resolveTelegramGroupConfig = (chatId: string | number, messageThreadId?: number) => {
+    const groups = telegramCfg.groups;
+    if (!groups) return { groupConfig: undefined, topicConfig: undefined };
+    const groupKey = String(chatId);
+    const groupConfig = groups[groupKey] ?? groups["*"];
+    const topicConfig =
+      messageThreadId != null ? groupConfig?.topics?.[String(messageThreadId)] : undefined;
+    return { groupConfig, topicConfig };
+  };
+
+  let context: Awaited<ReturnType<typeof buildTelegramMessageContext>> | null = null;
+  try {
+    context = await buildTelegramMessageContext({
+      primaryCtx: {
+        message: message as unknown as TelegramMessage,
+        me,
+        getFile,
+      },
+      allMedia: [],
+      storeAllowFrom,
+      options,
+      bot,
+      cfg: params.cfg,
+      account: { accountId: account.accountId },
+      historyLimit,
+      groupHistories,
+      dmPolicy,
+      allowFrom,
+      groupAllowFrom,
+      ackReactionScope: "off",
+      logger,
+      resolveGroupActivation,
+      resolveGroupRequireMention,
+      resolveTelegramGroupConfig,
+    });
+  } catch (err) {
+    return {
+      runId: params.runId,
+      status: "blocked",
+      summary: `telegram ingress failed: ${formatForLog(err)}`,
+    };
+  }
+
+  if (!context) {
+    return {
+      runId: params.runId,
+      status: "blocked",
+      summary: "telegram message blocked by channel policy",
+    };
+  }
+
+  const ctxPayload = context.ctxPayload;
+  const sessionKey = ctxPayload.SessionKey ?? context.route.sessionKey;
+  if (sessionKey) {
+    registerAgentRunContext(params.runId, {
+      sessionKey,
+      ...(params.verbose !== undefined
+        ? { verboseLevel: params.verbose ? "on" : "off" }
+        : {}),
+    });
+  }
+
+  const dispatcher = createIngressDispatcher(params.context);
+  void dispatchInboundMessage({
+    ctx: ctxPayload,
+    cfg: params.cfg,
+    dispatcher,
+    replyOptions: {
+      runId: params.runId,
+      disableBlockStreaming: true,
+    },
+  }).catch((err) => {
+    params.context.logGateway.warn(`telegram ingress dispatch failed: ${formatForLog(err)}`);
+  });
+
+  return {
+    runId: params.runId,
+    status: "accepted",
+    sessionKey,
+    meta: buildIngressMeta(ctxPayload),
+  };
+}
+
+async function handleWhatsAppIngress(params: {
+  cfg: ReturnType<typeof loadConfig>;
+  runId: string;
+  payload: unknown;
+  accountId?: string;
+  verbose?: boolean;
+  context: Pick<GatewayRequestContext, "logGateway">;
+}): Promise<ChatIngressResult> {
+  const payload = isRecord(params.payload) ? params.payload : {};
+  const message = payload.message && isRecord(payload.message) ? payload.message : undefined;
+  const rawChatType = typeof payload.chatType === "string" ? payload.chatType : undefined;
+  const chatType =
+    rawChatType === "group" || rawChatType === "direct"
+      ? rawChatType
+      : payload.group === true
+        ? "group"
+        : "direct";
+  const chatId =
+    typeof payload.chatId === "string"
+      ? payload.chatId
+      : typeof payload.remoteJid === "string"
+        ? payload.remoteJid
+        : undefined;
+  const from =
+    typeof payload.from === "string" ? payload.from : chatType === "group" ? chatId : undefined;
+  const conversationId =
+    typeof payload.conversationId === "string" ? payload.conversationId : from;
+  const senderE164 =
+    typeof payload.senderE164 === "string"
+      ? normalizeE164(payload.senderE164) ?? payload.senderE164
+      : null;
+  const senderJid = typeof payload.senderJid === "string" ? payload.senderJid : undefined;
+  const senderName = typeof payload.senderName === "string" ? payload.senderName : undefined;
+  const selfE164 =
+    typeof payload.selfE164 === "string"
+      ? normalizeE164(payload.selfE164) ?? payload.selfE164
+      : null;
+  const selfJid = typeof payload.selfJid === "string" ? payload.selfJid : undefined;
+  const to = typeof payload.to === "string" ? payload.to : selfE164 ?? "me";
+  const timestamp = typeof payload.timestamp === "number" ? payload.timestamp : undefined;
+  const pushName = typeof payload.pushName === "string" ? payload.pushName : senderName;
+  const groupSubject =
+    typeof payload.groupSubject === "string" ? payload.groupSubject : undefined;
+  const groupParticipants = Array.isArray(payload.groupParticipants)
+    ? payload.groupParticipants.filter((value): value is string => typeof value === "string")
+    : undefined;
+  const mentionedJids = Array.isArray(payload.mentionedJids)
+    ? payload.mentionedJids.filter((value): value is string => typeof value === "string")
+    : message
+      ? extractMentionedJids(message as proto.IMessage)
+      : undefined;
+  const allowFrom = Array.isArray(payload.allowFrom)
+    ? payload.allowFrom.filter(
+        (entry): entry is string | number => typeof entry === "string" || typeof entry === "number",
+      )
+    : undefined;
+  const groupAllowFrom = Array.isArray(payload.groupAllowFrom)
+    ? payload.groupAllowFrom.filter(
+        (entry): entry is string | number => typeof entry === "string" || typeof entry === "number",
+      )
+    : undefined;
+  const dmPolicy =
+    typeof payload.dmPolicy === "string" &&
+    (payload.dmPolicy === "pairing" ||
+      payload.dmPolicy === "allowlist" ||
+      payload.dmPolicy === "open" ||
+      payload.dmPolicy === "disabled")
+      ? (payload.dmPolicy as DmPolicy)
+      : undefined;
+  const groupPolicy =
+    typeof payload.groupPolicy === "string" &&
+    (payload.groupPolicy === "open" ||
+      payload.groupPolicy === "allowlist" ||
+      payload.groupPolicy === "disabled")
+      ? (payload.groupPolicy as GroupPolicy)
+      : undefined;
+
+  if (!from || !conversationId) {
+    return {
+      runId: params.runId,
+      status: "blocked",
+      summary: "whatsapp payload missing sender",
+    };
+  }
+
+  const resolvedAccountId =
+    typeof params.accountId === "string" && params.accountId.trim()
+      ? params.accountId.trim()
+      : typeof payload.accountId === "string" && payload.accountId.trim()
+        ? payload.accountId.trim()
+        : DEFAULT_ACCOUNT_ID;
+  const account = resolveWhatsAppAccount({
+    cfg: params.cfg,
+    accountId: resolvedAccountId,
+  });
+
+  const overrides: {
+    allowFrom?: Array<string | number>;
+    groupAllowFrom?: Array<string | number>;
+    dmPolicy?: DmPolicy;
+    groupPolicy?: GroupPolicy;
+  } = {};
+  if (allowFrom) overrides.allowFrom = allowFrom;
+  if (groupAllowFrom) overrides.groupAllowFrom = groupAllowFrom;
+  if (dmPolicy) overrides.dmPolicy = dmPolicy;
+  if (groupPolicy) overrides.groupPolicy = groupPolicy;
+
+  const access = await checkInboundAccessControl({
+    cfg: params.cfg,
+    accountId: resolvedAccountId,
+    from,
+    selfE164,
+    senderE164,
+    group: chatType === "group",
+    pushName,
+    isFromMe: false,
+    messageTimestampMs: timestamp,
+    sock: {
+      sendMessage: async () => {},
+    },
+    remoteJid: chatId ?? from,
+    overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
+  });
+
+  if (!access.allowed) {
+    return {
+      runId: params.runId,
+      status: "blocked",
+      summary: "whatsapp message blocked by access control",
+    };
+  }
+
+  const location = message
+    ? extractLocationData(message as proto.IMessage)
+    : null;
+  const locationText = location ? formatLocationText(location) : undefined;
+  let body = typeof payload.body === "string" ? payload.body.trim() : undefined;
+  if (!body && message) {
+    body = extractText(message as proto.IMessage);
+  }
+  if (locationText) {
+    body = [body, locationText].filter(Boolean).join("\n").trim();
+  }
+  if (!body && message) {
+    body = extractMediaPlaceholder(message as proto.IMessage);
+  }
+  if (!body) {
+    return {
+      runId: params.runId,
+      status: "blocked",
+      summary: "whatsapp payload missing body",
+    };
+  }
+
+  const replyContext = message
+    ? describeReplyContext(message as proto.IMessage)
+    : null;
+
+  const inboundMessage: WebInboundMsg = {
+    id: typeof payload.id === "string" ? payload.id : undefined,
+    from,
+    conversationId,
+    to,
+    accountId: access.resolvedAccountId,
+    body,
+    pushName,
+    timestamp,
+    chatType,
+    chatId: chatId ?? from,
+    senderJid,
+    senderE164: senderE164 ?? undefined,
+    senderName,
+    replyToId: replyContext?.id,
+    replyToBody: replyContext?.body,
+    replyToSender: replyContext?.sender,
+    replyToSenderJid: replyContext?.senderJid,
+    replyToSenderE164: replyContext?.senderE164,
+    groupSubject,
+    groupParticipants,
+    mentionedJids: mentionedJids ?? undefined,
+    selfJid,
+    selfE164,
+    location: location ?? undefined,
+    sendComposing: async () => {},
+    reply: async () => {},
+    sendMedia: async () => {},
+    mediaPath: undefined,
+    mediaType: undefined,
+  };
+
+  const peerId = resolvePeerId(inboundMessage);
+  const route = resolveAgentRoute({
+    cfg: params.cfg,
+    channel: "whatsapp",
+    accountId: access.resolvedAccountId,
+    peer: {
+      kind: chatType === "group" ? "group" : "dm",
+      id: peerId,
+    },
+  });
+  const groupHistoryKey =
+    chatType === "group"
+      ? buildGroupHistoryKey({
+          channel: "whatsapp",
+          accountId: route.accountId,
+          peerKind: "group",
+          peerId,
+        })
+      : route.sessionKey;
+
+  const replyLogger = getChildLogger({ module: "gateway/ingress/whatsapp" });
+  const groupHistories = new Map();
+  const groupMemberNames = new Map();
+  const groupHistoryLimit = Math.max(
+    0,
+    params.cfg.messages?.groupChat?.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
+  );
+  const baseMentionConfig = buildMentionConfig(params.cfg, route.agentId);
+
+  if (chatType === "group") {
+    const gating = applyGroupGating({
+      cfg: params.cfg,
+      msg: inboundMessage,
+      conversationId,
+      groupHistoryKey,
+      agentId: route.agentId,
+      sessionKey: route.sessionKey,
+      baseMentionConfig,
+      authDir: account.authDir,
+      groupHistories,
+      groupHistoryLimit,
+      groupMemberNames,
+      logVerbose: (msg) => {
+        params.context.logGateway.debug(msg);
+      },
+      replyLogger,
+    });
+    if (!gating.shouldProcess) {
+      return {
+        runId: params.runId,
+        status: "blocked",
+        summary: "whatsapp message blocked by group gating",
+      };
+    }
+  }
+
+  const backgroundTasks = new Set<Promise<unknown>>();
+  const echoTracker = createEchoTracker({});
+  let resolveContext: ((ctx: FinalizedMsgContext) => void) | null = null;
+  let rejectContext: ((err: Error) => void) | null = null;
+  const contextPromise = new Promise<FinalizedMsgContext>((resolve, reject) => {
+    resolveContext = resolve;
+    rejectContext = reject;
+  });
+
+  void processMessage({
+    cfg: params.cfg,
+    msg: inboundMessage,
+    route,
+    groupHistoryKey,
+    groupHistories,
+    groupMemberNames,
+    connectionId: `ingress:${params.runId}`,
+    verbose: params.verbose === true,
+    maxMediaBytes: DEFAULT_WEB_MEDIA_BYTES,
+    replyResolver: getReplyFromConfig,
+    replyLogger,
+    backgroundTasks,
+    rememberSentText: echoTracker.rememberText,
+    echoHas: echoTracker.has,
+    echoForget: echoTracker.forget,
+    buildCombinedEchoKey: echoTracker.buildCombinedKey,
+    replyOptions: {
+      runId: params.runId,
+      disableBlockStreaming: true,
+    },
+    onContext: (ctx) => {
+      resolveContext?.(ctx);
+    },
+  }).catch((err) => {
+    const error = err instanceof Error ? err : new Error(String(err));
+    rejectContext?.(error);
+    params.context.logGateway.warn(`whatsapp ingress dispatch failed: ${formatForLog(error)}`);
+  });
+
+  let ctxPayload: FinalizedMsgContext;
+  try {
+    ctxPayload = await contextPromise;
+  } catch (err) {
+    return {
+      runId: params.runId,
+      status: "blocked",
+      summary: `whatsapp ingress failed: ${formatForLog(err)}`,
+    };
+  }
+  const sessionKey = ctxPayload.SessionKey ?? route.sessionKey;
+  if (sessionKey) {
+    registerAgentRunContext(params.runId, {
+      sessionKey,
+      ...(params.verbose !== undefined
+        ? { verboseLevel: params.verbose ? "on" : "off" }
+        : {}),
+    });
+  }
+
+  return {
+    runId: params.runId,
+    status: "accepted",
+    sessionKey,
+    meta: buildIngressMeta(ctxPayload),
+  };
 }
 
 export const chatHandlers: GatewayRequestHandlers = {
@@ -593,6 +1200,69 @@ export const chatHandlers: GatewayRequestHandlers = {
         error: formatForLog(err),
       });
     }
+  },
+  "chat.ingress": async ({ params, respond, context }) => {
+    if (!validateChatIngressParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid chat.ingress params: ${formatValidationErrors(validateChatIngressParams.errors)}`,
+        ),
+      );
+      return;
+    }
+
+    const p = params as {
+      channel: string;
+      payload: unknown;
+      runId?: string;
+      accountId?: string;
+      verbose?: boolean;
+    };
+    const runId = p.runId && p.runId.trim() ? p.runId.trim() : randomUUID();
+    const cfg = loadConfig();
+    const channel = p.channel.trim().toLowerCase();
+
+    let result: ChatIngressResult | null = null;
+    try {
+      if (channel === "telegram") {
+        result = await handleTelegramIngress({
+          cfg,
+          runId,
+          payload: p.payload,
+          accountId: p.accountId,
+          verbose: p.verbose,
+          context,
+        });
+      } else if (channel === "whatsapp") {
+        result = await handleWhatsAppIngress({
+          cfg,
+          runId,
+          payload: p.payload,
+          accountId: p.accountId,
+          verbose: p.verbose,
+          context,
+        });
+      } else {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, `unsupported ingress channel: ${p.channel}`),
+        );
+        return;
+      }
+    } catch (err) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.UNAVAILABLE, `chat.ingress failed: ${formatForLog(err)}`),
+      );
+      return;
+    }
+
+    respond(true, result);
   },
   "chat.inject": async ({ params, respond, context }) => {
     if (!validateChatInjectParams(params)) {

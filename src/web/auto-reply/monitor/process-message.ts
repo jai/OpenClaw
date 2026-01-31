@@ -10,9 +10,10 @@ import {
 } from "../../../auto-reply/reply/history.js";
 import { dispatchReplyWithBufferedBlockDispatcher } from "../../../auto-reply/reply/provider-dispatcher.js";
 import type { getReplyFromConfig } from "../../../auto-reply/reply.js";
-import type { ReplyPayload } from "../../../auto-reply/types.js";
+import type { GetReplyOptions, ReplyPayload } from "../../../auto-reply/types.js";
 import { shouldComputeCommandAuthorized } from "../../../auto-reply/command-detection.js";
 import { finalizeInboundContext } from "../../../auto-reply/reply/inbound-context.js";
+import type { FinalizedMsgContext } from "../../../auto-reply/templating.js";
 import { toLocationContext } from "../../../channels/location.js";
 import { createReplyPrefixContext } from "../../../channels/reply-prefix.js";
 import type { loadConfig } from "../../../config/config.js";
@@ -120,6 +121,8 @@ export async function processMessage(params: {
   maxMediaTextChunkLimit?: number;
   groupHistory?: GroupHistoryEntry[];
   suppressGroupHistoryClear?: boolean;
+  replyOptions?: Omit<GetReplyOptions, "onToolResult" | "onBlockReply">;
+  onContext?: (ctx: FinalizedMsgContext) => void;
 }) {
   const conversationId = params.msg.conversationId ?? params.msg.from;
   const storePath = resolveStorePath(params.cfg.session?.store, {
@@ -289,6 +292,7 @@ export async function processMessage(params: {
     OriginatingChannel: "whatsapp",
     OriginatingTo: params.msg.from,
   });
+  params.onContext?.(ctxPayload);
 
   if (dmRouteTarget) {
     updateLastRouteInBackground({
@@ -387,6 +391,7 @@ export async function processMessage(params: {
           ? !params.cfg.channels.whatsapp.blockStreaming
           : undefined,
       onModelSelected: prefixContext.onModelSelected,
+      ...params.replyOptions,
     },
   });
 

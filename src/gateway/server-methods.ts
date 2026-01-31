@@ -86,6 +86,7 @@ const WRITE_METHODS = new Set([
   "voicewake.set",
   "node.invoke",
   "chat.send",
+  "chat.ingress",
   "chat.abort",
   "browser.request",
 ]);

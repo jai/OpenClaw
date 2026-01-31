@@ -1,0 +1,75 @@
+version: "3.8"
+
+# Security Test Harness - Docker Compose
+#
+# Usage:
+#   # Build and run security tests
+#   docker compose -f test/security/docker-compose.yml up --build --abort-on-container-exit
+#
+#   # Run with specific test pattern
+#   TEST_PATTERN="Email Injection" docker compose -f test/security/docker-compose.yml up --build
+#
+#   # Clean up
+#   docker compose -f test/security/docker-compose.yml down -v
+
+services:
+  # Moltbot Gateway - System Under Test
+  gateway:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      # Minimal config for testing - no real channels
+      CLAWDBOT_GATEWAY_TOKEN: ${TEST_AUTH_TOKEN:-test-token-12345}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY required}
+      CLAWDBOT_GATEWAY_PORT: "18789"
+      # Disable real channel connections
+      CLAWDBOT_CHANNELS_DISABLED: "true"
+      NODE_ENV: test
+    command:
+      [
+        "node",
+        "dist/index.js",
+        "gateway",
+        "--allow-unconfigured",
+        "--bind",
+        "lan",
+        "--port",
+        "18789"
+      ]
+    ports:
+      - "18789:18789"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:18789/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    networks:
+      - security-test
+
+  # Security Test Runner
+  test-runner:
+    build:
+      context: ../..
+      dockerfile: test/security/Dockerfile.test
+    environment:
+      TEST_GATEWAY_URL: ws://gateway:18789
+      TEST_AUTH_TOKEN: ${TEST_AUTH_TOKEN:-test-token-12345}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY required}
+      TEST_PATTERN: ${TEST_PATTERN:-}
+      CI: "true"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    volumes:
+      - test-results:/app/test-results
+    networks:
+      - security-test
+
+networks:
+  security-test:
+    driver: bridge
+
+volumes:
+  test-results:

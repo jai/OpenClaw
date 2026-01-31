@@ -1,0 +1,109 @@
+name: Security Acceptance Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run daily at midnight UTC
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      test_pattern:
+        description: "Test pattern to run (e.g., 'Email Injection')"
+        required: false
+        default: ""
+
+jobs:
+  security-tests:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Checkout submodules (retry)
+        run: |
+          set -euo pipefail
+          git submodule sync --recursive
+          for attempt in 1 2 3 4 5; do
+            if git -c protocol.version=2 submodule update --init --force --depth=1 --recursive; then
+              exit 0
+            fi
+            echo "Submodule update failed (attempt $attempt/5). Retrying…"
+            sleep $((attempt * 10))
+          done
+          exit 1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and run security tests
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TEST_AUTH_TOKEN: ${{ secrets.TEST_AUTH_TOKEN || 'test-token-ci' }}
+          TEST_PATTERN: ${{ github.event.inputs.test_pattern || '' }}
+        run: |
+          docker compose -f test/security/docker-compose.yml up \
+            --build \
+            --abort-on-container-exit \
+            --exit-code-from test-runner
+
+      - name: Extract test results
+        if: always()
+        run: |
+          docker compose -f test/security/docker-compose.yml cp \
+            test-runner:/app/test-results ./test-results || true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-test-results
+          path: test-results/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f test/security/docker-compose.yml down -v
+
+      - name: Security test summary
+        if: always()
+        run: |
+          if [ -f test-results/security-results.json ]; then
+            echo "## Security Test Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Extract summary stats
+            TOTAL=$(jq '.numTotalTests // 0' test-results/security-results.json)
+            PASSED=$(jq '.numPassedTests // 0' test-results/security-results.json)
+            FAILED=$(jq '.numFailedTests // 0' test-results/security-results.json)
+
+            echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Total | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+            echo "| Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+            echo "| Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
+
+            if [ "$FAILED" -gt 0 ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "⚠️ **Security tests failed - review required**" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "No test results found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # Gate: Block release if security tests fail
+  security-gate:
+    needs: security-tests
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Block on security failure
+        run: |
+          echo "::error::Security tests failed - blocking release"
+          exit 1
