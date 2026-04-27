@@ -1,0 +1,22 @@
+name: Prompt File Character Limit
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  prompt-limit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enforce 12k prompt file limit
+        run: node scripts/check-prompt-char-limit.mjs
