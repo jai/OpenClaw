@@ -351,7 +351,7 @@ describe("agent-runner-utils", () => {
     expect(context.currentMessageId).toBe("2284");
   });
 
-  it("resolves implicit reply target from MessageThreadId when present", () => {
+  it("keeps implicit reply target on currentMessageId when MessageThreadId is present", () => {
     const targets = resolveAutoThreadingTargets({
       MessageSidFull: "spaces/AAA/messages/123",
       MessageSid: "spaces/AAA/messages/123",
@@ -360,7 +360,7 @@ describe("agent-runner-utils", () => {
 
     expect(targets).toEqual({
       currentMessageId: "spaces/AAA/messages/123",
-      implicitReplyToId: "spaces/AAA/threads/xyz",
+      implicitReplyToId: "spaces/AAA/messages/123",
     });
   });
 
@@ -384,7 +384,7 @@ describe("agent-runner-utils", () => {
 
     expect(targets).toEqual({
       currentMessageId: "msg-7",
-      implicitReplyToId: "thread-7",
+      implicitReplyToId: "msg-7",
     });
   });
 
