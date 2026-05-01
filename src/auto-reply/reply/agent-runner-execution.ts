@@ -72,6 +72,7 @@ import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { resolveRunAuthProfile } from "./agent-runner-auth-profile.js";
 import {
   buildEmbeddedRunExecutionParams,
+  resolveAutoThreadingTargets,
   resolveQueuedReplyRuntimeConfig,
   resolveModelFallbackOptions,
 } from "./agent-runner-utils.js";
@@ -807,6 +808,66 @@ function isReplyOperationRestartAbort(replyOperation?: ReplyOperation): boolean 
   );
 }
 
+function createEmbeddedLifecycleTerminalBackstop(params: { runId: string; sessionKey?: string }) {
+  let terminalEmitted = false;
+  let startedAt: number | undefined;
+
+  const note = (evt: { stream: string; data: Record<string, unknown> }) => {
+    if (evt.stream !== "lifecycle") {
+      return;
+    }
+    const phase = readStringValue(evt.data.phase);
+    if (phase === "start" && typeof evt.data.startedAt === "number") {
+      startedAt = evt.data.startedAt;
+    }
+    if (phase === "end" || phase === "error") {
+      terminalEmitted = true;
+    }
+  };
+
+  const emit = (phase: "end" | "error", resultOrError: unknown) => {
+    if (terminalEmitted) {
+      return;
+    }
+    terminalEmitted = true;
+    const data: Record<string, unknown> = {
+      phase,
+      endedAt: Date.now(),
+      ...(startedAt !== undefined ? { startedAt } : {}),
+    };
+    if (phase === "error") {
+      data.error = formatErrorMessage(resultOrError);
+    } else {
+      const meta =
+        resultOrError && typeof resultOrError === "object" && "meta" in resultOrError
+          ? (resultOrError as { meta?: Record<string, unknown> }).meta
+          : undefined;
+      if (meta?.aborted === true) {
+        data.aborted = true;
+      }
+      const stopReason = readStringValue(meta?.stopReason);
+      if (stopReason) {
+        data.stopReason = stopReason;
+      }
+      const livenessState = readStringValue(meta?.livenessState);
+      if (livenessState) {
+        data.livenessState = livenessState;
+      }
+      if (meta?.replayInvalid === true) {
+        data.replayInvalid = true;
+      }
+    }
+    emitAgentEvent({
+      runId: params.runId,
+      ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+      stream: "lifecycle",
+      data,
+    });
+  };
+
+  return { emit, note };
+}
+
 export async function runAgentTurnWithFallback(params: {
   commandBody: string;
   transcriptCommandBody?: string;
@@ -879,7 +940,7 @@ export async function runAgentTurnWithFallback(params: {
     didNotifyAgentRunStart = true;
     params.opts?.onAgentRunStart?.(runId);
   };
-  const currentMessageId = params.sessionCtx.MessageSidFull ?? params.sessionCtx.MessageSid;
+  const { currentMessageId, implicitReplyToId } = resolveAutoThreadingTargets(params.sessionCtx);
   const shouldNotifyUserAboutCompaction =
     runtimeConfig?.agents?.defaults?.compaction?.notifyUser === true;
   const sendCompactionNotice = async (phase: "start" | "end" | "incomplete") => {
@@ -894,7 +955,7 @@ export async function runAgentTurnWithFallback(params: {
           : "🧹 Compaction incomplete";
     const noticePayload = params.applyReplyToMode({
       text,
-      replyToId: currentMessageId,
+      replyToId: implicitReplyToId,
       replyToCurrent: true,
       isCompactionNotice: true,
     });
@@ -1114,7 +1175,8 @@ export async function runAgentTurnWithFallback(params: {
       const blockReplyHandler = params.opts?.onBlockReply
         ? createBlockReplyDeliveryHandler({
             onBlockReply: params.opts.onBlockReply,
-            currentMessageId: params.sessionCtx.MessageSidFull ?? params.sessionCtx.MessageSid,
+            currentMessageId,
+            implicitReplyToId,
             replyThreading: params.replyThreading,
             normalizeStreamingText,
             applyReplyToMode: params.applyReplyToMode,
@@ -1222,6 +1284,7 @@ export async function runAgentTurnWithFallback(params: {
                   config: runtimeConfig,
                   prompt: params.commandBody,
                   transcriptPrompt: params.transcriptCommandBody,
+                  inputProvenance: params.followupRun.run.inputProvenance,
                   provider: cliExecutionProvider,
                   model,
                   thinkLevel: params.followupRun.run.thinkLevel,
@@ -1332,6 +1395,10 @@ export async function runAgentTurnWithFallback(params: {
           );
           return (async () => {
             let attemptCompactionCount = 0;
+            const lifecycleBackstop = createEmbeddedLifecycleTerminalBackstop({
+              runId,
+              sessionKey: params.sessionKey,
+            });
             try {
               const result = await runEmbeddedPiAgent({
                 ...embeddedContext,
@@ -1404,11 +1471,13 @@ export async function runAgentTurnWithFallback(params: {
                     : undefined,
                 onReasoningEnd: params.opts?.onReasoningEnd,
                 onAgentEvent: async (evt) => {
+                  lifecycleBackstop.note(evt);
                   if (evt.stream.startsWith("codex_app_server.")) {
                     emitAgentEvent({
                       runId,
                       stream: evt.stream,
                       data: evt.data,
+                      ...(evt.sessionKey ? { sessionKey: evt.sessionKey } : {}),
                     });
                   }
                   // Signal run start only after the embedded agent emits real activity.
@@ -1596,6 +1665,7 @@ export async function runAgentTurnWithFallback(params: {
               bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
                 result.meta?.systemPromptReport,
               );
+              lifecycleBackstop.emit("end", result);
               const resultCompactionCount = Math.max(
                 0,
                 result.meta?.agentMeta?.compactionCount ?? 0,
@@ -1613,6 +1683,7 @@ export async function runAgentTurnWithFallback(params: {
                   );
                 }
               }
+              lifecycleBackstop.emit("error", err);
               throw err;
             } finally {
               autoCompactionCount += attemptCompactionCount;

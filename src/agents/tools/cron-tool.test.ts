@@ -131,6 +131,25 @@ describe("cron tool", () => {
     return payload?.sessionKey;
   }
 
+  async function executeAddAndReadAgentId(params: {
+    callId: string;
+    agentSessionKey: string;
+    agentId?: unknown;
+    includeAgentId?: boolean;
+  }): Promise<unknown> {
+    const tool = createTestCronTool({ agentSessionKey: params.agentSessionKey });
+    await tool.execute(params.callId, {
+      action: "add",
+      job: {
+        name: "reminder",
+        schedule: { at: new Date(123).toISOString() },
+        payload: { kind: "agentTurn", message: "hello" },
+        ...(params.includeAgentId ? { agentId: params.agentId } : {}),
+      },
+    });
+    return readGatewayCall().params?.agentId;
+  }
+
   async function executeAddWithContextMessages(callId: string, contextMessages: number) {
     const tool = createTestCronTool({ agentSessionKey: "main" });
     await tool.execute(callId, {
@@ -152,6 +171,43 @@ describe("cron tool", () => {
   it("marks cron as owner-only", async () => {
     const tool = createTestCronTool();
     expect(tool.ownerOnly).toBe(true);
+  });
+
+  it("allows scoped isolated cron runs to remove the current job", async () => {
+    const tool = createTestCronTool({ selfRemoveOnlyJobId: "job-current" });
+
+    await tool.execute("call-self-remove", {
+      action: "remove",
+      jobId: "job-current",
+    });
+
+    const params = expectSingleGatewayCallMethod("cron.remove");
+    expect(params).toEqual({ id: "job-current" });
+  });
+
+  it("denies scoped isolated cron runs from removing another job", async () => {
+    const tool = createTestCronTool({ selfRemoveOnlyJobId: "job-current" });
+
+    await expect(
+      tool.execute("call-remove-other", {
+        action: "remove",
+        jobId: "job-other",
+      }),
+    ).rejects.toThrow("Cron tool is restricted to removing the current cron job.");
+
+    expect(callGatewayMock).not.toHaveBeenCalled();
+  });
+
+  it("denies scoped isolated cron runs from using non-remove cron actions", async () => {
+    const tool = createTestCronTool({ selfRemoveOnlyJobId: "job-current" });
+
+    await expect(
+      tool.execute("call-list", {
+        action: "list",
+      }),
+    ).rejects.toThrow("Cron tool is restricted to removing the current cron job.");
+
+    expect(callGatewayMock).not.toHaveBeenCalled();
   });
 
   it("documents deferred follow-up guidance in the tool description", () => {
@@ -263,6 +319,26 @@ describe("cron tool", () => {
       params?: { agentId?: unknown };
     };
     expect(call?.params?.agentId).toBeNull();
+  });
+
+  it("infers session agentId when job.agentId is omitted", async () => {
+    await expect(
+      executeAddAndReadAgentId({
+        callId: "call-omitted-agent-id",
+        agentSessionKey: "agent:agent-123:telegram:direct:channing",
+      }),
+    ).resolves.toBe("agent-123");
+  });
+
+  it("infers session agentId when job.agentId is undefined", async () => {
+    await expect(
+      executeAddAndReadAgentId({
+        callId: "call-undefined-agent-id",
+        agentSessionKey: "agent:agent-123:telegram:direct:channing",
+        includeAgentId: true,
+        agentId: undefined,
+      }),
+    ).resolves.toBe("agent-123");
   });
 
   it("passes through failureAlert=false for add", async () => {

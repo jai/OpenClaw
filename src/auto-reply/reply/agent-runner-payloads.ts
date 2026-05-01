@@ -103,6 +103,7 @@ export async function buildReplyPayloads(params: {
   replyToMode: ReplyToMode;
   replyToChannel?: OriginatingChannelType;
   currentMessageId?: string;
+  implicitReplyToId?: string;
   replyThreading?: ReplyThreadingPolicy;
   messageProvider?: string;
   messagingToolSentTexts?: string[];
@@ -146,6 +147,7 @@ export async function buildReplyPayloads(params: {
         replyToMode: params.replyToMode,
         replyToChannel: params.replyToChannel,
         currentMessageId: params.currentMessageId,
+        implicitReplyToId: params.implicitReplyToId,
         replyThreading: params.replyThreading,
       }).map(async (payload) => {
         const parsed = normalizeReplyPayloadDirectives({
