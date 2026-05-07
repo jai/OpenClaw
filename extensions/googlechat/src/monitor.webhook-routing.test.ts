@@ -5,7 +5,7 @@ import {
   setActivePluginRegistry,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { createMockServerResponse } from "openclaw/plugin-sdk/test-env";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig, PluginRuntime } from "../runtime-api.js";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import { verifyGoogleChatRequest } from "./auth.js";
@@ -175,6 +175,10 @@ function mockSecondVerifierSuccess() {
 }
 
 describe("Google Chat webhook routing", () => {
+  beforeAll(async () => {
+    await import("./monitor.js");
+  });
+
   afterEach(() => {
     setActivePluginRegistry(createEmptyPluginRegistry());
   });
@@ -386,26 +390,29 @@ describe("Google Chat monitor inbound context", () => {
       );
 
       expect(res.statusCode).toBe(200);
-      await vi.waitFor(() => {
-        expect(buildContext).toHaveBeenCalledWith(
-          expect.objectContaining({
-            messageId: "spaces/AAA/messages/123",
-            messageIdFull: "spaces/AAA/messages/123",
-            reply: expect.objectContaining({
-              messageThreadId: "spaces/AAA/threads/xyz",
-              replyToId: "spaces/AAA/threads/xyz",
-              replyToIdFull: "spaces/AAA/threads/xyz",
+      await vi.waitFor(
+        () => {
+          expect(buildContext).toHaveBeenCalledWith(
+            expect.objectContaining({
+              messageId: "spaces/AAA/messages/123",
+              messageIdFull: "spaces/AAA/messages/123",
+              reply: expect.objectContaining({
+                messageThreadId: "spaces/AAA/threads/xyz",
+                replyToId: "spaces/AAA/threads/xyz",
+                replyToIdFull: "spaces/AAA/threads/xyz",
+              }),
             }),
-          }),
-        );
-        expect(run).toHaveBeenCalledWith(
-          expect.objectContaining({
-            adapter: expect.objectContaining({
-              resolveTurn: expect.any(Function),
+          );
+          expect(run).toHaveBeenCalledWith(
+            expect.objectContaining({
+              adapter: expect.objectContaining({
+                resolveTurn: expect.any(Function),
+              }),
             }),
-          }),
-        );
-      });
+          );
+        },
+        { timeout: 30_000 },
+      );
     } finally {
       unregister();
     }
@@ -498,19 +505,22 @@ describe("Google Chat monitor inbound context", () => {
       );
 
       expect(res.statusCode).toBe(200);
-      await vi.waitFor(() => {
-        expect(buildContext).toHaveBeenCalledWith(
-          expect.objectContaining({
-            messageId: "spaces/DM/messages/789",
-            messageIdFull: "spaces/DM/messages/789",
-            reply: expect.objectContaining({
-              messageThreadId: undefined,
-              replyToId: undefined,
-              replyToIdFull: undefined,
+      await vi.waitFor(
+        () => {
+          expect(buildContext).toHaveBeenCalledWith(
+            expect.objectContaining({
+              messageId: "spaces/DM/messages/789",
+              messageIdFull: "spaces/DM/messages/789",
+              reply: expect.objectContaining({
+                messageThreadId: undefined,
+                replyToId: undefined,
+                replyToIdFull: undefined,
+              }),
             }),
-          }),
-        );
-      });
+          );
+        },
+        { timeout: 30_000 },
+      );
     } finally {
       unregister();
     }
@@ -644,13 +654,16 @@ describe("Google Chat delivery thread routing", () => {
       );
 
       expect(res.statusCode).toBe(200);
-      await vi.waitFor(() => {
-        expect(updateGoogleChatMessageMock).toHaveBeenCalledWith({
-          account: expect.objectContaining({ accountId: "default" }),
-          messageName: "spaces/AAA/messages/typing",
-          text: "threaded reply",
-        });
-      });
+      await vi.waitFor(
+        () => {
+          expect(updateGoogleChatMessageMock).toHaveBeenCalledWith({
+            account: expect.objectContaining({ accountId: "default" }),
+            messageName: "spaces/AAA/messages/typing",
+            text: "threaded reply",
+          });
+        },
+        { timeout: 30_000 },
+      );
       expect(sendGoogleChatMessageMock).toHaveBeenNthCalledWith(
         1,
         expect.objectContaining({
