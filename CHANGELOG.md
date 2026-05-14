@@ -2,7 +2,7 @@
 
 Docs: https://docs.openclaw.ai
 
-## Unreleased
+## 2026.5.14
 
 ### Changes
 
@@ -21,6 +21,7 @@ Docs: https://docs.openclaw.ai
 
 ### Fixes
 
+- ACP: treat rejected timeout config options as best-effort hints so ACP turns continue with adapters that do not support `session/set_config_option` timeout keys. Fixes #81250. (#81603) Thanks @qkal.
 - Cron/Codex: default exact-command scheduled agent turns to lightweight bootstrap context so automation runs the command before loading workspace identity or memory context.
 - Codex plugin/Gateway: strip unpaired UTF-16 surrogates from Codex app-server JSON-RPC payloads and let stale reply-work recovery abort stalled reply runs, preventing malformed media turns from wedging gateway lanes.
 - Codex app server: force OAuth refresh requests to perform a real token refresh instead of reusing unchanged inherited auth-profile tokens after refresh failures. (#80738) Thanks @simplyclever914.
@@ -134,6 +135,7 @@ Docs: https://docs.openclaw.ai
 - Control UI: keep shared form, config, and usage text-entry controls at 16px on touch-primary devices while preserving chat composer input sizing, so iOS Safari no longer auto-zooms focused fields. Fixes #64651; carries forward #64673. Thanks @NianJiuZst and @BunsDev.
 - Codex harness: classify native app-server token-refresh logout and relogin failures as authentication refresh errors, so users get re-authentication guidance instead of a raw runtime failure.
 - Agents/trajectory: make the trajectory flush cleanup timeout configurable with `OPENCLAW_TRAJECTORY_FLUSH_TIMEOUT_MS`, preserving the 10s default while slower stores drain. Refs #75839. Thanks @BunsDev.
+- Skills: load ClawHub and local-manager skill-directory symlinks from managed `~/.openclaw/skills` and personal `~/.agents/skills` roots while keeping workspace, extra, bundled, and per-skill `SKILL.md` containment fail-closed. Fixes #44051. Refs #59219. Thanks @Devattom, @ArthurNie, and @luoxiao6645.
 - Codex startup: treat selectable configured OpenAI agent models as Codex runtime requirements during plugin auto-enable, startup planning, and doctor install repair, so Anthropic-primary configs can still switch to OpenAI/Codex cleanly.
 - Agents: preserve source-reply delivery metadata when merging tool-returned media into the final reply, keeping message-tool-only replies deliverable and mirrored. Thanks @pashpashpash and @vincentkoc.
 - Replies: treat rich presentation, interactive controls, and channel-native payload data as outbound content across follow-up, heartbeat, cron, ACP, and block-streaming delivery paths, preventing card/button-only replies from being dropped as empty.
