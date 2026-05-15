@@ -890,7 +890,7 @@ describe("googlechatPlugin outbound cfg threading", () => {
       config: {},
       credentialSource: "inline" as const,
     };
-    const { fetchRemoteMedia } = setupRuntimeMediaMocks({
+    const { readRemoteMediaBuffer } = setupRuntimeMediaMocks({
       loadFileName: "unused.png",
       loadBytes: "should-not-be-used",
     });
@@ -913,11 +913,10 @@ describe("googlechatPlugin outbound cfg threading", () => {
       threadId: "spaces/AAA/threads/explicit",
     });
 
-    expect(fetchRemoteMedia).toHaveBeenCalledWith(
-      expect.objectContaining({
-        url: "https://example.com/file.png",
-      }),
-    );
+    const remoteRequest = requireMockArg(readRemoteMediaBuffer) as {
+      url?: string;
+    };
+    expect(remoteRequest.url).toBe("https://example.com/file.png");
     expect(sendGoogleChatMessageMock).toHaveBeenCalledWith(
       expect.objectContaining({
         account,
