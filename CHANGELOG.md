@@ -32,6 +32,10 @@ Docs: https://docs.openclaw.ai
 
 ### Fixes
 
+- Plugin skills: replace generated Windows plugin-skill directories before publishing the current skill link, avoiding repeated `EINVAL` warnings from stale non-symlink entries. Fixes #81432. (#81446) Thanks @hclsys and @vincentkoc.
+- Channels/config: treat channel entries with only `enabled: true` as configured state so plugin-backed channels can auto-enable from an explicit on switch. Fixes #81323. (#81331) Thanks @EvanYao826 and @vincentkoc.
+- CLI/update: add an update finalization path for externally swapped core runtimes, running update-time doctor repair and plugin convergence from post-doctor config and install-record state before reporting completion. Thanks @shakkernerd.
+- Agents/WebChat: stop a successful assistant turn whose stale `errorMessage` matches a billing, auth, or rate-limit pattern from rotating profiles, falling back, or surfacing a hard `FailoverError` unless the current attempt has a real failover failure. (#70900) Thanks @truffle-dev.
 - Control UI/logs: make the Gateway Logs stream height responsive to the viewport with a minimum height floor, so larger screens can show substantially more log lines without collapsing on shorter viewports. (#53916) Thanks @extrasmall0.
 - ACP/Codex: surface redacted Codex wrapper stderr for generic ACP internal failures and preserve safe Codex model/provider routing in isolated `CODEX_HOME`, making `sessions_spawn(runtime="acp", agentId="codex")` failures actionable. Fixes #80079. (#80718) Thanks @leoge007.
 - ACP: treat rejected timeout config options as best-effort hints so ACP turns continue with adapters that do not support `session/set_config_option` timeout keys. Fixes #81250. (#81603) Thanks @qkal.
@@ -46,6 +50,7 @@ Docs: https://docs.openclaw.ai
 - Discord: honor `threadName` on `message send` to existing threads by renaming the thread after successful delivery, and warn when the rename cannot be applied. Fixes #81836. (#81933) Thanks @joshavant.
 - Build: keep externalized Slack, OpenShell sandbox, and Anthropic Vertex runtime dependency declarations out of the root dist artifact build.
 - ClawHub: include Amazon Bedrock and Bedrock Mantle provider packages in the published registry metadata so the externalized providers are discoverable from ClawHub as well as npm.
+- Codex account/status: hide empty rate-limit buckets and show server-reported usage-limit blocks without calling them available.
 - Auto-reply/Claude CLI: bridge CLI-runtime assistant text-delta agent events into the chat reasoning preview through `onReasoningStream`, mirroring the existing assistant-text (#76914) and tool-event (#80046) bridges and adding gating so non-CLI runtimes are unaffected. Thanks @anagnorisis2peripeteia and @pashpashpash.
 - Mantis: keep QA evidence in Actions artifacts only and stop publishing evidence files to Git-backed artifact branches.
 - CLI/migrate: handle delayed Codex plugin marketplace responses so warnings, next-steps, and conflict states render with ⚠️ glyphs and post-install migration retries the marketplace fetch instead of silently skipping plugin items. (#81625) Thanks @sjf.
@@ -76,6 +81,18 @@ Docs: https://docs.openclaw.ai
 - Telnyx voice-call: use the raw `client_state` fallback when webhook state is malformed base64 instead of using silently corrupted decoded text.
 - Google Meet: report malformed node-host params JSON with plugin-owned errors instead of leaking raw JSON parser failures.
 - CLI/export-trajectory: report malformed encoded request JSON with a stable CLI error instead of leaking raw parser output.
+- ComfyUI: report malformed workflow API JSON responses with owned errors instead of leaking raw parser failures.
+- DeepInfra video: report malformed successful API JSON responses with provider-owned errors instead of leaking raw parser failures.
+- Brave Search: report malformed web and LLM-context API JSON with provider-owned errors instead of leaking raw parser failures.
+- xAI tools: report malformed web search, X search, and code execution JSON with provider-owned errors instead of leaking raw parser failures.
+- Nextcloud Talk: report malformed room-info and bot-admin JSON with channel-owned errors instead of leaking raw parser failures.
+- Microsoft Teams: report malformed Graph and delegated OAuth JSON with channel-owned errors instead of leaking raw parser failures.
+- Google Chat: report malformed Chat API and certificate JSON with channel-owned errors instead of leaking raw parser failures.
+- Firecrawl: report malformed search and scrape API JSON with provider-owned errors instead of leaking raw parser failures.
+- Tavily: report malformed search and extract API JSON with provider-owned errors instead of leaking raw parser failures.
+- Perplexity: report malformed Search API and chat completion JSON with provider-owned errors instead of leaking raw parser failures.
+- Exa: report malformed search API JSON with a provider-owned error instead of leaking raw parser failures.
+- Memory host SDK: report malformed remote JSON with caller-scoped errors for POST and batch file upload responses instead of leaking raw parser failures.
 - Twilio voice-call: report malformed successful API JSON responses with provider-owned errors instead of leaking raw parser failures.
 - Voice-call provider APIs: report malformed successful guarded JSON responses with provider-prefixed errors instead of leaking raw parser failures.
 - Realtime transcription: report malformed provider websocket JSON frames with owned parser errors instead of leaking raw `SyntaxError` objects.
@@ -90,11 +107,19 @@ Docs: https://docs.openclaw.ai
 - OpenAI embeddings: report malformed batch output JSONL with provider-owned errors instead of leaking raw parser failures.
 - Synology Chat: report malformed JSON webhook payloads with stable channel-owned parser errors.
 - Mattermost: report malformed interaction callback JSON with stable channel-owned parser errors.
+- Twilio voice-call: report malformed media stream WebSocket JSON with an owned parser error instead of logging raw parser failures.
+- Tlon/Urbit: report malformed SSE event JSON with an owned parser error instead of logging raw parser failures.
+- Signal: return a stable installer error when GitHub release metadata is malformed JSON.
+- ClawHub: report malformed successful marketplace JSON responses with owned errors instead of leaking raw parser failures.
+- Provider usage: report malformed successful usage JSON responses with stable provider errors instead of leaking raw parser failures.
+- Tlon/Urbit: report malformed scry response JSON with owned errors instead of leaking raw parser failures.
+- LM Studio: report malformed model list and model load JSON with owned errors instead of leaking raw parser failures.
 - Matrix: ignore malformed percent-encoding in optional location URI parameters instead of letting a bad `geo:` event abort inbound message handling.
 - Web search: auto-detect Brave through its legacy `tools.web.search.apiKey` compatibility fallback while keeping doctor migration to `plugins.entries.brave.config.webSearch.apiKey` as the canonical repair, so allowlisted isolated cron runs do not report `web_search` unavailable before migration. Fixes #81538. Thanks @atomicmonk.
 - Plugins: memoize repeated in-process plugin metadata snapshots and keep vanished managed-install residue from forcing full derived discovery, reducing gateway/status startup scans under large plugin sets. Fixes #81143 and #79806. (#81570) Thanks @Kaspre, @holgergruenhagen, @JanPlessow, and @mjamiv.
 - CLI/plugins: route lazy plugin command-registration chatter to stderr only during JSON-output command registration, keeping plugin-backed `--json` stdout parseable without changing parse-only or pass-through `--json` behavior. Fixes #81535. (#81536) Thanks @ScientificProgrammer and @vincentkoc.
 - Plugins: treat git plugin install refs as refs instead of checkout flags, so option-like selectors fail checkout instead of silently installing the default branch. Fixes #79898. (#79901) Thanks @afurm and @vincentkoc.
+- Doctor/memory: stop warning that no memory plugin is active when an enabled alternate memory plugin explicitly owns the memory slot, while preserving the warning for missing or disabled slot entries. Fixes #78540. (#78557) Thanks @carladams1299-lab and @vincentkoc.
 - Web: honor explicitly configured global `web_search` providers during provider ownership resolution while keeping sandboxed `web_fetch` limited to bundled providers.
 - Plugins/doctor: repair configured legacy npm declaration stubs by reinstalling their npm packages into the managed plugin root instead of loading workspace `node_modules`, and warn when discovery sees those stubs. Fixes #79632. Thanks @Dylanzhang1128 and @vincentkoc.
 - Channels: keep configured third-party channel plugins visible in `openclaw channels list` when their manifest declares `channels` but has not added `channelConfigs` metadata yet. Fixes #81334. (#81340) Thanks @AllynSheep and @vincentkoc.
