@@ -2,7 +2,7 @@
 
 Docs: https://docs.openclaw.ai
 
-## Unreleased
+## 2026.5.17
 
 ### Changes
 
@@ -16,6 +16,7 @@ Docs: https://docs.openclaw.ai
 
 ### Fixes
 
+- CLI/context engines: bootstrap and finalize non-legacy context engines for CLI turns while preserving transcript snapshots and deferred maintenance ownership. (#81869) Thanks @sahilsatralkar.
 - Telegram: persist polling updates through restart replay so queued same-topic messages resume in order instead of losing context after a gateway restart. (#82256) Thanks @VACInc.
 - Gateway/Gmail: abort in-flight Gmail watcher startup and hot-reload restarts before shutdown so reloads cannot spawn `gog serve` after the Gateway is closing. Thanks @frankekn.
 - MCP plugin tools: forward host MCP `tools/call` `AbortSignal` through `createPluginToolsMcpHandlers().callTool` into plugin `tool.execute`, so host cancellation actually cancels in-flight plugin tool calls instead of letting them run to completion. Fixes #82424. (#82443) Thanks @joshavant.
@@ -42,6 +43,7 @@ Docs: https://docs.openclaw.ai
 - Cron/agents: honor configured subagent model fallbacks for isolated scheduled runs and forward that fallback policy into embedded agent timeout failover. Fixes #74985. Thanks @chrisgwynne.
 - Codex app-server/MCP: scope user MCP servers to specific OpenClaw agent ids through an optional `mcp.servers.<name>.codex.agents` list and accept `codex.defaultToolsApprovalMode` (`auto`/`prompt`/`approve`) for native Codex approval defaults; OpenClaw strips the `codex` block before handing `mcp_servers` config to Codex. (#82180) Thanks @sercada.
 - Agents/OpenAI Responses: clamp `input_tokens - cached_tokens` at zero and reconstruct `totalTokens` from input + output + cached components so Responses-API streams report consistent usage when providers under-report `input_tokens` relative to `cached_tokens`.
+- Agents: mark adapter-caught tool execution failures as error tool results in embedded Pi sessions, so models can retry recoverable edit failures instead of seeing a successful tool result. Fixes #81546. (#81564) Thanks @najef1979-code and @MonkeyLeeT.
 - Plugins: reject malformed `package.json` `openclaw.extensions` metadata during install, discovery, and post-update payload smoke instead of silently dropping invalid entries.
 - Plugins: reject package metadata records whose `package.json` resolves outside the plugin root instead of trusting persisted or reconstructed registry snapshots.
 - Plugins: ignore malformed persisted package channel/install metadata instead of crashing catalog reconstruction or leaking invalid install hints.
@@ -78,6 +80,7 @@ Docs: https://docs.openclaw.ai
 - Cron: keep failed isolated-agent runs from marking successful result delivery when only the failure notification was delivered. Fixes #72985. Thanks @Allenbluff.
 - Discord: validate message-read results before normalizing channel history and report unexpected payloads with a Discord boundary error instead of `map is not a function`. Fixes #82252. Thanks @jessewunderlich.
 - Agents/runtime: apply `agents.defaults.models["provider/*"].agentRuntime` as provider-wide model runtime policy while preserving exact model runtime precedence. Fixes #82243. Thanks @rendrag-git.
+- Model picker: show the effective Codex runtime first for official OpenAI routes while keeping Pi available as an alternate and preserving Pi-first custom OpenAI-compatible providers. Fixes #82269. Thanks @rendrag-git.
 - Agents/auto-reply: restrict `NO_REPLY` prompt guidance to automatic group/channel replies, remove legacy silent-reply rewrites, and suppress accidental direct-chat silent tokens instead of delivering fallback text. Fixes #82254. Thanks @absol89.
 - Telegram: retain a longer partial-stream preview when a final callback only carries an ellipsis-truncated snapshot, preventing the visible answer and transcript mirror from being replaced by the short preview. Fixes #82239. Thanks @crash2kx.
 - Telegram/active-memory: run blocking memory recall through the Telegram provider for direct-message turns even when the hook context carries the raw chat id, preventing embedded recall from launching against an invalid numeric channel. Fixes #82177. Thanks @cslash-zz.
