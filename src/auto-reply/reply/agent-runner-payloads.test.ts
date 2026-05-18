@@ -545,6 +545,8 @@ describe("buildReplyPayloads media filter integration", () => {
 
     expect(replyPayloads).toHaveLength(1);
     expectFields(replyPayloads[0], { isError: true });
+  });
+
   it("uses an alternate implicit reply target for final payload threading", async () => {
     const { replyPayloads } = await buildReplyPayloads({
       ...baseParams,
