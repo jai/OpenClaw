@@ -113,7 +113,7 @@ jobs:
       - name: Set up Blacksmith Docker Builder
         uses: useblacksmith/setup-docker-builder@722e97d12b1d06a961800dd6c05d79d951ad3c80 # v1
         with:
-          max-cache-size-mb: 800000
+          max-cache-size-mb: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 20000 || 800000 }}
 
       # Keep release smoke builds bounded and log-producing. The Blacksmith
       # build action can leave jobs in-progress without step logs when a remote
@@ -245,7 +245,7 @@ jobs:
         if: steps.existing.outputs.exists != 'true'
         uses: useblacksmith/setup-docker-builder@722e97d12b1d06a961800dd6c05d79d951ad3c80 # v1
         with:
-          max-cache-size-mb: 800000
+          max-cache-size-mb: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 20000 || 800000 }}
 
       # Build once with the matrix extension and publish by target SHA. Use a
       # direct buildx command so release jobs emit Docker progress and time out.
@@ -426,7 +426,7 @@ jobs:
       - name: Set up Blacksmith Docker Builder
         uses: useblacksmith/setup-docker-builder@722e97d12b1d06a961800dd6c05d79d951ad3c80 # v1
         with:
-          max-cache-size-mb: 800000
+          max-cache-size-mb: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 20000 || 800000 }}
 
       - name: Build installer smoke image
         run: |
@@ -519,7 +519,7 @@ jobs:
       - name: Set up Blacksmith Docker Builder
         uses: useblacksmith/setup-docker-builder@722e97d12b1d06a961800dd6c05d79d951ad3c80 # v1
         with:
-          max-cache-size-mb: 800000
+          max-cache-size-mb: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 20000 || 800000 }}
 
       - name: Setup Node environment for package smoke
         uses: ./.github/actions/setup-node-env
