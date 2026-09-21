@@ -351,6 +351,7 @@ async function processMessageWithPipeline(params: {
       kind: isGroup ? "channel" : "direct",
       id: spaceId,
       label: fromLabel,
+      threadId: replyThreadName,
     },
     route: {
       agentId: route.agentId,

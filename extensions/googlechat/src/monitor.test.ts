@@ -2,7 +2,10 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { recordChannelBotPairLoopAndCheckSuppression } from "openclaw/plugin-sdk/channel-inbound";
+import {
+  buildChannelInboundEventContext,
+  recordChannelBotPairLoopAndCheckSuppression,
+} from "openclaw/plugin-sdk/channel-inbound";
 import {
   closeOpenClawStateDatabaseForTest,
   createChannelIngressQueueForTests,
@@ -254,6 +257,55 @@ describe("googlechat monitor bot loop protection", () => {
     expect(apiMocks.downloadGoogleChatMedia).not.toHaveBeenCalled();
     expect(runTurn).not.toHaveBeenCalled();
   });
+});
+
+describe("googlechat monitor thread context", () => {
+  it.each([
+    {
+      spaceType: "SPACE",
+      threadName: "spaces/THREAD/threads/root",
+      expected: "spaces/THREAD/threads/root",
+    },
+    {
+      spaceType: "GROUP_CHAT",
+      threadName: "spaces/THREAD/threads/reply",
+      expected: "spaces/THREAD/threads/reply",
+    },
+    { spaceType: "DIRECT_MESSAGE", threadName: "spaces/THREAD/threads/dm", expected: undefined },
+    { spaceType: "SPACE", threadName: undefined, expected: undefined },
+  ])(
+    "preserves the transport thread for $spaceType ($threadName)",
+    async ({ spaceType, threadName, expected }) => {
+      const { buildContext, core } = createInboundClassificationHarness();
+      buildContext.mockImplementation((params) =>
+        buildChannelInboundEventContext(
+          params as Parameters<typeof buildChannelInboundEventContext>[0],
+        ),
+      );
+      allowGoogleChatMediaSender();
+      await processGoogleChatTestEvent({
+        event: {
+          type: "MESSAGE",
+          space: { name: "spaces/THREAD", spaceType },
+          message: {
+            name: "spaces/THREAD/messages/message-1",
+            text: "hello",
+            sender: { name: "users/alice", type: "HUMAN" },
+            ...(threadName ? { thread: { name: threadName } } : {}),
+          },
+        },
+        account: googleChatMediaTestAccount,
+        config: {},
+        runtime: createRuntimeSpies(),
+        core,
+        mediaMaxMb: 10,
+      });
+      expect(buildContext.mock.results[0]?.value).toMatchObject({
+        MessageThreadId: expected,
+        MessageSid: "spaces/THREAD/messages/message-1",
+      });
+    },
+  );
 });
 
 describe("googlechat monitor inbound space classification", () => {
