@@ -829,7 +829,7 @@ describe("googlechat monitor inbound space classification", () => {
           run: runTurn,
         },
         text: {
-          resolveChunkMode: vi.fn(() => "markdown"),
+          resolveChunkMode: vi.fn(() => "newline"),
           chunkMarkdownTextWithMode: vi.fn(() => ["first chunk", "second chunk"]),
         },
       },
