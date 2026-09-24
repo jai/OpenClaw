@@ -119,7 +119,24 @@ describe("googlechat message actions", () => {
     }
   });
 
-  it("sends text through the resolved space", async () => {
+  it.each([
+    { name: "plain text", message: "caption", rendered: "caption" },
+    {
+      name: "inline styles, links and code",
+      message: "**Ready** — [plan](https://example.com/plan)\n\n- *Pending*\n- `**literal**`",
+      rendered: "*Ready* — <https://example.com/plan|plan>\n\n* _Pending_\n* `**literal**`",
+    },
+    {
+      name: "heading and strike",
+      message: "## Status\n\n~~Outdated~~",
+      rendered: "*Status*\n\n~Outdated~",
+    },
+    {
+      name: "oversized text without truncation",
+      message: `**${"a".repeat(32_001)}**`,
+      rendered: `*${"a".repeat(32_001)}*`,
+    },
+  ])("sends rendered text through the resolved space: $name", async ({ message, rendered }) => {
     const account = buildAccount();
     resolveGoogleChatAccount.mockReturnValue(account);
     resolveGoogleChatOutboundSpace.mockResolvedValue("spaces/AAA");
@@ -135,7 +152,7 @@ describe("googlechat message actions", () => {
       action: "send",
       params: {
         to: "spaces/AAA",
-        message: "caption",
+        message,
         threadId: "thread-1",
       },
       cfg: {},
@@ -149,7 +166,7 @@ describe("googlechat message actions", () => {
     expect(sendGoogleChatMessage).toHaveBeenCalledWith({
       account,
       space: "spaces/AAA",
-      text: "caption",
+      text: rendered,
       thread: "thread-1",
     });
     expectJsonResult(result, {

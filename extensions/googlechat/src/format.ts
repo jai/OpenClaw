@@ -319,6 +319,12 @@ function renderGoogleChatIR(ir: MarkdownIR, markers: GoogleChatMarkers): string 
   return emitGoogleChatLists(blockquotes, markers.list);
 }
 
+/** Renders a single action message without changing its one-request delivery contract. */
+export function formatGoogleChatText(text: string): string {
+  const prepared = prepareGoogleChatIR(text);
+  return renderGoogleChatIR(prepared.ir, prepared.markers);
+}
+
 /** Renders CommonMark into byte-bounded Google Chat app-message chunks. */
 export function formatGoogleChatTextChunks(
   text: string,

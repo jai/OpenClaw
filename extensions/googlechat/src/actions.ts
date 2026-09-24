@@ -8,6 +8,7 @@ import type { ChannelMessageActionAdapter } from "openclaw/plugin-sdk/channel-co
 import { extractToolSend } from "openclaw/plugin-sdk/tool-send";
 import { resolveGoogleChatAccount } from "./accounts.js";
 import { sendGoogleChatMessage } from "./api.js";
+import { formatGoogleChatText } from "./format.js";
 import { describeGoogleChatMessageTool } from "./message-tool-api.js";
 import { resolveGoogleChatOutboundSpace } from "./targets.js";
 
@@ -88,7 +89,7 @@ export const googlechatMessageActions: ChannelMessageActionAdapter = {
       const sent = await sendGoogleChatMessage({
         account,
         space,
-        text: content,
+        text: formatGoogleChatText(content),
         thread: threadId ?? undefined,
         assertDirectAdapterHandoff,
         onPlatformSendDispatch,
