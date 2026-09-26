@@ -57,6 +57,7 @@ export async function deliverGoogleChatReply(params: {
   config: OpenClawConfig;
   statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
   typingMessage?: GoogleChatTypingMessage;
+  onTextDelivered?: (messageName: string) => void;
 }): Promise<void> {
   const { payload, account, spaceId, runtime, core, config, statusSink } = params;
   // Clear this whenever the typing message is deleted or unavailable; otherwise
@@ -140,7 +141,11 @@ export async function deliverGoogleChatReply(params: {
       }),
     );
     if (sent) {
-      acceptedText.push({ id: sent.messageName?.trim() || undefined, text: chunk });
+      const id = sent.messageName?.trim() || undefined;
+      acceptedText.push({ id, text: chunk });
+      if (id) {
+        params.onTextDelivered?.(id);
+      }
     }
     if (replyThreadName) {
       deliveryThreadName = sent?.threadName?.trim() || deliveryThreadName;
@@ -164,7 +169,9 @@ export async function deliverGoogleChatReply(params: {
           messageName: typingMessage.name,
           text: chunk,
         });
-        acceptedText.push({ id: updated.messageName?.trim() || typingMessage.name, text: chunk });
+        const id = updated.messageName?.trim() || typingMessage.name;
+        acceptedText.push({ id, text: chunk });
+        params.onTextDelivered?.(id);
       } catch (error) {
         if (!(error instanceof GoogleChatApiError) || error.status !== 404) {
           throw error;
