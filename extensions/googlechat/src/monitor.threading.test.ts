@@ -239,7 +239,7 @@ describe("progress cleanup", () => {
         const { delivery } = run.adapter.resolveTurn();
         if (ending === "message-tool") {
           await apiMocks.sendGoogleChatMessage({ text: "Tool answer" });
-          return;
+          return undefined;
         }
         if (ending === "throw") {
           throw new Error("Turn failed");
@@ -259,7 +259,7 @@ describe("progress cleanup", () => {
         );
         expect(visible.size).toBe(2);
         if (ending === "silent") {
-          return;
+          return undefined;
         }
         if (ending === "progress-then-message-tool") {
           await apiMocks.sendGoogleChatMessage({ text: "Tool answer" });
@@ -268,7 +268,7 @@ describe("progress cleanup", () => {
         if (ending === "failed") {
           apiMocks.sendGoogleChatMessage.mockRejectedValueOnce(new Error("unavailable"));
           await expect(send({ text: "Final answer" }, "final")).rejects.toThrow("unavailable");
-          return;
+          return undefined;
         }
         await send({ text: "First answer paragraph" }, "block");
         if (ending === "final") {
