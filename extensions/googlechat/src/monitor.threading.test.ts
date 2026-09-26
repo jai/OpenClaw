@@ -1,3 +1,4 @@
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
@@ -102,8 +103,8 @@ describe.each(["created", "disabled", "failed"])(
       if (preview === "failed") {
         apiMocks.sendGoogleChatMessage.mockRejectedValueOnce(new Error("Typing unavailable"));
       }
-      const turnStarted = Promise.withResolvers<void>();
-      const turnFinished = Promise.withResolvers<void>();
+      const turnStarted = createDeferred<void>();
+      const turnFinished = createDeferred<void>();
       runTurn.mockImplementation(async () => {
         turnStarted.resolve();
         await turnFinished.promise;
@@ -281,6 +282,7 @@ describe("progress cleanup", () => {
             { visibleReplySent: true },
           );
         }
+        return undefined;
       });
       const processing = processGoogleChatTestEvent({
         event: {
