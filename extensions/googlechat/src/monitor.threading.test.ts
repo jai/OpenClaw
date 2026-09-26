@@ -1,5 +1,5 @@
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
-import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
+import { dispatchReplyWithDispatcher, type ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
@@ -205,6 +205,7 @@ describe.each(["created", "disabled", "failed"])(
 describe("progress cleanup", () => {
   it.each([
     { typingIndicator: "message", ending: "final" },
+    { typingIndicator: "message", ending: "commentary-through-core" },
     { typingIndicator: "none", ending: "final" },
     { typingIndicator: "message", ending: "streamed" },
     { typingIndicator: "message", ending: "silent" },
@@ -236,7 +237,33 @@ describe("progress cleanup", () => {
         visible.delete(messageName);
       });
       runTurn.mockImplementation(async (run) => {
-        const { delivery } = run.adapter.resolveTurn();
+        const { delivery, replyOptions } = run.adapter.resolveTurn();
+        if (ending === "commentary-through-core") {
+          const observed: string[] = [];
+          await dispatchReplyWithDispatcher({
+            ctx: {
+              Body: "hello",
+              Provider: "googlechat",
+              Surface: "googlechat",
+              ChatType: "direct",
+            },
+            cfg: {},
+            replyOptions,
+            replyResolver: async (_ctx, options) => {
+              await options?.onBlockReply?.({ text: "Checking", isCommentary: true });
+              return { text: "Final answer" };
+            },
+            dispatcherOptions: {
+              deliver: async (payload, info) => {
+                await delivery.deliver(payload, info);
+                observed.push(...visible.values());
+                await delivery.onDelivered(payload, info);
+              },
+            },
+          });
+          expect(observed).toContain("Checking");
+          return undefined;
+        }
         if (ending === "message-tool") {
           await apiMocks.sendGoogleChatMessage({ text: "Tool answer" });
           return undefined;
@@ -312,15 +339,17 @@ describe("progress cleanup", () => {
         await processing;
       }
       expect([...visible.values()]).toEqual(
-        ending === "message-tool" || ending === "progress-then-message-tool"
-          ? ["Tool answer"]
-          : ending === "throw"
-            ? []
-            : ending === "silent" || ending === "failed"
-              ? ["Checking", "Running checks"]
-              : ending === "streamed"
-                ? ["First answer paragraph"]
-                : ["First answer paragraph", "Final answer"],
+        ending === "commentary-through-core"
+          ? ["Final answer"]
+          : ending === "message-tool" || ending === "progress-then-message-tool"
+            ? ["Tool answer"]
+            : ending === "throw"
+              ? []
+              : ending === "silent" || ending === "failed"
+                ? ["Checking", "Running checks"]
+                : ending === "streamed"
+                  ? ["First answer paragraph"]
+                  : ["First answer paragraph", "Final answer"],
       );
     },
   );
