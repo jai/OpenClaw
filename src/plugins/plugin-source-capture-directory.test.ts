@@ -7,6 +7,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { capturePluginGenerationArtifact } from "./plugin-generation-artifact.js";
+import { bindPluginInstanceModuleLoader } from "./plugin-instance-module-loader.js";
+import { PluginInstance } from "./plugin-instance.js";
 import { retainGatewayPluginMetadata } from "./plugin-metadata-lifecycle.js";
 import { withPluginSourceCaptureDirectory } from "./plugin-package-metadata-capture.js";
 import { sweepPluginSourceCaptureDirectories } from "./plugin-source-capture-directory.js";
@@ -26,6 +28,67 @@ function age(directory: string) {
   const timestamp = new Date(Date.now() - 2 * hour);
   fs.utimesSync(directory, timestamp, timestamp);
 }
+
+it.each([
+  "before bind",
+  "directory before bind",
+  "after bind",
+  "unchanged",
+  "nested state",
+  "state at source root",
+])(
+  "checks expected source bytes before execution and uses that same capture (%s)",
+  async (change) => {
+    const marker = path.join(temp.make("plugin-expected-effect-"), "ran");
+    const entry = (value: string) =>
+      `require("node:fs").writeFileSync(${JSON.stringify(marker)}, ${JSON.stringify(value)}); module.exports = ${JSON.stringify(value)};`;
+    const root = temp.make("plugin-expected-source-");
+    const source = path.join(root, "entry.cjs");
+    fs.writeFileSync(source, entry("reviewed"));
+    if (change === "nested state" || change === "state at source root") {
+      vi.stubEnv(
+        "OPENCLAW_STATE_DIR",
+        change === "nested state" ? path.join(root, ".state") : root,
+      );
+    }
+    const prepared = capturePluginGenerationArtifact(root);
+    const expectedSourceDigest = prepared.sourceDigest;
+    prepared.dispose();
+    const instance = new PluginInstance("fixture");
+    try {
+      const options = {
+        instance,
+        origin: "config" as const,
+        source,
+        rootDir: root,
+        expectedSourceDigest,
+      };
+      if (change.endsWith("before bind")) {
+        if (change === "directory before bind") {
+          fs.mkdirSync(path.join(root, "empty"));
+        } else {
+          fs.writeFileSync(source, entry("changed"));
+        }
+        expect
+          .soft(() => {
+            bindPluginInstanceModuleLoader(options);
+            instance.loadModule(source);
+          })
+          .toThrow(/source.*changed/i);
+        expect(fs.existsSync(marker)).toBe(false);
+      } else {
+        bindPluginInstanceModuleLoader(options);
+        if (change === "after bind") {
+          fs.writeFileSync(source, entry("changed"));
+        }
+        expect(instance.loadModule(source)).toBe("reviewed");
+        expect(fs.readFileSync(marker, "utf8")).toBe("reviewed");
+      }
+    } finally {
+      await instance.dispose();
+    }
+  },
+);
 
 function runCaptureProcess(stateDir: string, script: string) {
   const result = spawnSync(
