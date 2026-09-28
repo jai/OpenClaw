@@ -58,6 +58,26 @@ entrypoints instead of copying older files wholesale.
   configuration when the desired UX is one status message followed by the final
   answer. This repository change does not modify deployed configuration.
 
+## Runtime-specific backport inventory
+
+- [Cosmo / Mac Mini jai-work: `fix/cosmo-googlechat-2026.9.4`](https://github.com/jai/OpenClaw/tree/fix/cosmo-googlechat-2026.9.4)
+  is pinned at GitHub-verified commit
+  `6ecdd191cf15968b5c1ce22ae794ce6c86f4b896`, based on its exact core
+  `2545695c28b5` (2026.9.4). Remote head and commit verification were checked
+  on 2026-09-28.
+- The owning runtime task reports all 12 Google Chat commits through
+  `6b369a8c94955d9a090a9dc9ce2a628687296d73` replayed, with only three test-helper
+  name adaptations; **416/416 tests passed across 35 files**, plus build,
+  type-aware lint and extension type checks. These are owner-reported results,
+  not a repeat validation by this maintenance task.
+- The owner prepared an isolated 25-file plugin artifact that preserves the
+  existing core. Deployment/restart and live acceptance remain owned by that
+  task; this inventory does not establish deployment completion.
+- This backport follows the older deployment lineage through `6b369a8c`.
+  It does not establish inclusion of the newer ambiguous-PATCH custody repair
+  in candidate commit `a8574c1a`; reconcile that difference before asserting
+  parity with the 2026.9.6 candidate. Keep both core-specific patch sets separate.
+
 ## Upgrade and reapply
 
 1. Use a separate sibling clone. Confirm a clean working tree and read the current
