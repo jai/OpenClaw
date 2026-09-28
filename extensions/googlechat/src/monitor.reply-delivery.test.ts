@@ -85,7 +85,7 @@ describe("Google Chat reply delivery", () => {
         },
         account,
         spaceId: "spaces/AAA",
-        runtime: createRuntimeSpies(),
+        runtime: createRuntime(),
         core: createCore(),
         config,
         typingMessage:
@@ -126,7 +126,7 @@ describe("Google Chat reply delivery", () => {
         payload: { text: `**${letter.repeat(140)}**`, replyToId: "spaces/AAA/threads/root" },
         account: { ...account, config: { textChunkLimit: 64 } },
         spaceId: "spaces/AAA",
-        runtime: createRuntimeSpies(),
+        runtime: createRuntime(),
         core: createCore(),
         config,
       });
@@ -147,7 +147,7 @@ describe("Google Chat reply delivery", () => {
       payload: { text: "**ready**\n\n`**literal**`", replyToId: "spaces/AAA/threads/root" },
       account,
       spaceId: "spaces/AAA",
-      runtime: createRuntimeSpies(),
+      runtime: createRuntime(),
       core,
       config,
     });
