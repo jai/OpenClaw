@@ -334,7 +334,9 @@ describe("progress cleanup", () => {
         }
         return undefined;
       });
-      if (ending === "status-message") vi.useFakeTimers();
+      if (ending === "status-message") {
+        vi.useFakeTimers();
+      }
       const processing = processGoogleChatTestEvent({
         event: {
           type: "MESSAGE",
