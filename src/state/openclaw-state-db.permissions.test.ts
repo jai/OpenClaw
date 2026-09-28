@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 
+// Runtime setup can preload the coordinator's permission helper before node:fs is mocked.
+vi.hoisted(() => vi.resetModules());
+
 // The permission helper hardens via the named import `chmodSync` from node:fs.
 // A namespace `vi.spyOn(fs, ...)` cannot rebind an
 // already-captured named import, so we mock node:fs and route chmodSync
