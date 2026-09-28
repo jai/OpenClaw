@@ -61,7 +61,7 @@ const LABELS: Record<string, string> = {
 };
 
 /** Updates an existing typing placeholder; final-answer delivery owns its lifetime. */
-export function createGoogleChatStatusMessage(params: {
+export async function createGoogleChatStatusMessage(params: {
   account: ResolvedGoogleChatAccount;
   messageName: string;
   onError: (error: unknown) => void;
@@ -87,7 +87,7 @@ export function createGoogleChatStatusMessage(params: {
     },
     onError: params.onError,
   });
-  controller.setQueued();
+  await controller.setQueued();
   return {
     controller,
     // clear() cancels timers and drains the controller's serialized writes.
