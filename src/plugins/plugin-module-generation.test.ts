@@ -655,7 +655,14 @@ describe("plugin module generations", () => {
     },
   );
 
-  it.each(["before bind", "directory before bind", "after bind", "unchanged"])(
+  it.each([
+    "before bind",
+    "directory before bind",
+    "after bind",
+    "unchanged",
+    "nested state",
+    "state at source root",
+  ])(
     "checks expected source bytes before execution and uses that same capture (%s)",
     async (change) => {
       const marker = path.join(temp.make("plugin-expected-effect-"), "ran");
@@ -664,6 +671,12 @@ describe("plugin module generations", () => {
       const root = temp.make("plugin-expected-source-");
       const source = path.join(root, "entry.cjs");
       fs.writeFileSync(source, entry("reviewed"));
+      if (change === "nested state" || change === "state at source root") {
+        vi.stubEnv(
+          "OPENCLAW_STATE_DIR",
+          change === "nested state" ? path.join(root, ".state") : root,
+        );
+      }
       const prepared = capturePluginGenerationArtifact(root);
       const expectedSourceDigest = prepared.sourceDigest;
       prepared.dispose();
