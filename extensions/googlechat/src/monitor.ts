@@ -546,7 +546,7 @@ async function processMessageWithPipeline(params: {
             },
           },
           replyPipeline: {},
-          replyOptions: { commentaryPayloadsEnabled: true },
+          replyOptions: { commentaryPayloadsEnabled: false },
           record: {
             onRecordError: (err) => {
               runtime.error?.(`googlechat: failed updating session meta: ${String(err)}`);
