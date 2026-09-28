@@ -30,7 +30,9 @@ export function createGoogleChatStatusMessage(params: {
     emojis: { stallSoft: "⏳", stallHard: "⏳" },
     adapter: {
       setReaction: async (emoji) => {
-        if (closed) return;
+        if (closed) {
+          return;
+        }
         await updateGoogleChatMessage({
           account: params.account,
           messageName: params.messageName,
