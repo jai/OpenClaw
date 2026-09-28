@@ -261,7 +261,7 @@ describe("progress cleanup", () => {
               },
             },
           });
-          expect(observed).toContain("Checking");
+          expect(observed).toEqual(["Final answer"]);
           return undefined;
         }
         if (ending === "message-tool") {
