@@ -243,7 +243,7 @@ describe("progress cleanup", () => {
         if (ending === "status-message") {
           await replyOptions?.onToolStart?.({ name: "exec", phase: "start" });
           await vi.advanceTimersByTimeAsync(750);
-          expect([...visible.values()]).toEqual(["🛠️ Working"]);
+          expect([...visible.values()]).toEqual(["🛠️ Running a tool…"]);
           const pending = createDeferred<void>();
           apiMocks.updateGoogleChatMessage.mockImplementationOnce(async ({ messageName, text }) => {
             await pending.promise;
