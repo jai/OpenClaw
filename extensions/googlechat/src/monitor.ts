@@ -40,6 +40,7 @@ import {
   registerGoogleChatWebhookTarget,
   setGoogleChatWebhookEventProcessor,
 } from "./monitor-routing.js";
+import { createGoogleChatStatusMessage } from "./monitor-status-message.js";
 import type {
   GoogleChatCoreRuntime,
   GoogleChatMonitorOptions,
@@ -466,6 +467,14 @@ async function processMessageWithPipeline(params: {
     }
   }
 
+  const activity =
+    typingMessage && config.messages?.statusReactions?.enabled === true
+      ? createGoogleChatStatusMessage({
+          account,
+          messageName: typingMessage.name,
+          onError: (error) => runtime.error?.(`Google Chat status update failed: ${String(error)}`),
+        })
+      : undefined;
   try {
     const turnResult = await core.channel.inbound.run({
       channel: "googlechat",
@@ -496,6 +505,7 @@ async function processMessageWithPipeline(params: {
                 hasTypingMessage: Boolean(typingMessage),
               }),
             deliver: async (payload, info) => {
+              await activity?.stop();
               await deliverGoogleChatReply({
                 payload: { ...payload, replyToId: resolveReplyThread(payload) },
                 account,
@@ -546,7 +556,29 @@ async function processMessageWithPipeline(params: {
             },
           },
           replyPipeline: {},
-          replyOptions: { commentaryPayloadsEnabled: false },
+          replyOptions: {
+            commentaryPayloadsEnabled: false,
+            ...(activity
+              ? {
+                  allowToolLifecycleWhenProgressHidden: true,
+                  onReplyStart: () => {
+                    activity.controller.setThinking();
+                  },
+                  onToolStart: (payload) => {
+                    activity.controller.setTool(payload.name);
+                    return false;
+                  },
+                  onCompactionStart: () => {
+                    activity.controller.setCompacting();
+                    return false;
+                  },
+                  onCompactionEnd: () => {
+                    activity.controller.setThinking();
+                    return false;
+                  },
+                }
+              : {}),
+          },
           record: {
             onRecordError: (err) => {
               runtime.error?.(`googlechat: failed updating session meta: ${String(err)}`);
@@ -564,6 +596,7 @@ async function processMessageWithPipeline(params: {
       await cleanupProgress();
     }
   } finally {
+    await activity?.stop();
     // Message-tool replies and silent/failed turns may never consume the placeholder.
     // It describes an active turn, so it must not survive completion.
     if (typingMessage) {
