@@ -227,6 +227,38 @@ Runtime and setup retirement remove captured artifacts asynchronously and wait
 for removal to finish. Plugin callback deadlines do not end custody of those
 files; synchronous source inspection and failed capture still clean up before returning.
 
+Ordinary source captures live under the selected state directory at
+`tmp/plugin-captures/<instance>/captures/`. Each process retains an exclusive
+native SQLite lease in that instance's `owner.sqlite` while its captures or
+Gateway metadata remain in use. This is temporary ownership, not a state-schema
+change. Backups exclude the capture tree.
+
+The capture owner sweeps at acquisition and hourly while retained. A directory
+must be at least one hour old and have an existing, regular, singly linked
+ownership file whose native lease can be acquired before its payload is removed.
+Age alone never authorizes deletion. Live owners, symlinks, missing ownership
+files, and unknown layouts are preserved. Failed deletion is reported and can
+be retried without discarding the ownership file ahead of the payload.
+
+When state storage cannot accept a capture, allocation uses a private,
+profile-qualified directory under the runtime's temporary directory with the
+same lease and sweep contract. A later process must use the same profile and
+temporary directory to reclaim it. Existing unowned `openclaw-plugin-build-*`
+directories from older runtimes are not automatically deleted. Explicit worker
+capture directories remain under their caller's existing lifecycle.
+
+Native addon initialization is observed before execution. If a captured native
+module has been loaded, cache eviction and plugin disposal do not unload its
+image: the capture and its lease remain until process exit, including when
+initialization throws. A later process can reclaim those bytes after the grace
+period. Ordinary captures are removed during disposal or normal process exit;
+hard termination relies on the next eligible sweep.
+
+This is crash reclamation, not a disk quota or a guarantee of flat disk usage.
+Active generations and native-loaded captures can continue to occupy space for
+the process lifetime. Repeated native reloads, unavailable storage, permission
+failures, and legacy unowned directories require separate operational evidence.
+
 Configured Gateway agents share one model-catalog worker per plugin-inventory
 lifetime. Agent and authentication facts belong to each task; plugin registrations
 and captured source remain with the shared inventory. Standalone hosts that supply

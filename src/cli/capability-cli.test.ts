@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { ModelCatalogEntry } from "../agents/model-catalog.types.js";
 import type { inspectLocalAudioSelection } from "../media-understanding/local-audio.js";
+import { emptyTranscriptionCases } from "./capability-cli.audio.test-support.js";
 import { registerCapabilityCli } from "./capability-cli.js";
 import { CAPABILITY_METADATA } from "./capability-cli/metadata.js";
 
@@ -3497,15 +3498,13 @@ describe("capability cli", () => {
     expect(firstAudioTranscriptionCall()?.cfg).toBe(resolvedConfig);
   });
 
-  it("fails audio transcribe when no transcript text is returned", async () => {
+  it.each(emptyTranscriptionCases)("rejects empty audio ($file)", async ({ file, diagnostic }) => {
     mocks.transcribeAudioFile.mockResolvedValueOnce({ text: undefined } as never);
-
-    await expect(
-      runCapability("audio", "transcribe", "--file", "memo.m4a", "--json"),
-    ).rejects.toThrow("exit 1");
-    expect(runtimeErrorMessages()).toEqual([
-      `No transcript returned for audio: ${path.resolve("memo.m4a")}`,
-    ]);
+    await expect(runCapability("audio", "transcribe", "--file", file, "--json")).rejects.toThrow(
+      "exit 1",
+    );
+    expect(firstAudioTranscriptionCall()?.filePath).toBe(file);
+    expect(runtimeErrorMessages()).toEqual([`No transcript returned for audio: ${diagnostic}`]);
   });
 
   it("reports missing audio transcription configuration for audio transcribe", async () => {
