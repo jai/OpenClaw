@@ -1,6 +1,6 @@
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { dispatchReplyWithDispatcher, type ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
 import type { GoogleChatEvent } from "./types.js";
@@ -203,9 +203,11 @@ describe.each(["created", "disabled", "failed"])(
 );
 
 describe("progress cleanup", () => {
+  afterEach(() => vi.useRealTimers());
   it.each([
     { typingIndicator: "message", ending: "final" },
     { typingIndicator: "message", ending: "commentary-through-core" },
+    { typingIndicator: "message", ending: "status-message" },
     { typingIndicator: "none", ending: "final" },
     { typingIndicator: "message", ending: "streamed" },
     { typingIndicator: "message", ending: "silent" },
@@ -238,6 +240,27 @@ describe("progress cleanup", () => {
       });
       runTurn.mockImplementation(async (run) => {
         const { delivery, replyOptions } = run.adapter.resolveTurn();
+        if (ending === "status-message") {
+          await replyOptions?.onToolStart?.({ name: "exec", phase: "start" });
+          await vi.advanceTimersByTimeAsync(750);
+          expect([...visible.values()]).toEqual(["🛠️ Working"]);
+          const pending = createDeferred<void>();
+          apiMocks.updateGoogleChatMessage.mockImplementationOnce(async ({ messageName, text }) => {
+            await pending.promise;
+            visible.set(messageName, text);
+            return { messageName };
+          });
+          await replyOptions?.onCompactionStart?.();
+          await vi.advanceTimersByTimeAsync(750);
+          const final = delivery.deliver({ text: "Final answer" }, { kind: "final" });
+          pending.resolve();
+          await final;
+          await delivery.onDelivered({ text: "Final answer" }, { kind: "final" });
+          await replyOptions?.onToolStart?.({ name: "web_search", phase: "start" });
+          await vi.advanceTimersByTimeAsync(31000);
+          expect([...visible.values()]).toEqual(["Final answer"]);
+          return undefined;
+        }
         if (ending === "commentary-through-core") {
           const observed: string[] = [];
           await dispatchReplyWithDispatcher({
@@ -311,6 +334,7 @@ describe("progress cleanup", () => {
         }
         return undefined;
       });
+      if (ending === "status-message") vi.useFakeTimers();
       const processing = processGoogleChatTestEvent({
         event: {
           type: "MESSAGE",
@@ -328,7 +352,7 @@ describe("progress cleanup", () => {
           credentialSource: "inline",
           config: { typingIndicator, replyToMode: "all" },
         },
-        config: {},
+        config: { messages: { statusReactions: { enabled: ending === "status-message" } } },
         runtime: { error: vi.fn(), log: vi.fn() },
         core,
         mediaMaxMb: 10,
@@ -339,7 +363,7 @@ describe("progress cleanup", () => {
         await processing;
       }
       expect([...visible.values()]).toEqual(
-        ending === "commentary-through-core"
+        ending === "commentary-through-core" || ending === "status-message"
           ? ["Final answer"]
           : ending === "message-tool" || ending === "progress-then-message-tool"
             ? ["Tool answer"]
