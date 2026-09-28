@@ -469,7 +469,7 @@ async function processMessageWithPipeline(params: {
 
   const activity =
     typingMessage && config.messages?.statusReactions?.enabled === true
-      ? createGoogleChatStatusMessage({
+      ? await createGoogleChatStatusMessage({
           account,
           messageName: typingMessage.name,
           onError: (error) => runtime.error?.(`Google Chat status update failed: ${String(error)}`),
@@ -561,19 +561,19 @@ async function processMessageWithPipeline(params: {
             ...(activity
               ? {
                   allowToolLifecycleWhenProgressHidden: true,
-                  onReplyStart: () => {
-                    activity.controller.setThinking();
+                  onReplyStart: async () => {
+                    await activity.controller.setThinking();
                   },
-                  onToolStart: (payload) => {
-                    activity.controller.setTool(payload.name);
+                  onToolStart: async (payload) => {
+                    await activity.controller.setTool(payload.name);
                     return false;
                   },
-                  onCompactionStart: () => {
-                    activity.controller.setCompacting();
+                  onCompactionStart: async () => {
+                    await activity.controller.setCompacting();
                     return false;
                   },
-                  onCompactionEnd: () => {
-                    activity.controller.setThinking();
+                  onCompactionEnd: async () => {
+                    await activity.controller.setThinking();
                     return false;
                   },
                 }
