@@ -2,13 +2,17 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { createRequire, isBuiltin } from "node:module";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { openRootFileSync } from "../infra/boundary-file-read.js";
 import { isPathInside } from "../infra/path-guards.js";
 import { escapeRegExp } from "../shared/regexp.js";
+import {
+  retainLoadedPluginSourceCapture,
+  retainPluginSourceCaptureInstance,
+} from "./plugin-source-capture-directory.js";
+import { PLUGIN_SOURCE_CAPTURE_PREFIX } from "./plugin-source-capture-path.js";
 
 export function createPluginSourceLinkCapture() {
   const links = new Set<string>();
@@ -637,12 +641,27 @@ export function withPluginSourceCaptureDirectory<T>(directory: string, run: () =
 
 /** Admissions and failed-input receipts belong to one source acquisition lifetime. */
 export function createPluginSourceCapture(execute?: <T>(run: () => T) => T) {
-  const directory = fs.realpathSync(
-    fs.mkdtempSync(
-      path.join(sourceCaptureDirectory.getStore() ?? tmpdir(), "openclaw-plugin-build-"),
-    ),
-  );
-  fs.chmodSync(directory, 0o700);
+  const override = sourceCaptureDirectory.getStore();
+  const instance = override === undefined ? retainPluginSourceCaptureInstance() : undefined;
+  let created: string | undefined;
+  let directory: string;
+  try {
+    created =
+      override !== undefined
+        ? fs.mkdtempSync(path.join(override, PLUGIN_SOURCE_CAPTURE_PREFIX))
+        : instance!.createDirectory();
+    directory = fs.realpathSync(created);
+    fs.chmodSync(directory, 0o700);
+  } catch (error) {
+    try {
+      if (created) {
+        fs.rmSync(created, { recursive: true, force: true });
+      }
+    } finally {
+      instance?.release();
+    }
+    throw error;
+  }
   const inputs = new Map<string, PluginSourceInput>();
   const pendingInputs = new Set<string>();
   const additions = new Set<string>();
@@ -683,6 +702,7 @@ export function createPluginSourceCapture(execute?: <T>(run: () => T) => T) {
     capture: captureAdmitted,
     assertModuleAvailable,
     directory,
+    outputRoot: instance?.outputRoot,
     linkHost: (hostRoot: string) => {
       const modules = path.join(directory, "node_modules");
       fs.mkdirSync(modules, { recursive: true, mode: 0o700 });
@@ -702,7 +722,10 @@ export function createPluginSourceCapture(execute?: <T>(run: () => T) => T) {
         }
       }
       captureFailures.clear();
-      fs.rmSync(directory, { recursive: true, force: true });
+      if (!retainLoadedPluginSourceCapture(directory)) {
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+      instance?.release();
     },
   };
 }

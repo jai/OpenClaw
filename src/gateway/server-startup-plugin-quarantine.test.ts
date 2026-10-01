@@ -21,11 +21,13 @@ import { installPluginFromPath } from "../plugins/install.js";
 import { readPersistedInstalledPluginIndexInstallRecords } from "../plugins/installed-plugin-index-records.js";
 import { runPluginPayloadSmokeCheck } from "../plugins/payload-verification.js";
 import { createPluginCache, withPluginCache } from "../plugins/plugin-cache.js";
+import type { PluginRegistry } from "../plugins/registry.js";
 import {
   buildDegradedPluginsFromVerificationFailures,
   listActiveDegradedPlugins,
   setActiveDegradedPlugins,
 } from "../plugins/runtime-degraded-state.js";
+import { disposePluginRegistryInstances } from "../plugins/runtime.js";
 import { seedInstalledPluginIndex } from "../plugins/test-helpers/installed-plugin-index.js";
 import {
   getGatewayTestPort,
@@ -38,6 +40,7 @@ installGatewayTestHooks({ scope: "suite" });
 
 describe("Gateway startup plugin quarantine", () => {
   let server: Awaited<ReturnType<typeof startTestGatewayServer>> | undefined;
+  const registries: PluginRegistry[] = [];
   const tempDirs: string[] = [];
   const importChannel = channel(`openclaw.test.plugin-quarantine.${randomUUID()}`);
   const imported = new Set<unknown>();
@@ -48,6 +51,9 @@ describe("Gateway startup plugin quarantine", () => {
   afterEach(async () => {
     await server?.close();
     server = undefined;
+    for (const registry of registries.splice(0)) {
+      expect((await disposePluginRegistryInstances(registry)).failures).toEqual([]);
+    }
     setActiveDegradedPlugins([]);
     importChannel.unsubscribe(observeImport);
     imported.clear();
@@ -153,6 +159,7 @@ module.exports = { id: '${validPluginId}', register() {} };`,
       config: { plugins: pluginConfig },
       onlyPluginIds: [brokenPluginId, validPluginId],
     });
+    registries.push(registry);
     expect(registry.plugins.find((plugin) => plugin.id === brokenPluginId)).toMatchObject({
       status: "error",
       activated: false,
@@ -255,11 +262,13 @@ module.exports = { id: '${pluginId}', register() {} };`,
       onlyPluginIds: [pluginId],
     };
     const registry = loadOpenClawPlugins(options);
+    registries.push(registry);
 
     expect(registry.plugins.find((plugin) => plugin.id === pluginId)?.status).toBe("loaded");
     expect(imported.has(pluginId)).toBe(true);
     expect(listActiveDegradedPlugins()).toEqual([]);
     const replacement = loadOpenClawPlugins({ ...options, previousRegistry: registry });
+    registries.push(replacement);
     expect(replacement.plugins.find((plugin) => plugin.id === pluginId)).toBe(
       registry.plugins.find((plugin) => plugin.id === pluginId),
     );
@@ -327,6 +336,7 @@ module.exports = { id: '${pluginId}', register() {} };`,
       onlyPluginIds: [pluginId],
     });
 
+    registries.push(registry);
     expect(registry.plugins.find((plugin) => plugin.id === pluginId)?.status).toBe("error");
     expect(listActiveDegradedPlugins()).toMatchObject([
       { pluginId, diagnostic: { installPath: brokenRoot } },
@@ -336,10 +346,14 @@ module.exports = { id: '${pluginId}', register() {} };`,
 
 describe("updater plugin degradation with a running source Gateway", () => {
   const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+  const registries: PluginRegistry[] = [];
   let server: Awaited<ReturnType<typeof startTestGatewayServer>> | undefined;
   afterEach(async () => {
     await server?.close();
     server = undefined;
+    for (const registry of registries.splice(0)) {
+      expect((await disposePluginRegistryInstances(registry)).failures).toEqual([]);
+    }
     setActiveDegradedPlugins([]);
   });
 
@@ -437,7 +451,9 @@ describe("updater plugin degradation with a running source Gateway", () => {
         const quarantine = await refreshStartupPluginQuarantine({ cfg: config, env: process.env });
         expect(quarantine.blockingDiagnostic).toBeNull();
         setActiveDegradedPlugins(quarantine.quarantinedPlugins);
-        return loadOpenClawPlugins({ cache: false, config, onlyPluginIds: [pluginId] });
+        const registry = loadOpenClawPlugins({ cache: false, config, onlyPluginIds: [pluginId] });
+        registries.push(registry);
+        return registry;
       });
     const degradedRegistry = await loadGeneration();
     expect(listActiveDegradedPlugins()).toMatchObject([

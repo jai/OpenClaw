@@ -70,6 +70,11 @@ export function capturePluginGenerationArtifact(
     executableEntry = false,
   ): string => {
     const boundary = entry && !executableEntry ? fs.realpathSync(inputBoundaryRoot) : root;
+    // Recovery sources can themselves be captures; omit output only inside this source.
+    const outputRoot =
+      sourceCapture.outputRoot && isPathInside(boundary, sourceCapture.outputRoot)
+        ? sourceCapture.outputRoot
+        : undefined;
     const existing = packages.get(root);
     if (existing) {
       if (!metadataOnly) {
@@ -147,6 +152,9 @@ export function capturePluginGenerationArtifact(
         );
       }
       const stat = fs.statSync(real, { bigint: true });
+      if (outputRoot && isPathInside(outputRoot, real)) {
+        return;
+      }
       const captured = capturedPaths.get(real);
       const recordContent = (content: Buffer | string[]) => {
         if (!captured) {
@@ -267,6 +275,9 @@ export function capturePluginGenerationArtifact(
         const real = fs.realpathSync(source);
         if (!isPathInside(boundary, real)) {
           throw new Error("Standalone plugin input leaves its source directory");
+        }
+        if (outputRoot && isPathInside(outputRoot, real)) {
+          return;
         }
         if (fs.statSync(source).isDirectory()) {
           if (scannedDirectories.has(real)) {
