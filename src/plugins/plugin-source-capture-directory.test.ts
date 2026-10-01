@@ -155,7 +155,7 @@ it("removes ordinary capture payloads after successful disposal", () => {
     const captures = [createPluginSourceCapture(), createPluginSourceCapture()];
     for (const capture of captures) fs.writeFileSync(path.join(capture.directory, "payload"), "bytes");
     captures[0].dispose();
-    await captures[1].dispose();
+    captures[1].dispose();
     process.stdout.write(JSON.stringify(captures.map(capture => fs.existsSync(capture.directory))));
     `,
   );
@@ -421,7 +421,7 @@ it.each(["before command", "inside command"])(
         }),
       ));
       const timers = observed.map(({ resource, context, cli }) => ({ context, cli, referenced: resource.hasRef() }));
-      await result.capture.dispose();
+      result.capture.dispose();
       await result.cleanup.pluginResources.release();
       process.stdout.write(JSON.stringify(timers));
     `,
@@ -446,21 +446,21 @@ it("keeps sibling and explicitly worker-owned captures until their own disposal"
   try {
     const root = path.dirname(path.dirname(first.boundaryRoot));
     age(root);
-    await first.dispose();
+    first.dispose();
     await metadata.close();
     await sweepPluginSourceCaptureDirectories(stateDir);
     expect(fs.readFileSync(second.resolve(path.join(source, "index.cjs")), "utf8")).toBe(
       "module.exports = 42;",
     );
     expect(path.dirname(worker.boundaryRoot)).toBe(workerRoot);
-    await second.dispose();
+    second.dispose();
     expect(fs.existsSync(root)).toBe(false);
-    await worker.dispose();
+    worker.dispose();
     expect(fs.readFileSync(path.join(workerRoot, "sentinel"), "utf8")).toBe("parent custody");
   } finally {
-    await first.dispose();
-    await second.dispose();
-    await worker.dispose();
+    first.dispose();
+    second.dispose();
+    worker.dispose();
     await metadata.close();
   }
 });
@@ -488,7 +488,7 @@ it("records native initialization before it reenters disposal and throws", () =>
     let originalError = false;
     try { process.dlopen({}, path.toNamespacedPath(file), 17); }
     catch (error) { originalError = error === failure; }
-    await capture.dispose();
+    capture.dispose();
     process.stdout.write(JSON.stringify({ originalError, present: fs.existsSync(file) }));
   `,
   );
