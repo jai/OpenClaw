@@ -1,3 +1,5 @@
+import type { ChannelInboundTurnPlan } from "openclaw/plugin-sdk/channel-inbound";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
@@ -102,6 +104,8 @@ async function processEvent(params: {
   chunks?: string[];
   event?: GoogleChatEvent;
   runtime?: GoogleChatRuntimeEnv;
+  config?: OpenClawConfig;
+  onPlan?: (plan: ChannelInboundTurnPlan) => Promise<void>;
 }) {
   if (!routingMocks.processEvent) {
     throw new Error("Expected Google Chat webhook event processor registration");
@@ -111,9 +115,11 @@ async function processEvent(params: {
     channel: {
       inbound: {
         buildContext: (payload: unknown) => payload,
-        run: async (turn: {
-          adapter: { resolveTurn: () => { delivery: GoogleChatTestDelivery } };
-        }) => params.run(turn.adapter.resolveTurn().delivery),
+        run: async (turn: { adapter: { resolveTurn: () => ChannelInboundTurnPlan } }) => {
+          const plan = turn.adapter.resolveTurn();
+          await params.onPlan?.(plan);
+          await params.run(plan.delivery);
+        },
       },
       text: {
         resolveChunkMode: () => "markdown",
@@ -123,7 +129,7 @@ async function processEvent(params: {
   } as unknown as GoogleChatCoreRuntime;
   await routingMocks.processEvent(params.event ?? createEvent(), {
     account: params.account,
-    config: {},
+    config: params.config ?? {},
     runtime: params.runtime ?? { error: vi.fn(), log: vi.fn() },
     core,
     mediaMaxMb: 10,
@@ -149,6 +155,38 @@ const updated = (account: ResolvedGoogleChatAccount, text: string) => ({
 });
 
 describe("Google Chat automatic reply target reconciliation", () => {
+  it("updates the typing message with agent activity and then clears it on a silent turn", async () => {
+    vi.useFakeTimers();
+    try {
+      const account = createAccount({ typingIndicator: "message" });
+      apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({ messageName: TYPING });
+      await processEvent({
+        account,
+        config: { messages: { statusReactions: { enabled: true } } },
+        onPlan: async (plan) => {
+          await plan.dispatcherOptions?.onReplyStart?.();
+          expect(plan.replyOptions?.allowToolLifecycleWhenProgressHidden).toBe(true);
+          await vi.advanceTimersByTimeAsync(800);
+          expect(apiMocks.updateGoogleChatMessage).toHaveBeenCalledWith(
+            updated(account, "🧠 Thinking…"),
+          );
+          await plan.replyOptions?.onToolStart?.({ name: "exec" });
+          await vi.advanceTimersByTimeAsync(800);
+          expect(apiMocks.updateGoogleChatMessage).toHaveBeenCalledWith(
+            updated(account, "🛠️ Running a tool…"),
+          );
+        },
+        run: async () => {},
+      });
+      expect(apiMocks.deleteGoogleChatMessage).toHaveBeenCalledWith({
+        account,
+        messageName: TYPING,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each<{ typing: "message" | "none"; kind: string }>([
     { typing: "message", kind: "final" },
     { typing: "none", kind: "block" },
