@@ -1,3 +1,4 @@
+// Reader/cache for generated CLI startup metadata used by help and completion fast paths.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,16 +6,13 @@ import { fileURLToPath } from "node:url";
 const STARTUP_METADATA_FILE = "cli-startup-metadata.json";
 const startupMetadataByPath = new Map<string, Record<string, unknown> | null>();
 
-function resolveStartupMetadataPathCandidates(moduleUrl: string): string[] {
+export function readCliStartupMetadata(moduleUrl: string): Record<string, unknown> | null {
+  // Check both source and bundled layouts; cache misses too so repeated help stays cheap.
   const moduleDir = path.dirname(fileURLToPath(moduleUrl));
-  return [
+  for (const metadataPath of [
     path.resolve(moduleDir, STARTUP_METADATA_FILE),
     path.resolve(moduleDir, "..", STARTUP_METADATA_FILE),
-  ];
-}
-
-export function readCliStartupMetadata(moduleUrl: string): Record<string, unknown> | null {
-  for (const metadataPath of resolveStartupMetadataPathCandidates(moduleUrl)) {
+  ]) {
     const cached = startupMetadataByPath.get(metadataPath);
     if (cached !== undefined) {
       if (cached) {
@@ -33,10 +31,3 @@ export function readCliStartupMetadata(moduleUrl: string): Record<string, unknow
   }
   return null;
 }
-
-export const __testing = {
-  resolveStartupMetadataPathCandidates,
-  clearStartupMetadataCache(): void {
-    startupMetadataByPath.clear();
-  },
-};

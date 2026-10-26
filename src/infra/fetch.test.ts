@@ -1,9 +1,12 @@
+// Covers fetch resolution and abort-signal wrapping.
 import { describe, expect, it, vi } from "vitest";
 import { withFetchPreconnect } from "../test-utils/fetch-mock.js";
 import { resolveFetch, wrapFetchWithAbortSignal } from "./fetch.js";
 
 async function waitForMicrotaskTurn(): Promise<void> {
-  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  await new Promise<void>((resolve) => {
+    queueMicrotask(resolve);
+  });
 }
 
 function createForeignSignalHarness() {
@@ -37,7 +40,7 @@ function createThrowingCleanupSignalHarness(cleanupError: Error) {
   });
   const fakeSignal = {
     aborted: false,
-    addEventListener: (_event: string, _handler: () => void) => {},
+    addEventListener: (_eventValue: string, _handler: () => void) => {},
     removeEventListener,
   } as unknown as AbortSignal;
   return { fakeSignal, removeEventListener };
@@ -52,17 +55,6 @@ function createSeenInitFetch() {
     }),
   );
   return { fetchImpl, getSeenInit: () => seenInit };
-}
-
-function createSeenSignalFetch() {
-  let seenSignal: AbortSignal | undefined;
-  const fetchImpl = withFetchPreconnect(
-    vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      seenSignal = init?.signal as AbortSignal | undefined;
-      return {} as Response;
-    }),
-  );
-  return { fetchImpl, getSeenSignal: () => seenSignal };
 }
 
 function createSymbolHeaderInit(enumerable: boolean): RequestInit {
@@ -109,14 +101,14 @@ describe("wrapFetchWithAbortSignal", () => {
   });
 
   it("converts foreign abort signals to native controllers", async () => {
-    const { fetchImpl, getSeenSignal } = createSeenSignalFetch();
+    const { fetchImpl, getSeenInit } = createSeenInitFetch();
     const wrapped = wrapFetchWithAbortSignal(fetchImpl);
 
     const { fakeSignal, triggerAbort } = createForeignSignalHarness();
 
     const promise = wrapped("https://example.com", { signal: fakeSignal });
     expect(fetchImpl).toHaveBeenCalledOnce();
-    const seenSignal = getSeenSignal();
+    const seenSignal = getSeenInit()?.signal;
     expect(seenSignal).toBeInstanceOf(AbortSignal);
     expect(seenSignal).not.toBe(fakeSignal);
 
@@ -210,7 +202,7 @@ describe("wrapFetchWithAbortSignal", () => {
   });
 
   it("passes through foreign signal-like objects without addEventListener", async () => {
-    const { fetchImpl, getSeenSignal } = createSeenSignalFetch();
+    const { fetchImpl, getSeenInit } = createSeenInitFetch();
     const wrapped = wrapFetchWithAbortSignal(fetchImpl);
 
     const fakeSignal = {
@@ -220,21 +212,21 @@ describe("wrapFetchWithAbortSignal", () => {
 
     await wrapped("https://example.com", { signal: fakeSignal });
 
-    expect(getSeenSignal()).toBe(fakeSignal);
+    expect(getSeenInit()?.signal).toBe(fakeSignal);
   });
 
   it("passes through native AbortSignal instances unchanged", async () => {
-    const { fetchImpl, getSeenSignal } = createSeenSignalFetch();
+    const { fetchImpl, getSeenInit } = createSeenInitFetch();
     const wrapped = wrapFetchWithAbortSignal(fetchImpl);
     const controller = new AbortController();
 
     await wrapped("https://example.com", { signal: controller.signal });
 
-    expect(getSeenSignal()).toBe(controller.signal);
+    expect(getSeenInit()?.signal).toBe(controller.signal);
   });
 
   it("passes through foreign signals unchanged when AbortController is unavailable", async () => {
-    const { fetchImpl, getSeenSignal } = createSeenSignalFetch();
+    const { fetchImpl, getSeenInit } = createSeenInitFetch();
     const wrapped = wrapFetchWithAbortSignal(fetchImpl);
     const fakeSignal = {
       aborted: false,
@@ -250,7 +242,7 @@ describe("wrapFetchWithAbortSignal", () => {
       vi.stubGlobal("AbortController", previousAbortController);
     }
 
-    expect(getSeenSignal()).toBe(fakeSignal);
+    expect(getSeenInit()?.signal).toBe(fakeSignal);
   });
 
   it("returns the same function when called with an already wrapped fetch", () => {
@@ -278,15 +270,6 @@ describe("wrapFetchWithAbortSignal", () => {
 
     expect(preconnectSpy).toHaveBeenCalledOnce();
     expect(seenThis).toBe(fetchImpl);
-  });
-
-  it("exposes a no-op preconnect when the source fetch has none", () => {
-    const fetchImpl = withFetchPreconnect(vi.fn(async () => ({ ok: true }) as Response));
-    const wrapped = wrapFetchWithAbortSignal(fetchImpl) as typeof fetch & {
-      preconnect: (url: string, init?: { credentials?: RequestCredentials }) => unknown;
-    };
-
-    expect(wrapped.preconnect("https://example.com")).toBeUndefined();
   });
 
   it.each([

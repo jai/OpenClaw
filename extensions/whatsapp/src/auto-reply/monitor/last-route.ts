@@ -19,11 +19,10 @@ export function updateLastRouteInBackground(params: {
   backgroundTasks: Set<Promise<unknown>>;
   storeAgentId: string;
   sessionKey: string;
-  channel: "whatsapp";
   to: string;
   accountId?: string;
   ctx?: MsgContext;
-  warn: (obj: unknown, msg: string) => void;
+  warn: (obj: object, msg: string) => void;
 }) {
   const storePath = resolveStorePath(params.cfg.session?.store, {
     agentId: params.storeAgentId,
@@ -32,12 +31,12 @@ export function updateLastRouteInBackground(params: {
     storePath,
     sessionKey: params.sessionKey,
     deliveryContext: {
-      channel: params.channel,
+      channel: "whatsapp",
       to: params.to,
       accountId: params.accountId,
     },
     ctx: params.ctx,
-  }).catch((err) => {
+  }).catch((err: unknown) => {
     params.warn(
       {
         error: formatError(err),
@@ -49,13 +48,4 @@ export function updateLastRouteInBackground(params: {
     );
   });
   trackBackgroundTask(params.backgroundTasks, task);
-}
-
-export function awaitBackgroundTasks(backgroundTasks: Set<Promise<unknown>>) {
-  if (backgroundTasks.size === 0) {
-    return Promise.resolve();
-  }
-  return Promise.allSettled(backgroundTasks).then(() => {
-    backgroundTasks.clear();
-  });
 }

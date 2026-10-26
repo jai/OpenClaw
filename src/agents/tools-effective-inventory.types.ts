@@ -1,47 +1,30 @@
+/**
+ * Effective tool inventory contract types.
+ * Shared by agent/session tool inventory resolvers and UI/API callers that
+ * present enabled tools grouped by source.
+ */
+import type { ReplyToMode } from "../config/types.base.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { ProviderRuntimeModel } from "../plugins/provider-runtime-model.types.js";
+import type { ResolvedConversationCapabilityProfile } from "./conversation-capability-profile.js";
 
-export type EffectiveToolSource = "core" | "plugin" | "channel";
+export type {
+  ToolsEffectiveEntry as EffectiveToolInventoryEntry,
+  ToolsEffectiveGroup as EffectiveToolInventoryGroup,
+  ToolsEffectiveNotice as EffectiveToolInventoryNotice,
+  ToolsEffectiveResult as EffectiveToolInventoryResult,
+} from "../../packages/gateway-protocol/src/schema/tools-catalog.js";
 
-export type EffectiveToolInventoryEntry = {
-  id: string;
-  label: string;
-  description: string;
-  rawDescription: string;
-  source: EffectiveToolSource;
-  pluginId?: string;
-  channelId?: string;
-  risk?: "low" | "medium" | "high";
-  tags?: string[];
-};
-
-export type EffectiveToolInventoryGroup = {
-  id: EffectiveToolSource;
-  label: string;
-  source: EffectiveToolSource;
-  tools: EffectiveToolInventoryEntry[];
-};
-
-export type EffectiveToolInventoryNotice = {
-  id: string;
-  severity: "info" | "warning";
-  message: string;
-};
-
-export type EffectiveToolInventoryResult = {
-  agentId: string;
-  profile: string;
-  groups: EffectiveToolInventoryGroup[];
-  notices?: EffectiveToolInventoryNotice[];
-};
-
+/** Inputs for resolving the effective tool inventory in a session/runtime context. */
 export type ResolveEffectiveToolInventoryParams = {
   cfg: OpenClawConfig;
+  conversationCapabilityProfile?: ResolvedConversationCapabilityProfile;
   agentId?: string;
   sessionKey?: string;
+  sessionId?: string;
   workspaceDir?: string;
   agentDir?: string;
   messageProvider?: string;
-  senderIsOwner?: boolean;
   senderId?: string | null;
   senderName?: string | null;
   senderUsername?: string | null;
@@ -49,13 +32,16 @@ export type ResolveEffectiveToolInventoryParams = {
   accountId?: string | null;
   modelProvider?: string;
   modelId?: string;
+  modelApi?: string | null;
+  runtimeModel?: ProviderRuntimeModel;
   currentChannelId?: string;
   currentThreadTs?: string;
   currentMessageId?: string | number;
   groupId?: string | null;
   groupChannel?: string | null;
   groupSpace?: string | null;
-  replyToMode?: "off" | "first" | "all" | "batched";
+  replyToMode?: ReplyToMode;
+  webSearchEnabled?: boolean;
   modelHasVision?: boolean;
   requireExplicitMessageTarget?: boolean;
   disableMessageTool?: boolean;

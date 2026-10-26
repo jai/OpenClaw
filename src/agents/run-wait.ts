@@ -1,61 +1,58 @@
-import { callGateway } from "../gateway/call.js";
+import { setTimeout as delay } from "node:timers/promises";
+import {
+  normalizeAgentRunTimeoutPhase,
+  normalizeProviderStarted,
+} from "@openclaw/normalization-core/agent-run-terminal-outcome";
+import {
+  addTimerTimeoutGraceMs,
+  asDateTimestampMs,
+  clampTimerTimeoutMs,
+  parseFiniteNumber,
+  resolveDateTimestampMs,
+  resolveExpiresAtMsFromDurationMs,
+} from "@openclaw/normalization-core/number-coercion";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
+import { GatewayProtocolRequestError } from "../../packages/gateway-client/src/protocol-request.js";
+import type { callGateway } from "../gateway/call.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import { extractAssistantText, stripToolMessages } from "./tools/chat-history-text.js";
+import { hasRetryableConnectionErrorCode } from "../infra/retryable-network-errors.js";
+import {
+  getGatewayRestartDrainSignal,
+  isGatewayRestartDraining,
+} from "../process/gateway-work-admission.js";
+import { normalizeBlockedLivenessWaitStatus } from "../shared/agent-liveness.js";
+import { getAsyncWorkSignal } from "../shared/async-work-scope.js";
+import {
+  isOpenClawMessageToolMirrorAssistantMessage,
+  isTranscriptOnlyOpenClawAssistantMessage,
+} from "../shared/transcript-only-openclaw-assistant.js";
+import { sleep } from "../utils/sleep.js";
+import { buildAgentRunTerminalOutcomeFromWaitResult } from "./agent-run-terminal-outcome.js";
+import { normalizeAgentRunTerminalReceipt } from "./agent-run-terminal-receipt.js";
+import { normalizeAgentRunTerminalReplySnapshot } from "./agent-run-terminal-reply.js";
+import type { AgentWaitResult } from "./run-wait.types.js";
+import { extractStoredAssistantText, stripToolMessages } from "./tools/chat-history-text.js";
+import { bindAgentToolGatewayRequest } from "./tools/in-process-gateway.js";
+
+export type { AgentWaitResult };
 
 type GatewayCaller = typeof callGateway;
 
-const defaultRunWaitDeps = {
-  callGateway,
-};
+const AGENT_RUN_WAIT_RETRY_DELAY_MS = 100;
 
-let runWaitDeps: {
-  callGateway: GatewayCaller;
-} = defaultRunWaitDeps;
+function resolveRunWaitTimeoutMs(value: number | undefined): number {
+  return clampTimerTimeoutMs(parseFiniteNumber(value) ?? 1) ?? 1;
+}
 
-export type AssistantReplySnapshot = {
-  text?: string;
-  fingerprint?: string;
-};
-
-export type AgentWaitResult = {
-  status: "ok" | "timeout" | "error" | "pending";
-  error?: string;
-  startedAt?: number;
-  endedAt?: number;
-  stopReason?: string;
-  livenessState?: string;
-  yielded?: boolean;
-};
-
-export type AgentRunsDrainResult = {
-  timedOut: boolean;
-  pendingRunIds: string[];
-  deadlineAtMs: number;
-};
-
-type RawAgentWaitResponse = {
-  status?: string;
-  error?: string;
-  startedAt?: unknown;
-  endedAt?: unknown;
-  stopReason?: unknown;
-  livenessState?: unknown;
-  yielded?: unknown;
-};
-
-function normalizeAgentWaitResult(
-  status: AgentWaitResult["status"],
-  wait?: RawAgentWaitResponse,
-): AgentWaitResult {
-  return {
-    status,
-    error: typeof wait?.error === "string" ? wait.error : undefined,
-    startedAt: typeof wait?.startedAt === "number" ? wait.startedAt : undefined,
-    endedAt: typeof wait?.endedAt === "number" ? wait.endedAt : undefined,
-    stopReason: typeof wait?.stopReason === "string" ? wait.stopReason : undefined,
-    livenessState: typeof wait?.livenessState === "string" ? wait.livenessState : undefined,
-    yielded: wait?.yielded === true ? true : undefined,
-  };
+function resolveRunWaitDeadlineAtMs(params: { deadlineAtMs?: number; timeoutMs?: number }): number {
+  if (params.deadlineAtMs !== undefined) {
+    return asDateTimestampMs(params.deadlineAtMs) ?? resolveDateTimestampMs(Date.now());
+  }
+  return (
+    resolveExpiresAtMsFromDurationMs(resolveRunWaitTimeoutMs(params.timeoutMs)) ??
+    resolveDateTimestampMs(Date.now())
+  );
 }
 
 const RECOVERABLE_AGENT_WAIT_ERROR_PATTERNS: readonly RegExp[] = [
@@ -66,196 +63,244 @@ const RECOVERABLE_AGENT_WAIT_ERROR_PATTERNS: readonly RegExp[] = [
   /gateway not connected/i,
   /no active .* listener/i,
   /socket hang up/i,
-  /\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH)\b/i,
 ];
 
-export function isRecoverableAgentWaitError(error: string | undefined): boolean {
-  const message = error?.trim();
-  if (!message) {
-    return false;
-  }
-  if (message.includes("gateway timeout")) {
-    return false;
-  }
-  return RECOVERABLE_AGENT_WAIT_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+function normalizeAgentWaitError(cause: unknown): AgentWaitResult {
+  const error = formatErrorMessage(cause);
+  // A rejected observation during drain carries no terminal fact about the run.
+  const unavailable =
+    isGatewayRestartDraining() ||
+    (cause instanceof GatewayProtocolRequestError &&
+      cause.gatewayCode === "UNAVAILABLE" &&
+      cause.retryable);
+  const timedOut =
+    !unavailable &&
+    (error.includes("gateway timeout") || error.includes("gateway request timeout"));
+  const message = error.trim();
+  const retryable =
+    unavailable ||
+    (!timedOut &&
+      message &&
+      (hasRetryableConnectionErrorCode(message) ||
+        RECOVERABLE_AGENT_WAIT_ERROR_PATTERNS.some((pattern) => pattern.test(message))));
+  return {
+    status: timedOut ? "timeout" : "error",
+    error,
+    ...(retryable ? { retryableTransportError: true as const } : {}),
+  };
 }
 
-function normalizePendingRunIds(runIds: Iterable<string>): string[] {
-  const seen = new Set<string>();
-  for (const runId of runIds) {
-    const normalized = runId.trim();
-    if (!normalized || seen.has(normalized)) {
-      continue;
-    }
-    seen.add(normalized);
-  }
-  return [...seen];
+function normalizePendingRunIds(runIds: Iterable<string>): Set<string> {
+  return new Set(normalizeStringEntries([...runIds]));
 }
 
-function resolveLatestAssistantReplySnapshot(messages: unknown[]): AssistantReplySnapshot {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const candidate = messages[i];
-    if (!candidate || typeof candidate !== "object") {
-      continue;
-    }
-    if ((candidate as { role?: unknown }).role !== "assistant") {
-      continue;
-    }
-    const text = extractAssistantText(candidate);
-    if (!text?.trim()) {
-      continue;
-    }
-    let fingerprint: string | undefined;
-    try {
-      fingerprint = JSON.stringify(candidate);
-    } catch {
-      fingerprint = text;
-    }
-    return { text, fingerprint };
-  }
-  return {};
-}
-
-export async function readLatestAssistantReplySnapshot(params: {
-  sessionKey: string;
-  limit?: number;
-  callGateway?: GatewayCaller;
-}): Promise<AssistantReplySnapshot> {
-  const history = await (params.callGateway ?? runWaitDeps.callGateway)<{
-    messages: Array<unknown>;
-  }>({
-    method: "chat.history",
-    params: { sessionKey: params.sessionKey, limit: params.limit ?? 50 },
-  });
-  return resolveLatestAssistantReplySnapshot(
-    stripToolMessages(Array.isArray(history?.messages) ? history.messages : []),
+// chat.history projects forwarded inputs (sessions_send messages, cron run prompts) as
+// assistant rows; they keep their input provenance and are not replies.
+function isAssistantReplyTranscriptArtifact(message: unknown): boolean {
+  return (
+    isTranscriptOnlyOpenClawAssistantMessage(message) ||
+    isOpenClawMessageToolMirrorAssistantMessage(message) ||
+    (isRecord(message) &&
+      isRecord(message.provenance) &&
+      (message.provenance.kind === "inter_session" ||
+        message.provenance.kind === "internal_system"))
   );
+}
+
+function readOpenClawMessageMeta(message: unknown): Record<string, unknown> | undefined {
+  const meta = isRecord(message) ? message["__openclaw"] : undefined;
+  return isRecord(meta) ? meta : undefined;
 }
 
 export async function readLatestAssistantReply(params: {
   sessionKey: string;
+  agentId?: string;
+  /** Only rows written by this run qualify. */
+  runId?: string;
   limit?: number;
   callGateway?: GatewayCaller;
 }): Promise<string | undefined> {
-  return (
-    await readLatestAssistantReplySnapshot({
-      sessionKey: params.sessionKey,
-      limit: params.limit,
-      callGateway: params.callGateway,
-    })
-  ).text;
+  const callGateway = params.callGateway ?? bindAgentToolGatewayRequest({ hostedOnly: true });
+  const agentParams = params.agentId ? { agentId: params.agentId } : {};
+  const history = await callGateway<{ messages: unknown[] }>({
+    method: "chat.history",
+    params: { sessionKey: params.sessionKey, ...agentParams, limit: params.limit ?? 50 },
+  });
+  const messages = stripToolMessages(Array.isArray(history?.messages) ? history.messages : []);
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (isAssistantReplyTranscriptArtifact(message)) {
+      continue;
+    }
+    const meta = readOpenClawMessageMeta(message);
+    if (params.runId !== undefined && meta?.runId !== params.runId) {
+      continue;
+    }
+    const text = extractStoredAssistantText(message);
+    if (!text?.trim()) {
+      continue;
+    }
+    if (meta?.truncated !== true) {
+      return text;
+    }
+    // chat.history caps long rows for display; the marker text is not the reply.
+    if (typeof meta.id !== "string" || !meta.id) {
+      return undefined;
+    }
+    const full = await callGateway<{ ok?: boolean; message?: unknown }>({
+      method: "chat.message.get",
+      params: { sessionKey: params.sessionKey, ...agentParams, messageId: meta.id },
+    }).catch(() => undefined);
+    return full?.ok === true && readOpenClawMessageMeta(full.message)?.truncated !== true
+      ? extractStoredAssistantText(full.message)
+      : undefined;
+  }
+  return undefined;
 }
 
 export async function waitForAgentRun(params: {
   runId: string;
   timeoutMs: number;
   callGateway?: GatewayCaller;
+  signal?: AbortSignal;
 }): Promise<AgentWaitResult> {
-  const timeoutMs = Math.max(1, Math.floor(params.timeoutMs));
+  const timeoutMs = resolveRunWaitTimeoutMs(params.timeoutMs);
   try {
-    const wait = await (params.callGateway ?? runWaitDeps.callGateway)({
+    const wait = await (params.callGateway ?? bindAgentToolGatewayRequest({ hostedOnly: true }))({
       method: "agent.wait",
       params: {
         runId: params.runId,
         timeoutMs,
       },
-      timeoutMs: timeoutMs + 2000,
+      timeoutMs: addTimerTimeoutGraceMs(timeoutMs, 2_000),
+      ...(params.signal ? { signal: params.signal } : {}),
     });
-    if (wait?.status === "timeout") {
-      return normalizeAgentWaitResult("timeout", wait);
-    }
-    if (wait?.status === "pending") {
-      return normalizeAgentWaitResult("pending", wait);
-    }
-    if (wait?.status === "error") {
-      return normalizeAgentWaitResult("error", wait);
-    }
-    return normalizeAgentWaitResult("ok", wait);
-  } catch (err) {
-    const error = formatErrorMessage(err);
+    const rawStatus = wait?.status;
+    const status =
+      rawStatus === "timeout" || rawStatus === "pending" || rawStatus === "error"
+        ? rawStatus
+        : "ok";
+    const runId = params.runId;
+    const receipt = normalizeAgentRunTerminalReceipt(wait?.terminalReceipt);
+    const stopReason = typeof wait?.stopReason === "string" ? wait.stopReason : undefined;
+    const terminalOutcome = buildAgentRunTerminalOutcomeFromWaitResult({ ...wait, status });
+    const normalized =
+      terminalOutcome?.reason === "hard_timeout"
+        ? { status: terminalOutcome.status, error: terminalOutcome.error }
+        : normalizeBlockedLivenessWaitStatus({
+            status: terminalOutcome?.status ?? status,
+            livenessState: wait?.livenessState,
+            error: terminalOutcome?.error,
+          });
     return {
-      status: error.includes("gateway timeout") ? "timeout" : "error",
-      error,
+      status: normalized.status,
+      error: normalized.error,
+      startedAt: typeof wait?.startedAt === "number" ? wait.startedAt : undefined,
+      endedAt: typeof wait?.endedAt === "number" ? wait.endedAt : undefined,
+      stopReason,
+      livenessState: typeof wait?.livenessState === "string" ? wait.livenessState : undefined,
+      yielded: wait?.yielded === true ? true : undefined,
+      pendingError: wait?.pendingError === true ? true : undefined,
+      timeoutPhase: normalizeAgentRunTimeoutPhase(wait?.timeoutPhase),
+      providerStarted: normalizeProviderStarted(wait?.providerStarted),
+      terminalReply: normalizeAgentRunTerminalReplySnapshot(wait?.terminalReply),
+      sourceReplyDelivered:
+        receipt?.runId === runId && receipt.sourceReplyDelivered === true ? true : undefined,
     };
+  } catch (err) {
+    return normalizeAgentWaitError(err);
   }
 }
 
-export async function waitForAgentRunAndReadUpdatedAssistantReply(params: {
+/** Retry-grace and observation timeouts do not settle the accepted run. */
+export function isTerminalAgentWaitTimeout(wait: AgentWaitResult): boolean {
+  return (
+    wait.status === "timeout" &&
+    wait.pendingError !== true &&
+    (wait.endedAt !== undefined ||
+      Boolean(wait.stopReason || wait.livenessState) ||
+      buildAgentRunTerminalOutcomeFromWaitResult(wait)?.reason === "hard_timeout")
+  );
+}
+
+/** Read the completed run's reply without inferring delivery from display history. */
+export async function waitForAgentRunReply(params: {
   runId: string;
-  sessionKey: string;
   timeoutMs: number;
-  limit?: number;
-  baseline?: AssistantReplySnapshot;
   callGateway?: GatewayCaller;
+  untilTerminal?: true;
 }): Promise<AgentWaitResult & { replyText?: string }> {
-  const wait = await waitForAgentRun({
-    runId: params.runId,
-    timeoutMs: params.timeoutMs,
-    callGateway: params.callGateway,
-  });
-  if (wait.status !== "ok") {
-    return wait;
+  const scopeSignal = getAsyncWorkSignal();
+  const signal = params.untilTerminal
+    ? AbortSignal.any([getGatewayRestartDrainSignal(), ...(scopeSignal ? [scopeSignal] : [])])
+    : undefined;
+  let wait: AgentWaitResult;
+  for (;;) {
+    signal?.throwIfAborted();
+    wait = await waitForAgentRun({ ...params, signal });
+    signal?.throwIfAborted();
+    if (
+      !params.untilTerminal ||
+      !(
+        wait.status === "pending" ||
+        (wait.status === "timeout" &&
+          wait.timeoutPhase !== "gateway_draining" &&
+          !isTerminalAgentWaitTimeout(wait) &&
+          (wait.pendingError === true || !wait.error))
+      )
+    ) {
+      break;
+    }
+    // Queued and retry-grace snapshots can return immediately. Retain the
+    // accepted run's observation without spinning or extending its execution.
+    await delay(AGENT_RUN_WAIT_RETRY_DELAY_MS, undefined, { signal, ref: false });
   }
-
-  const latestReply = await readLatestAssistantReplySnapshot({
-    sessionKey: params.sessionKey,
-    limit: params.limit,
-    callGateway: params.callGateway,
-  });
-  const baselineFingerprint = params.baseline?.fingerprint;
-  const replyText =
-    latestReply.text && (!baselineFingerprint || latestReply.fingerprint !== baselineFingerprint)
-      ? latestReply.text
-      : undefined;
-  return {
-    status: "ok",
-    replyText,
-  };
+  return wait.status === "ok" && wait.terminalReply?.disposition === "visible"
+    ? { ...wait, replyText: wait.terminalReply.text }
+    : wait;
 }
 
+/** Wait until the current and newly spawned pending run IDs are drained or timed out. */
 export async function waitForAgentRunsToDrain(params: {
-  getPendingRunIds: () => Iterable<string>;
+  getPendingRunIds: () => Promise<Iterable<string>>;
   initialPendingRunIds?: Iterable<string>;
   timeoutMs?: number;
   deadlineAtMs?: number;
   callGateway?: GatewayCaller;
-}): Promise<AgentRunsDrainResult> {
-  const deadlineAtMs =
-    params.deadlineAtMs ?? Date.now() + Math.max(1, Math.floor(params.timeoutMs ?? 0));
+}): Promise<void> {
+  const deadlineWallAtMs = resolveRunWaitDeadlineAtMs(params);
+  const deadlineAtMs = performance.now() + Math.max(0, deadlineWallAtMs - Date.now());
+  const callGateway = params.callGateway ?? bindAgentToolGatewayRequest({ hostedOnly: true });
 
   // Runs may finish and spawn more runs, so refresh until no pending IDs remain.
-  let pendingRunIds = new Set<string>(
-    normalizePendingRunIds(params.initialPendingRunIds ?? params.getPendingRunIds()),
+  let pendingRunIds = normalizePendingRunIds(
+    params.initialPendingRunIds ?? (await params.getPendingRunIds()),
   );
 
-  while (pendingRunIds.size > 0 && Date.now() < deadlineAtMs) {
-    const remainingMs = Math.max(1, deadlineAtMs - Date.now());
+  while (pendingRunIds.size > 0 && performance.now() < deadlineAtMs) {
+    const remainingMs = Math.max(1, deadlineAtMs - performance.now());
     await Promise.allSettled(
       [...pendingRunIds].map((runId) =>
         waitForAgentRun({
           runId,
           timeoutMs: remainingMs,
-          callGateway: params.callGateway,
+          callGateway,
         }),
       ),
     );
-    pendingRunIds = new Set<string>(normalizePendingRunIds(params.getPendingRunIds()));
+    const previousRunIds = pendingRunIds;
+    pendingRunIds = normalizePendingRunIds(await params.getPendingRunIds());
+    const retryDelayMs = Math.min(AGENT_RUN_WAIT_RETRY_DELAY_MS, deadlineAtMs - performance.now());
+    if (
+      retryDelayMs > 0 &&
+      pendingRunIds.size > 0 &&
+      pendingRunIds.size === previousRunIds.size &&
+      [...pendingRunIds].every((runId) => previousRunIds.has(runId))
+    ) {
+      // Queued or cached waits can resolve immediately. Let completion callbacks
+      // run instead of repeatedly scanning an unchanged registry in microtasks.
+      await sleep(retryDelayMs);
+      pendingRunIds = normalizePendingRunIds(await params.getPendingRunIds());
+    }
   }
-
-  return {
-    timedOut: pendingRunIds.size > 0,
-    pendingRunIds: [...pendingRunIds],
-    deadlineAtMs,
-  };
 }
-
-export const __testing = {
-  setDepsForTest(overrides?: Partial<{ callGateway: GatewayCaller }>) {
-    runWaitDeps = overrides
-      ? {
-          ...defaultRunWaitDeps,
-          ...overrides,
-        }
-      : defaultRunWaitDeps;
-  },
-};

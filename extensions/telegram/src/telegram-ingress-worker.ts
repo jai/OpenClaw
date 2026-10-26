@@ -1,5 +1,15 @@
-import { Worker } from "node:worker_threads";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { TelegramNetworkConfig } from "openclaw/plugin-sdk/config-contracts";
+import {
+  createCpuTrackedWorker,
+  createPluginRuntimeProcessEntrypoint,
+  resolveRuntimeWorkerArgv,
+  resolveRuntimeWorkerUrl,
+} from "openclaw/plugin-sdk/process-runtime";
+import { raceWithTimeout } from "openclaw/plugin-sdk/time-runtime";
+
+export const TELEGRAM_INGRESS_WORKER_RUNTIME_MARKER = "openclaw.telegram-ingress-worker";
+const TELEGRAM_INGRESS_WORKER_STOP_GRACE_MS = 2_000;
 
 export type TelegramIngressWorkerMessage =
   | {
@@ -16,27 +26,58 @@ export type TelegramIngressWorkerMessage =
   | {
       type: "poll-error";
       message: string;
+      /** Telegram Bot API error_code (e.g. 409 for getUpdates conflicts). */
+      errorCode?: number;
+      /** Actual server-directed flood wait currently being honored by the worker. */
+      retryAfterMs?: number;
       finishedAt: number;
     }
   | {
       type: "spooled";
       updateId: number;
       queued: number;
+    }
+  | {
+      type: "updates";
+      requestId: string;
+      updates: unknown[];
+      queued: number;
+    };
+
+export type TelegramIngressWorkerCommand =
+  | {
+      type: "stop";
+    }
+  | {
+      type: "spool-ack";
+      requestId: string;
+      result:
+        | {
+            ok: true;
+            updateId: number;
+          }
+        | {
+            ok: false;
+            message: string;
+          };
     };
 
 export type TelegramIngressWorkerOptions = {
   token: string;
   accountId: string;
   initialUpdateId: number | null;
-  spoolDir: string;
   apiRoot?: string;
   timeoutSeconds?: number;
   network?: TelegramNetworkConfig;
   proxy?: string;
 };
 
-export type TelegramIngressWorkerHandle = {
-  onMessage(listener: (message: TelegramIngressWorkerMessage) => void): () => void;
+type TelegramIngressWorkerHandle = {
+  onMessage?: (message: TelegramIngressWorkerMessage) => void;
+  ackSpooledUpdate?(
+    requestId: string,
+    result: Extract<TelegramIngressWorkerCommand, { type: "spool-ack" }>["result"],
+  ): void;
   stop(): Promise<void>;
   task(): Promise<void>;
 };
@@ -46,9 +87,12 @@ export type TelegramIngressWorkerFactory = (
 ) => TelegramIngressWorkerHandle;
 
 export const createTelegramIngressWorker: TelegramIngressWorkerFactory = (options) => {
-  const listeners = new Set<(message: TelegramIngressWorkerMessage) => void>();
-  const worker = new Worker(new URL("./telegram-ingress-worker.runtime.js", import.meta.url), {
-    workerData: options,
+  const workerUrl = resolveRuntimeWorkerUrl(
+    createPluginRuntimeProcessEntrypoint("telegramIngress", import.meta.url),
+  );
+  const worker = createCpuTrackedWorker(workerUrl, {
+    execArgv: resolveRuntimeWorkerArgv(workerUrl).slice(0, -1),
+    workerData: { ...options, runtime: TELEGRAM_INGRESS_WORKER_RUNTIME_MARKER },
   });
   const taskPromise = new Promise<void>((resolve, reject) => {
     worker.once("error", reject);
@@ -60,34 +104,44 @@ export const createTelegramIngressWorker: TelegramIngressWorkerFactory = (option
       reject(new Error(`Telegram ingress worker exited with code ${code}`));
     });
   });
-  worker.on("message", (message: TelegramIngressWorkerMessage) => {
-    for (const listener of listeners) {
-      listener(message);
-    }
-  });
+  // Keep the constructing plugin's runtime even if another scope assigns onMessage.
+  worker.on(
+    "message",
+    AsyncLocalStorage.bind((message: TelegramIngressWorkerMessage) => {
+      handle.onMessage?.(message);
+    }),
+  );
 
-  return {
-    onMessage(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
+  const handle: TelegramIngressWorkerHandle = {
+    ackSpooledUpdate(requestId, result) {
+      try {
+        worker.postMessage(
+          {
+            type: "spool-ack",
+            requestId,
+            result,
+          } satisfies TelegramIngressWorkerCommand,
+          [],
+        );
+      } catch {
+        // Worker may have exited after the parent committed the queue write.
+      }
     },
     async stop() {
-      // oxlint-disable-next-line unicorn/require-post-message-target-origin -- Node worker_threads workers do not accept a targetOrigin argument.
-      worker.postMessage({ type: "stop" });
-      const timeout = setTimeout(() => {
-        void worker.terminate();
-      }, 15_000);
-      timeout.unref?.();
-      try {
-        await taskPromise.catch(() => undefined);
-      } finally {
-        clearTimeout(timeout);
-      }
+      // Forced termination is replay-safe: the parent commits each batch before its ACK.
+      await raceWithTimeout(
+        () => {
+          worker.postMessage({ type: "stop" } satisfies TelegramIngressWorkerCommand, []);
+          return taskPromise.catch(() => undefined);
+        },
+        TELEGRAM_INGRESS_WORKER_STOP_GRACE_MS,
+        () => worker.terminate().then(() => undefined),
+        { ref: false },
+      );
     },
     task() {
       return taskPromise;
     },
   };
+  return handle;
 };

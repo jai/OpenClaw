@@ -1,65 +1,55 @@
+import {
+  PRECOMPUTED_SUBCOMMAND_HELP_NAMES,
+  type PrecomputedCommandHelpName,
+  type PrecomputedSubcommandHelpName,
+} from "./precomputed-help-commands.js";
 import { readCliStartupMetadata } from "./startup-metadata.js";
 
-let precomputedRootHelpText: string | null | undefined;
-let precomputedBrowserHelpText: string | null | undefined;
+type PrecomputedHelpTextKey =
+  | "rootHelpText"
+  | "browserHelpText"
+  | "secretsHelpText"
+  | "nodesHelpText"
+  | PrecomputedSubcommandHelpName;
 
-function loadPrecomputedHelpText(
-  key: "rootHelpText" | "browserHelpText",
-  cache: string | null | undefined,
-  setCache: (value: string | null) => void,
-): string | null {
-  if (cache !== undefined) {
-    return cache;
-  }
-  try {
-    const parsed = readCliStartupMetadata(import.meta.url);
-    if (parsed) {
-      const value = parsed[key];
-      if (typeof value === "string" && value.length > 0) {
-        setCache(value);
-        return value;
-      }
+function outputPrecomputedHelpText(key: PrecomputedHelpTextKey): boolean {
+  const parsed = readCliStartupMetadata(import.meta.url);
+  let value: unknown;
+  if (isPrecomputedSubcommandHelpName(key)) {
+    const subcommandHelpText = parsed?.subcommandHelpText;
+    if (isSubcommandHelpTextRecord(subcommandHelpText)) {
+      value = subcommandHelpText[key];
     }
-  } catch {
-    // Fall back to live help rendering.
+  } else if (parsed) {
+    value = parsed[key];
   }
-  setCache(null);
-  return null;
-}
-
-export function loadPrecomputedRootHelpText(): string | null {
-  return loadPrecomputedHelpText("rootHelpText", precomputedRootHelpText, (value) => {
-    precomputedRootHelpText = value;
-  });
-}
-
-export function loadPrecomputedBrowserHelpText(): string | null {
-  return loadPrecomputedHelpText("browserHelpText", precomputedBrowserHelpText, (value) => {
-    precomputedBrowserHelpText = value;
-  });
+  const helpText = typeof value === "string" && value.length > 0 ? value : null;
+  if (!helpText) {
+    return false;
+  }
+  process.stdout.write(helpText);
+  return true;
 }
 
 export function outputPrecomputedRootHelpText(): boolean {
-  const rootHelpText = loadPrecomputedRootHelpText();
-  if (!rootHelpText) {
-    return false;
-  }
-  process.stdout.write(rootHelpText);
-  return true;
+  return outputPrecomputedHelpText("rootHelpText");
 }
 
-export function outputPrecomputedBrowserHelpText(): boolean {
-  const browserHelpText = loadPrecomputedBrowserHelpText();
-  if (!browserHelpText) {
-    return false;
-  }
-  process.stdout.write(browserHelpText);
-  return true;
+export function outputPrecomputedCommandHelpText(commandName: PrecomputedCommandHelpName): boolean {
+  const key: PrecomputedHelpTextKey = isPrecomputedSubcommandHelpName(commandName)
+    ? commandName
+    : `${commandName}HelpText`;
+  return outputPrecomputedHelpText(key);
 }
 
-export const __testing = {
-  resetPrecomputedRootHelpTextForTests(): void {
-    precomputedRootHelpText = undefined;
-    precomputedBrowserHelpText = undefined;
-  },
-};
+function isPrecomputedSubcommandHelpName(
+  commandName: string,
+): commandName is PrecomputedSubcommandHelpName {
+  return PRECOMPUTED_SUBCOMMAND_HELP_NAMES.some((name) => name === commandName);
+}
+
+function isSubcommandHelpTextRecord(
+  value: unknown,
+): value is Partial<Record<PrecomputedSubcommandHelpName, unknown>> {
+  return typeof value === "object" && value !== null;
+}

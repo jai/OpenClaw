@@ -1,3 +1,4 @@
+/** Trim a configured model id, fall back when empty, and strip known prefixes. */
 export function normalizeEmbeddingModelWithPrefixes(params: {
   model: string;
   defaultModel: string;

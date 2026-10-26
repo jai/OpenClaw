@@ -1,308 +1,220 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import type {
-  MemorySearchConfig,
-  OpenClawConfig,
+import { DatabaseSync } from "node:sqlite";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
+import {
+  resolveMemorySearchConfig,
+  type OpenClawConfig,
 } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MEMORY_INDEX_CHUNKS_TABLE } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import { createOpenClawTestState } from "openclaw/plugin-sdk/test-state";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  configureMemoryCoreDreamingStateForTests,
+  resetMemoryCoreDreamingStateForTests,
+} from "../test-helpers.js";
+import { runInMemoryTestBackgroundContext } from "./background-context.test-support.js";
+import { MemoryIndexDatabase } from "./manager-database-context.js";
+import { MemoryIndexManager } from "./manager.js";
 
-type WatchIgnoredFn = (watchPath: string, stats?: { isDirectory?: () => boolean }) => boolean;
-
-const { createdWatchers, memoryLoggerWarn, watchMock } = vi.hoisted(() => {
-  type WatchEvent = "add" | "change" | "unlink" | "unlinkDir" | "error";
-  type WatchCallback = (...args: unknown[]) => void;
-  function createMockWatcher() {
-    const handlers = new Map<WatchEvent, WatchCallback[]>();
-    const watcher = {
-      on: vi.fn((event: WatchEvent, callback: WatchCallback) => {
-        handlers.set(event, [...(handlers.get(event) ?? []), callback]);
-        return watcher;
-      }),
-      close: vi.fn(async () => undefined),
-      emit: (event: WatchEvent, ...args: unknown[]) => {
-        for (const callback of handlers.get(event) ?? []) {
-          callback(...args);
-        }
-      },
-    };
-    return watcher;
-  }
-  const watchers: Array<ReturnType<typeof createMockWatcher>> = [];
-  const result = {
-    createdWatchers: watchers,
-    memoryLoggerWarn: vi.fn(),
-    watchMock: vi.fn(() => {
-      const watcher = createMockWatcher();
-      watchers.push(watcher);
-      return watcher;
-    }),
-  };
-  (globalThis as Record<PropertyKey, unknown>)[Symbol.for("openclaw.test.memoryWatchFactory")] =
-    result.watchMock;
-  return result;
-});
-
-vi.mock("openclaw/plugin-sdk/memory-core-host-engine-foundation", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("openclaw/plugin-sdk/memory-core-host-engine-foundation")>();
+// Keep owner fault injection in this process; real worker transport has separate coverage.
+vi.mock("./local-file-watcher.js", async (original) => {
+  const { MemoryFileWatcher } = await import("./file-watcher.js");
   return {
-    ...actual,
-    createSubsystemLogger: (subsystem: string) => ({
-      ...actual.createSubsystemLogger(subsystem),
-      warn: memoryLoggerWarn,
-    }),
+    ...(await original<typeof import("./local-file-watcher.js")>()),
+    LocalMemoryFileWatcher: MemoryFileWatcher,
   };
 });
 
-vi.mock("./sqlite-vec.js", () => ({
-  loadSqliteVecExtension: async () => ({ ok: false, error: "sqlite-vec disabled in tests" }),
+const observer = await vi.hoisted(async () => {
+  const { createMemoryObservationHarness } = await import("./watcher-test-support.js");
+  return createMemoryObservationHarness();
+});
+vi.mock("openclaw/plugin-sdk/file-access-runtime", async (original) => ({
+  ...(await original<typeof import("openclaw/plugin-sdk/file-access-runtime")>()),
+  watch: observer.watch,
 }));
 
-vi.mock("./embeddings.js", () => ({
-  createEmbeddingProvider: async () => ({
-    requestedProvider: "openai",
-    provider: {
-      id: "mock",
-      model: "mock-embed",
-      embedQuery: async () => [1, 0],
-      embedBatch: async (texts: string[]) => texts.map(() => [1, 0]),
-    },
-  }),
-}));
-
-import {
-  clearMemoryEmbeddingProviders as clearRegistry,
-  registerMemoryEmbeddingProvider as registerAdapter,
-} from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
-import {
-  closeAllMemorySearchManagers,
-  getMemorySearchManager,
-  type MemoryIndexManager,
-} from "./index.js";
-import { registerBuiltInMemoryEmbeddingProviders } from "./provider-adapters.js";
-
-describe("memory watcher config", () => {
+describe("Memory watch configuration", () => {
+  let state: Awaited<ReturnType<typeof createOpenClawTestState>>;
   let manager: MemoryIndexManager | null = null;
-  let workspaceDir = "";
-  let extraDir = "";
-
   beforeEach(async () => {
-    vi.clearAllMocks();
-    clearRegistry();
-    registerBuiltInMemoryEmbeddingProviders({ registerMemoryEmbeddingProvider: registerAdapter });
+    observer.reset();
+    vi.stubEnv("CHOKIDAR_USEPOLLING", "false");
+    vi.stubEnv("CHOKIDAR_INTERVAL", undefined);
+    state = await createOpenClawTestState({ label: "memory-watch-config" });
+    await fs.mkdir(path.join(state.workspaceDir, "memory"));
+    await fs.mkdir(state.path("extra"));
   });
-
-  afterAll(() => {
-    Reflect.deleteProperty(globalThis, Symbol.for("openclaw.test.memoryWatchFactory"));
-  });
-
   afterEach(async () => {
+    await manager?.close();
+    manager = null;
+    vi.restoreAllMocks();
     vi.useRealTimers();
-    watchMock.mockClear();
-    createdWatchers.length = 0;
-    if (manager) {
-      await manager.close();
-      manager = null;
-    }
-    await closeAllMemorySearchManagers();
-    clearRegistry();
-    if (workspaceDir) {
-      await fs.rm(workspaceDir, { recursive: true, force: true });
-      workspaceDir = "";
-      extraDir = "";
-    }
+    vi.unstubAllEnvs();
+    resetMemoryCoreDreamingStateForTests();
+    await state.cleanup();
   });
-
-  async function setupWatcherWorkspace(seedFile: { name: string; contents: string }) {
-    workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-memory-watch-"));
-    extraDir = path.join(workspaceDir, "extra");
-    await fs.mkdir(path.join(workspaceDir, "memory"), { recursive: true });
-    await fs.mkdir(extraDir, { recursive: true });
-    await fs.writeFile(path.join(extraDir, seedFile.name), seedFile.contents);
-  }
-
-  function createWatcherConfig(overrides?: Partial<MemorySearchConfig>): OpenClawConfig {
-    const defaults: NonNullable<NonNullable<OpenClawConfig["agents"]>["defaults"]> = {
-      workspace: workspaceDir,
-      memorySearch: {
-        provider: "openai",
-        model: "mock-embed",
-        store: { path: path.join(workspaceDir, "index.sqlite"), vector: { enabled: false } },
-        sync: { watch: true, watchDebounceMs: 25, onSessionStart: false, onSearch: false },
-        query: { minScore: 0, hybrid: { enabled: false } },
-        extraPaths: [extraDir],
-        ...overrides,
+  async function openManager(text: string) {
+    const file = path.join(state.workspaceDir, "memory", "note.md");
+    await fs.writeFile(file, text);
+    await configureMemoryCoreDreamingStateForTests(state.env);
+    const cfg: OpenClawConfig = {
+      plugins: { enabled: false },
+      agents: { defaults: { workspace: state.workspaceDir }, entries: { main: {} } },
+      memory: {
+        search: {
+          provider: "none",
+          sources: ["memory"],
+          store: { vector: { enabled: false } },
+          extraPaths: [state.path("extra")],
+        },
       },
     };
-    return {
-      memory: { backend: "builtin" },
-      agents: {
-        defaults,
-        list: [{ id: "main", default: true }],
-      },
-    } as OpenClawConfig;
-  }
-
-  async function expectWatcherManager(cfg: OpenClawConfig) {
-    const result = await getMemorySearchManager({ cfg, agentId: "main" });
-    if (!result.manager) {
-      throw new Error("manager missing");
-    }
-    expect(result.manager.status().backend).toBe("builtin");
-    expect(result.manager.status().sources).toContain("memory");
-    manager = result.manager as unknown as MemoryIndexManager;
-  }
-
-  it("watches the memory directory and ignores non-markdown churn", async () => {
-    await setupWatcherWorkspace({ name: "notes.md", contents: "hello" });
-    const cfg = createWatcherConfig();
-
-    await expectWatcherManager(cfg);
-
-    expect(watchMock).toHaveBeenCalledTimes(1);
-    const [watchedPaths, options] = watchMock.mock.calls[0] as unknown as [
-      string[],
-      Record<string, unknown>,
-    ];
-    expect(watchedPaths).toStrictEqual([
-      path.join(workspaceDir, "MEMORY.md"),
-      path.join(workspaceDir, "memory"),
-      extraDir,
-    ]);
-    expect(watchedPaths.filter((watchedPath) => watchedPath.includes("*"))).toEqual([]);
-    expect(options.ignoreInitial).toBe(true);
-    expect(options).not.toHaveProperty("awaitWriteFinish");
-
-    const ignored = options.ignored as WatchIgnoredFn | undefined;
-    expect(ignored).toBeTypeOf("function");
-    expect(ignored?.(path.join(workspaceDir, "memory", "node_modules", "pkg", "index.md"))).toBe(
-      true,
-    );
-    expect(ignored?.(path.join(workspaceDir, "memory", ".venv", "lib", "python.md"))).toBe(true);
-    expect(ignored?.(path.join(workspaceDir, "memory", "project", "notes.tmp"), {})).toBe(true);
-    expect(ignored?.(path.join(workspaceDir, "memory", "project", "notes.json"), {})).toBe(true);
-    expect(ignored?.(path.join(workspaceDir, "memory", "project", "notes.json"), undefined)).toBe(
-      false,
-    );
-    expect(ignored?.(path.join(workspaceDir, "memory", "project", "notes.md"))).toBe(false);
-    expect(ignored?.(path.join(workspaceDir, "memory", "project", "notes.md"), {})).toBe(false);
-    expect(
-      ignored?.(path.join(workspaceDir, "memory", "project"), { isDirectory: () => true }),
-    ).toBe(false);
-  });
-
-  it("does not start watchers for one-shot CLI managers", async () => {
-    await setupWatcherWorkspace({ name: "notes.md", contents: "hello" });
-    const cfg = createWatcherConfig();
-
-    const result = await getMemorySearchManager({ cfg, agentId: "main", purpose: "cli" });
-    if (!result.manager) {
-      throw new Error("manager missing");
-    }
-    manager = result.manager as unknown as MemoryIndexManager;
-
-    expect(watchMock).not.toHaveBeenCalled();
-  });
-
-  it("watches multimodal extra directories with filtered extensions", async () => {
-    await setupWatcherWorkspace({ name: "PHOTO.PNG", contents: "png" });
-    const cfg = createWatcherConfig({
-      provider: "gemini",
-      model: "gemini-embedding-2-preview",
-      fallback: "none",
-      multimodal: { enabled: true, modalities: ["image", "audio"] },
+    manager = await MemoryIndexManager.get({
+      runInBackgroundContext: runInMemoryTestBackgroundContext,
+      cfg,
+      agentId: "main",
     });
+    if (!manager) {
+      throw new Error("memory manager unavailable");
+    }
+    await manager.sync({ reason: "initial" });
+    const lifecycle = manager as unknown as { awaitManagerIdle: () => Promise<void> };
+    return { file, cfg, active: manager, idle: () => lifecycle.awaitManagerIdle() };
+  }
+  const snippets = async (active: MemoryIndexManager, text: string) =>
+    (await active.search(text, { minScore: 0 })).map((result) => result.snippet);
 
-    await expectWatcherManager(cfg);
-
-    expect(watchMock).toHaveBeenCalledTimes(1);
-    const [watchedPaths, options] = watchMock.mock.calls[0] as unknown as [
-      string[],
-      Record<string, unknown>,
-    ];
-    expect(watchedPaths).toStrictEqual([
-      path.join(workspaceDir, "MEMORY.md"),
-      path.join(workspaceDir, "memory"),
-      extraDir,
-    ]);
-    expect(watchedPaths.filter((watchedPath) => watchedPath.includes("*"))).toEqual([]);
-
-    const ignored = options.ignored as WatchIgnoredFn | undefined;
-    expect(ignored).toBeTypeOf("function");
-    expect(ignored?.(path.join(extraDir, "nested", "PHOTO.PNG"))).toBe(false);
-    expect(ignored?.(path.join(extraDir, "nested", "PHOTO.PNG"), {})).toBe(false);
-    expect(ignored?.(path.join(extraDir, "nested", "voice.WAV"))).toBe(false);
-    expect(ignored?.(path.join(extraDir, "nested", "voice.WAV"), {})).toBe(false);
-    expect(ignored?.(path.join(extraDir, "nested", "metadata.json"), {})).toBe(true);
-  });
-
-  it.each(["add", "change", "unlink", "unlinkDir"] as const)(
-    "schedules watch sync on %s",
-    async (event) => {
-      await setupWatcherWorkspace({ name: "notes.md", contents: "hello" });
-      const cfg = createWatcherConfig();
-
-      await expectWatcherManager(cfg);
-      vi.useFakeTimers();
-      const syncSpy = vi
-        .spyOn(
-          manager as unknown as {
-            sync: (params?: { reason?: string }) => Promise<void>;
-          },
-          "sync",
-        )
-        .mockResolvedValue(undefined);
-
-      createdWatchers[0]?.emit(event);
-      await vi.advanceTimersByTimeAsync(25);
-
-      expect(syncSpy).toHaveBeenCalledWith({ reason: "watch" });
-    },
-  );
-
-  it("settles changed file stats before running watch sync", async () => {
-    await setupWatcherWorkspace({ name: "notes.md", contents: "hello" });
-    const cfg = createWatcherConfig();
-
-    await expectWatcherManager(cfg);
+  it("keeps a newer selected-file dirty behind held settling before publishing the index", async () => {
+    const { file, cfg, active, idle } = await openManager("Initial indexed text.");
+    const debounceMs = resolveMemorySearchConfig(cfg, "main")!.sync.watchDebounceMs;
+    const indexPath = active.status().dbPath;
+    if (!indexPath) {
+      throw new Error("memory index path unavailable");
+    }
+    const index = new DatabaseSync(indexPath, { readOnly: true });
+    const rows = index.prepare(
+      `SELECT path, text FROM ${MEMORY_INDEX_CHUNKS_TABLE} ORDER BY path, start_line`,
+    );
+    const initial = [{ path: "memory/note.md", text: "Initial indexed text." }];
+    const entry = observer.observations.find(({ root, options }) =>
+      options.scopes.some(
+        (scope) =>
+          path.resolve(root.rootDir, scope.path) === path.join(state.workspaceDir, "memory"),
+      ),
+    );
+    if (!entry) {
+      throw new Error("Missing memory observation");
+    }
+    const entered = createDeferred<void>();
+    const release = createDeferred<void>();
+    const sampled = Array.from({ length: 4 }, () => createDeferred<void>());
+    const open = entry.root.open.bind(entry.root);
+    let sample = 0;
+    vi.spyOn(entry.root, "open").mockImplementation(async (...args) => {
+      const opened = await open(...args);
+      const current = sample++;
+      const dispose = opened[Symbol.asyncDispose].bind(opened);
+      vi.spyOn(opened, Symbol.asyncDispose).mockImplementation(async () => {
+        await dispose();
+        sampled[current]?.resolve();
+      });
+      if (current === 0) {
+        entered.resolve();
+        await release.promise;
+      }
+      return opened;
+    });
+    const write = vi.spyOn(MemoryIndexDatabase.prototype, "replaceSource");
+    const dirty = () =>
+      entry.dirty([{ path: path.relative(entry.root.rootDir, file), type: "content" }]);
     vi.useFakeTimers();
-    const notesPath = path.join(extraDir, "notes.md");
-    const initialStats = await fs.stat(notesPath);
-    const syncSpy = vi
-      .spyOn(
-        manager as unknown as {
-          sync: (params?: { reason?: string }) => Promise<void>;
-        },
-        "sync",
-      )
-      .mockResolvedValue(undefined);
+    try {
+      expect(active.status().dirty).toBe(false);
+      await fs.writeFile(file, "Intermediate write.");
+      dirty();
+      expect(active.status().dirty).toBe(true);
+      expect(write).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(debounceMs);
+      await entered.promise;
+      await fs.writeFile(file, "Newest settled indexed text.");
+      dirty();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(write).not.toHaveBeenCalled();
+      expect(rows.all()).toEqual(initial);
 
-    createdWatchers[0]?.emit("change", notesPath, {
-      size: initialStats.size,
-      mtimeMs: initialStats.mtimeMs,
-      isDirectory: () => false,
-    });
-    await fs.writeFile(notesPath, "hello updated");
+      // An old sample cannot erase a newer event or publish an unsettled generation.
+      release.resolve();
+      await sampled[0]!.promise;
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100);
+      await sampled[1]!.promise;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(write).not.toHaveBeenCalled();
+      expect(rows.all()).toEqual(initial);
 
-    await vi.advanceTimersByTimeAsync(25);
-    expect(syncSpy).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(25);
-    expect(syncSpy).toHaveBeenCalledWith({ reason: "watch" });
+      await vi.advanceTimersByTimeAsync(debounceMs);
+      await sampled[2]!.promise;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(write).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(100);
+      await sampled[3]!.promise;
+      await vi.advanceTimersByTimeAsync(0);
+      await idle();
+      expect(write).toHaveBeenCalled();
+      expect(rows.all()).toEqual([
+        { path: "memory/note.md", text: "Newest settled indexed text." },
+      ]);
+      expect(sample).toBe(4);
+    } finally {
+      release.resolve();
+      await active.close();
+      index.close();
+    }
   });
 
-  it("attaches a logging non-throwing watcher error listener", async () => {
-    await setupWatcherWorkspace({ name: "notes.md", contents: "hello" });
-    const cfg = createWatcherConfig();
+  it("refreshes every search after watch-limit without further notifications", async () => {
+    const { file, active, idle } = await openManager("Amber lantern baseline.");
+    vi.useFakeTimers();
+    observer.observations[0]!.health({
+      state: "unavailable",
+      failure: { operation: "watch", code: "watch-limit", error: new Error("watch limit") },
+    });
+    for (const text of ["Cobalt heron discovered.", "Violet badger replaced it."]) {
+      await fs.writeFile(file, text);
+      // Search schedules maintenance while serving its captured published generation.
+      await active.search(text, { minScore: 0 });
+      await idle();
+      expect(await snippets(active, text)).toContain(text);
+      await idle();
+    }
+    expect(await active.search("Cobalt heron", { minScore: 0 })).toEqual([]);
+  });
 
-    await expectWatcherManager(cfg);
-
-    const watcher = createdWatchers[0];
-    const errorRegistration = watcher?.on.mock.calls.find(([event]) => event === "error");
-    expect(errorRegistration?.[0]).toBe("error");
-    expect(errorRegistration?.[1]).toBeTypeOf("function");
-    expect(watcher?.emit("error", new Error("watcher error: ENOSPC"))).toBeUndefined();
-    expect(memoryLoggerWarn).toHaveBeenCalledWith("memory watcher error: watcher error: ENOSPC");
+  it("stops refreshing clean searches after all observations recover", async () => {
+    const { active, idle } = await openManager("Amber lantern.");
+    const sync = vi.spyOn(MemoryIndexManager.prototype, "sync");
+    const observationCount = observer.observations.length;
+    vi.useFakeTimers();
+    observer.observations[0]!.health({
+      state: "unavailable",
+      failure: { operation: "scan", code: "EIO", error: new Error("temporary scan failure") },
+    });
+    await active.search("Amber lantern", { minScore: 0 });
+    await idle();
+    expect(sync).toHaveBeenCalledWith({ reason: "search" });
+    await vi.advanceTimersByTimeAsync(500);
+    await vi.waitFor(() =>
+      expect(active.status().custom?.watcher).toEqual(
+        Array.from({ length: observationCount }, () => expect.objectContaining({ state: "ready" })),
+      ),
+    );
+    await active.sync({ reason: "recovered" });
+    await idle();
+    sync.mockClear();
+    expect(await snippets(active, "Amber lantern")).toContain("Amber lantern.");
+    await idle();
+    expect(sync).not.toHaveBeenCalled();
   });
 });

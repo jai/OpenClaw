@@ -1,5 +1,12 @@
+// Matrix tests cover recent invite plugin behavior.
 import { describe, expect, it } from "vitest";
 import { shouldPromoteRecentInviteRoom } from "./recent-invite.js";
+
+const unnamedRoomInfo = () => ({
+  altAliases: [],
+  nameResolved: true,
+  aliasesResolved: true,
+});
 
 describe("shouldPromoteRecentInviteRoom", () => {
   it("fails closed when room metadata could not be resolved", () => {
@@ -19,24 +26,14 @@ describe("shouldPromoteRecentInviteRoom", () => {
     expect(
       shouldPromoteRecentInviteRoom({
         roomId: "!named:example.org",
-        roomInfo: {
-          name: "Ops Room",
-          altAliases: [],
-          nameResolved: true,
-          aliasesResolved: true,
-        },
+        roomInfo: { name: "Ops Room", ...unnamedRoomInfo() },
       }),
     ).toBe(false);
 
     expect(
       shouldPromoteRecentInviteRoom({
         roomId: "!aliased:example.org",
-        roomInfo: {
-          canonicalAlias: "#ops:example.org",
-          altAliases: [],
-          nameResolved: true,
-          aliasesResolved: true,
-        },
+        roomInfo: { canonicalAlias: "#ops:example.org", ...unnamedRoomInfo() },
       }),
     ).toBe(false);
   });
@@ -45,11 +42,7 @@ describe("shouldPromoteRecentInviteRoom", () => {
     expect(
       shouldPromoteRecentInviteRoom({
         roomId: "!room:example.org",
-        roomInfo: {
-          altAliases: [],
-          nameResolved: true,
-          aliasesResolved: true,
-        },
+        roomInfo: unnamedRoomInfo(),
         rooms: {
           "!room:example.org": {
             enabled: true,
@@ -63,11 +56,7 @@ describe("shouldPromoteRecentInviteRoom", () => {
     expect(
       shouldPromoteRecentInviteRoom({
         roomId: "!room:example.org",
-        roomInfo: {
-          altAliases: [],
-          nameResolved: true,
-          aliasesResolved: true,
-        },
+        roomInfo: unnamedRoomInfo(),
         rooms: {
           "*": {
             enabled: false,
@@ -81,11 +70,7 @@ describe("shouldPromoteRecentInviteRoom", () => {
     expect(
       shouldPromoteRecentInviteRoom({
         roomId: "!room:example.org",
-        roomInfo: {
-          altAliases: [],
-          nameResolved: true,
-          aliasesResolved: true,
-        },
+        roomInfo: unnamedRoomInfo(),
       }),
     ).toBe(true);
   });

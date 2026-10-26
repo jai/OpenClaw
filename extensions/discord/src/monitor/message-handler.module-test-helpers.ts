@@ -1,31 +1,28 @@
 import type { MockFn } from "openclaw/plugin-sdk/plugin-test-runtime";
-import { vi } from "vitest";
-import type { DiscordMessageRunQueueTestingHooks } from "./message-run-queue.js";
+import { afterEach, beforeEach, vi } from "vitest";
+import * as preflightRuntime from "./message-handler.preflight.js";
+import { processDiscordMessage } from "./message-handler.process.js";
+
+vi.mock("./message-handler.process.js", { spy: true });
+
+export { createDiscordMessageDispatcher as createDiscordMessageHandler } from "./message-dispatcher.js";
 
 export const preflightDiscordMessageMock: MockFn = vi.fn();
 export const processDiscordMessageMock: MockFn = vi.fn();
+let restore = () => {};
 
-const { createDiscordMessageHandler: createRealDiscordMessageHandler } =
-  await import("./message-handler.js");
-type DiscordMessageHandlerParams = Parameters<typeof createRealDiscordMessageHandler>[0];
-type DiscordMessageHandlerTestingHooks = NonNullable<DiscordMessageHandlerParams["__testing"]>;
-type PreflightDiscordMessageHook = NonNullable<
-  DiscordMessageHandlerTestingHooks["preflightDiscordMessage"]
->;
-type ProcessDiscordMessageHook = NonNullable<
-  DiscordMessageRunQueueTestingHooks["processDiscordMessage"]
->;
-
-export function createDiscordMessageHandler(
-  ...args: Parameters<typeof createRealDiscordMessageHandler>
-) {
-  const [params] = args;
-  return createRealDiscordMessageHandler({
-    ...params,
-    __testing: {
-      ...params.__testing,
-      preflightDiscordMessage: preflightDiscordMessageMock as PreflightDiscordMessageHook,
-      processDiscordMessage: processDiscordMessageMock as ProcessDiscordMessageHook,
-    },
-  });
-}
+beforeEach(() => {
+  preflightDiscordMessageMock.mockReset();
+  processDiscordMessageMock.mockReset();
+  const preflight = vi
+    .spyOn(preflightRuntime, "preflightDiscordMessage")
+    .mockImplementation((...args) => preflightDiscordMessageMock(...args));
+  const process = vi
+    .mocked(processDiscordMessage)
+    .mockImplementation((...args) => processDiscordMessageMock(...args));
+  restore = () => {
+    preflight.mockRestore();
+    process.mockRestore();
+  };
+});
+afterEach(() => restore());

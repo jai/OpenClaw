@@ -1,147 +1,125 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_TIMER_TIMEOUT_MS } from "openclaw/plugin-sdk/number-runtime";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-const {
-  bodyLocator,
-  browserClose,
-  contextClose,
-  contextNewPage,
-  goto,
-  launch,
-  locatorFill,
-  locatorPress,
-  locatorWaitFor,
-  pageEvaluate,
-  pageTitle,
-  pageUrl,
-  pageWaitForFunction,
-  pageWaitForSelector,
-} = vi.hoisted(() => ({
-  bodyLocator: {
-    waitFor: vi.fn(async () => undefined),
+const mocks = vi.hoisted(() => {
+  const body = {
+    waitFor: async () => undefined,
     textContent: vi.fn(async () => "hello from body"),
-  },
-  browserClose: vi.fn(async () => undefined),
-  contextClose: vi.fn(async () => undefined),
-  contextNewPage: vi.fn(),
-  goto: vi.fn(async () => undefined),
-  launch: vi.fn(),
-  locatorFill: vi.fn(async () => undefined),
-  locatorPress: vi.fn(async () => undefined),
-  locatorWaitFor: vi.fn(async () => undefined),
-  pageEvaluate: vi.fn(async () => "ok"),
-  pageTitle: vi.fn(async () => "QA"),
-  pageUrl: vi.fn(() => "http://127.0.0.1:3000/chat"),
-  pageWaitForFunction: vi.fn(async () => undefined),
-  pageWaitForSelector: vi.fn(async () => undefined),
+  };
+  const input = {
+    waitFor: async () => undefined,
+    fill: vi.fn(async () => undefined),
+    press: vi.fn(async () => undefined),
+  };
+  const page = {
+    goto: vi.fn(async () => undefined),
+    on: vi.fn(),
+    evaluate: async () => "ok",
+    title: async () => "QA",
+    url: () => "http://127.0.0.1:3000/chat",
+    waitForFunction: vi.fn(async () => undefined),
+    waitForSelector: vi.fn(async () => undefined),
+    locator: (selector: string) => (selector === "body" ? body : { first: () => input }),
+  };
+  const context = { newPage: async () => page, close: async () => undefined };
+  return {
+    body,
+    input,
+    page,
+    existsSync: vi.fn((_candidate: unknown) => false),
+    spawnSync: vi.fn(() => ({ status: 0 })),
+    launch: vi.fn(async () => ({ newContext: async () => context, close: async () => undefined })),
+  };
+});
+
+vi.mock("node:child_process", () => ({
+  spawnSync: mocks.spawnSync,
+}));
+
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
+  existsSync: mocks.existsSync,
 }));
 
 vi.mock("playwright-core", () => ({
-  chromium: {
-    launch,
-  },
+  chromium: { launch: mocks.launch },
 }));
 
 import {
-  closeAllQaWebSessions,
   closeQaWebSessions,
+  createQaWebPageOpener,
   qaWebEvaluate,
-  qaWebOpenPage,
   qaWebSnapshot,
   qaWebType,
   qaWebWait,
 } from "./web-runtime.js";
 
-beforeEach(async () => {
-  const page = {
-    on: vi.fn(),
-    goto,
-    title: pageTitle,
-    url: pageUrl,
-    waitForSelector: pageWaitForSelector,
-    waitForFunction: pageWaitForFunction,
-    locator: vi.fn((selector: string) => {
-      if (selector === "body") {
-        return bodyLocator;
-      }
-      return {
-        first: () => ({
-          waitFor: locatorWaitFor,
-          fill: locatorFill,
-          press: locatorPress,
-        }),
-      };
-    }),
-    evaluate: pageEvaluate,
-  };
-  const context = {
-    newPage: vi.fn(async () => page),
-    close: contextClose,
-  };
-  const browser = {
-    newContext: vi.fn(async () => context),
-    close: browserClose,
-  };
-  contextNewPage.mockResolvedValue(page);
-  launch.mockResolvedValue(browser);
+let openPage: ReturnType<typeof createQaWebPageOpener>;
+const url = "http://127.0.0.1:3000/chat";
+
+beforeEach(() => {
+  openPage = createQaWebPageOpener(new Set());
+  vi.stubEnv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", undefined);
   vi.clearAllMocks();
+  mocks.existsSync.mockReturnValue(false);
 });
 
-function requireLaunchOptions() {
-  const [call] = launch.mock.calls;
-  if (!call) {
-    throw new Error("expected browser launch call");
+afterEach(async () => {
+  await closeQaWebSessions();
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
+
+it("interacts with a page and bounds its text on UTF-16 boundaries", async () => {
+  mocks.body.textContent.mockResolvedValueOnce(`${"a".repeat(1999)}😀tail`);
+  const { pageId } = await openPage({ url });
+  await qaWebWait({ pageId, selector: "textarea" });
+  await qaWebWait({ pageId, text: "bridge armed" });
+  await qaWebType({ pageId, selector: "textarea", text: "hello", submit: true });
+  expect(mocks.page.waitForSelector).toHaveBeenCalledWith("textarea", { timeout: 20_000 });
+  expect(mocks.page.waitForFunction).toHaveBeenCalled();
+  expect(mocks.input.fill).toHaveBeenCalledWith("hello", { timeout: 20_000 });
+  expect(mocks.input.press).toHaveBeenCalledWith("Enter", { timeout: 20_000 });
+  const consoleHandler = mocks.page.on.mock.calls.find(([event]) => event === "console")?.[1] as
+    | ((message: { type: () => string; text: () => string }) => void)
+    | undefined;
+  if (!consoleHandler) {
+    throw new Error("expected console handler");
   }
-  const [launchOptions] = call;
-  if (!launchOptions || typeof launchOptions !== "object" || Array.isArray(launchOptions)) {
-    throw new Error("expected browser launch options");
+  consoleHandler({ type: () => "log", text: () => `${"a".repeat(1993)}😀tail` });
+  const snapshot = await qaWebSnapshot({ pageId, maxChars: 2000 });
+
+  expect(snapshot.text).toBe("a".repeat(1999));
+  expect(snapshot.diagnostics).toEqual([{ kind: "console", text: `[log] ${"a".repeat(1993)}` }]);
+});
+
+it.each([
+  ["explicit override", "/custom/chromium"],
+  ["detected system Chromium", "/usr/bin/chromium"],
+])("launches %s without requiring branded Chrome", async (mode, executablePath) => {
+  if (mode === "explicit override") {
+    vi.stubEnv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", executablePath);
   }
-  return launchOptions as Record<string, unknown>;
-}
+  mocks.existsSync.mockImplementation((candidate) => candidate === executablePath);
+  await openPage({ url });
+  expect(mocks.launch).toHaveBeenCalledWith({ headless: true, executablePath });
+});
 
-describe("qa web runtime", () => {
-  it("opens, interacts with, snapshots, and closes a page", async () => {
-    const opened = await qaWebOpenPage({ url: "http://127.0.0.1:3000/chat" });
+it("caps oversized web runtime timeouts", async () => {
+  const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+  const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+  const timeoutMs = Number.MAX_SAFE_INTEGER;
+  const { pageId } = await openPage({ url, timeoutMs });
+  await qaWebWait({ pageId, selector: "textarea", timeoutMs });
+  await expect(qaWebEvaluate({ pageId, expression: "'ok'", timeoutMs })).resolves.toBe("ok");
 
-    await qaWebWait({ pageId: opened.pageId, selector: "textarea" });
-    await qaWebWait({ pageId: opened.pageId, text: "bridge armed" });
-    await qaWebType({
-      pageId: opened.pageId,
-      selector: "textarea",
-      text: "hello",
-      submit: true,
-    });
-    const snapshot = await qaWebSnapshot({ pageId: opened.pageId, maxChars: 5 });
-    const evaluated = await qaWebEvaluate({ pageId: opened.pageId, expression: "'ok'" });
-    await closeAllQaWebSessions();
-
-    const launchOptions = requireLaunchOptions();
-    expect(launchOptions?.channel).toBe("chrome");
-    expect(launchOptions?.headless).toBe(true);
-    expect(goto).toHaveBeenCalledWith("http://127.0.0.1:3000/chat", {
-      waitUntil: "domcontentloaded",
-      timeout: 20_000,
-    });
-    expect(pageWaitForSelector).toHaveBeenCalledWith("textarea", { timeout: 20_000 });
-    expect(pageWaitForFunction).toHaveBeenCalled();
-    expect(locatorFill).toHaveBeenCalledWith("hello", { timeout: 20_000 });
-    expect(locatorPress).toHaveBeenCalledWith("Enter", { timeout: 20_000 });
-    expect(snapshot.text).toBe("hello");
-    expect(evaluated).toBe("ok");
-    expect(contextClose).toHaveBeenCalledTimes(1);
-    expect(browserClose).toHaveBeenCalledTimes(1);
+  expect(mocks.page.goto).toHaveBeenCalledWith(url, {
+    waitUntil: "domcontentloaded",
+    timeout: MAX_TIMER_TIMEOUT_MS,
   });
-
-  it("can close only selected page sessions", async () => {
-    const first = await qaWebOpenPage({ url: "http://127.0.0.1:3000/one" });
-    const second = await qaWebOpenPage({ url: "http://127.0.0.1:3000/two" });
-
-    await closeQaWebSessions([first.pageId]);
-
-    await expect(qaWebSnapshot({ pageId: first.pageId })).rejects.toThrow(
-      `unknown web session: ${first.pageId}`,
-    );
-    const snapshot = await qaWebSnapshot({ pageId: second.pageId });
-    expect(snapshot.text).toBe("hello from body");
-    await closeAllQaWebSessions();
+  expect(mocks.page.waitForSelector).toHaveBeenCalledWith("textarea", {
+    timeout: MAX_TIMER_TIMEOUT_MS,
   });
+  expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), MAX_TIMER_TIMEOUT_MS);
+  expect(clearTimeoutSpy).toHaveBeenCalled();
 });

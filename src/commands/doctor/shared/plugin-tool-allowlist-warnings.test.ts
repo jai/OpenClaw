@@ -1,143 +1,104 @@
-import { describe, expect, it } from "vitest";
-import type { PluginManifestRegistry } from "../../../plugins/manifest-registry.js";
-import {
-  collectBundledProviderAllowlistPolicyWarnings,
-  collectPluginToolAllowlistWarnings,
-} from "./plugin-tool-allowlist-warnings.js";
+import { describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import * as fixture from "../../../plugins/plugin-metadata.test-support.js";
+import { collectPluginToolAllowlistWarnings } from "./plugin-tool-allowlist-warnings.js";
 
-const manifestRegistry: PluginManifestRegistry = {
-  diagnostics: [],
-  plugins: [
-    {
-      id: "firecrawl",
-      channels: [],
-      cliBackends: [],
-      hooks: [],
-      manifestPath: "/virtual/firecrawl/openclaw.plugin.json",
-      origin: "bundled",
-      providers: [],
-      rootDir: "/virtual/firecrawl",
-      skills: [],
-      source: "/virtual/firecrawl/index.ts",
-      contracts: {
-        tools: ["firecrawl_search", "firecrawl_scrape"],
-      },
-    },
-    {
-      id: "lobster",
-      channels: [],
-      cliBackends: [],
-      hooks: [],
-      manifestPath: "/virtual/lobster/openclaw.plugin.json",
-      origin: "bundled",
-      providers: [],
-      rootDir: "/virtual/lobster",
-      skills: [],
-      source: "/virtual/lobster/index.ts",
-    },
-  ],
+vi.mock("../../../plugins/manifest-contract-eligibility.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../plugins/manifest-contract-eligibility.js")>()),
+  loadManifestMetadataSnapshot: () =>
+    fixture.createPluginMetadataSnapshotFixture({
+      plugins: [{ id: "firecrawl", contracts: { tools: ["firecrawl_search"] } }, { id: "lobster" }],
+    }),
+}));
+
+const outlook = { command: "node", args: ["outlook-server.js"] };
+const sandboxTools = { alsoAllow: ["web_fetch"] };
+type Agent = NonNullable<NonNullable<OpenClawConfig["agents"]>["entries"]>[string];
+const sandboxAgent: Agent = {
+  sandbox: { mode: "all" },
+  tools: { sandbox: { tools: sandboxTools } },
 };
+function worker(overrides: Agent = {}): OpenClawConfig["agents"] {
+  return { entries: { worker: { ...sandboxAgent, ...overrides } } };
+}
+function mcpWarnings(cfg: OpenClawConfig) {
+  return collectPluginToolAllowlistWarnings({
+    cfg: {
+      agents: { defaults: { sandbox: { mode: "all" } } },
+      mcp: { servers: { outlook } },
+      ...cfg,
+    },
+  });
+}
 
 describe("collectPluginToolAllowlistWarnings", () => {
-  it("warns when tools.allow wildcard is paired with restrictive plugins.allow", () => {
-    const warnings = collectPluginToolAllowlistWarnings({
-      cfg: {
-        plugins: { allow: ["telegram"] },
-        tools: { allow: ["*"] },
-      },
-      manifestRegistry,
-    });
-
-    expect(warnings).toEqual([
-      '- plugins.allow is an exclusive plugin allowlist. tools.allow contains "*", but that wildcard only matches tools from plugins that are loaded; plugin tools outside plugins.allow stay unavailable. Add the required plugin ids to plugins.allow or remove plugins.allow.',
-    ]);
+  it.each<[string, OpenClawConfig]>([
+    ['tools.allow contains "*"', { tools: { allow: ["*"] } }],
+    [
+      'tool "firecrawl_search", owned by plugin "firecrawl"',
+      { tools: { allow: ["firecrawl_search"] } },
+    ],
+    [
+      'agents.entries.agent-a.tools.alsoAllow references plugin "lobster"',
+      { agents: { entries: { "agent-a": { tools: { alsoAllow: ["lobster"] } } } } },
+    ],
+  ])("warns about excluded plugin policy: %s", (warning, cfg) => {
+    expect(
+      collectPluginToolAllowlistWarnings({
+        cfg: { plugins: { allow: ["telegram"] }, ...cfg },
+      }),
+    ).toEqual([expect.stringContaining(warning)]);
   });
 
-  it("warns when an allowlisted tool is owned by a plugin outside plugins.allow", () => {
-    const warnings = collectPluginToolAllowlistWarnings({
-      cfg: {
-        plugins: { allow: ["telegram"] },
-        tools: { allow: ["firecrawl_search"] },
+  it.each<[string | null, OpenClawConfig]>([
+    [
+      '2 MCP servers ("gmail", "outlook"), but tools.sandbox.tools.alsoAllow does not include',
+      {
+        mcp: { servers: { gmail: { command: "node", args: ["gmail-server.js"] }, outlook } },
+        tools: { sandbox: { tools: { alsoAllow: ["outlook__*"] } } },
       },
-      manifestRegistry,
-    });
-
-    expect(warnings).toEqual([
-      '- tools.allow references tool "firecrawl_search", owned by plugin "firecrawl", but plugins.allow does not include the owning plugin. Add "firecrawl" to plugins.allow or remove plugins.allow.',
-    ]);
-  });
-
-  it("warns when a tool policy references a known plugin outside plugins.allow", () => {
-    const warnings = collectPluginToolAllowlistWarnings({
-      cfg: {
-        plugins: { allow: ["telegram"] },
-        agents: {
-          list: [
-            {
-              id: "agent-a",
-              tools: { alsoAllow: ["lobster"] },
-            },
-          ],
+    ],
+    [
+      null,
+      {
+        mcp: { servers: { supabase: { url: "http://localhost:54321/mcp", enabled: false } } },
+        tools: { sandbox: { tools: { alsoAllow: ["web_search"] } } },
+      },
+    ],
+    ['1 MCP server ("outlook"), but tools.sandbox.tools.alsoAllow (unset) does not include', {}],
+    [null, { agents: worker({ tools: { profile: "minimal", sandbox: { tools: sandboxTools } } }) }],
+    [
+      '1 MCP server ("outlook"), but tools.sandbox.tools.alsoAllow does not include',
+      {
+        tools: {
+          byProvider: { openai: { allow: ["bundle-mcp"] } },
+          sandbox: { tools: sandboxTools },
         },
       },
-      manifestRegistry,
-    });
-
-    expect(warnings).toEqual([
-      '- agents.list[0].tools.alsoAllow references plugin "lobster", but plugins.allow does not include it. Add "lobster" to plugins.allow or remove plugins.allow.',
-    ]);
-  });
-
-  it("does not warn when the owning plugin is allowed", () => {
-    const warnings = collectPluginToolAllowlistWarnings({
-      cfg: {
-        plugins: { allow: ["firecrawl"] },
-        tools: { allow: ["firecrawl_search"] },
+    ],
+    [
+      "agents.entries.worker.tools.sandbox.tools.alsoAllow, tools.sandbox.tools.alsoAllow do not include",
+      {
+        agents: { defaults: { sandbox: { mode: "all" } }, ...worker() },
+        tools: { sandbox: { tools: { alsoAllow: ["web_search"] } } },
       },
-      manifestRegistry,
-    });
-
-    expect(warnings).toStrictEqual([]);
+    ],
+  ])("checks sandbox MCP policy %# (%s)", (warning, cfg) => {
+    expect(mcpWarnings(cfg)).toEqual(warning === null ? [] : [expect.stringContaining(warning)]);
   });
 
-  it("does not warn when plugins.allow is not restrictive", () => {
-    const warnings = collectPluginToolAllowlistWarnings({
-      cfg: {
-        tools: { allow: ["*"] },
-      },
-      manifestRegistry,
-    });
-
-    expect(warnings).toStrictEqual([]);
-  });
-
-  it("warns when restrictive plugins.allow leaves bundled provider discovery in explicit compat mode", () => {
-    const warnings = collectBundledProviderAllowlistPolicyWarnings({
-      cfg: {
-        plugins: {
-          allow: ["telegram"],
-          bundledDiscovery: "compat",
-        },
-      },
-    });
-
-    expect(warnings).toEqual([
-      '- plugins.allow is restrictive, but bundled provider discovery is still in legacy compatibility mode. Bundled provider plugins can still appear in runtime provider inventories; set plugins.bundledDiscovery to "allowlist" after confirming omitted bundled providers are intentionally blocked.',
-    ]);
-  });
-
-  it.each([
-    { name: "default", plugins: { allow: ["telegram"] } },
-    {
-      name: "explicit allowlist",
-      plugins: { allow: ["telegram"], bundledDiscovery: "allowlist" as const },
-    },
-  ])(
-    "does not warn when bundled provider discovery follows the allowlist ($name)",
-    ({ plugins }) => {
-      const warnings = collectBundledProviderAllowlistPolicyWarnings({ cfg: { plugins } });
-
-      expect(warnings).toStrictEqual([]);
+  it.each(["google/gemini-2.5-pro", "openai/gpt-4.1"])(
+    "uses the agent alias target %s for MCP policy warnings",
+    (target) => {
+      const warnings = mcpWarnings({
+        agents: worker({ model: "fast", models: { [target]: { alias: "fast" } } }),
+        tools: { byProvider: { google: { profile: "minimal" } } },
+      });
+      expect(warnings).toEqual(
+        target.startsWith("google/")
+          ? []
+          : [expect.stringContaining("agents.entries.worker.tools.sandbox.tools.alsoAllow")],
+      );
     },
   );
 });

@@ -1,21 +1,31 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { completeSimple, type Api, type Context, type Model } from "@earendil-works/pi-ai";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+// Live tool replay repair tests validate repaired historical transcripts across
+// selected real model providers.
+
+import { expectDefined } from "@openclaw/normalization-core";
+import type { AgentMessage } from "openclaw/plugin-sdk/agent-core";
+import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
+import type { Context, Model } from "openclaw/plugin-sdk/llm";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getRuntimeConfig } from "../config/config.js";
+import { discoverAuthStorageFacts, discoverModelsAsync } from "./agent-model-discovery.js";
 import { resolveDefaultAgentDir } from "./agent-scope.js";
-import { isLiveProfileKeyModeEnabled, isLiveTestEnabled } from "./live-test-helpers.js";
-import { getApiKeyForModel, requireApiKey } from "./model-auth.js";
+import { sanitizeSessionHistory } from "./embedded-agent-runner/replay-history.js";
+import {
+  extractLiveResponseText,
+  completeSimpleWithTimeout,
+  isLiveProfileKeyModeEnabled,
+  isLiveTestEnabled,
+  logLiveProgress,
+  readLiveTestConfig,
+  resolveLiveCredentialPrecedence,
+} from "./live-test-helpers.js";
+import { getApiKeyForModelCore, requireApiKey } from "./model-auth.js";
 import { ensureOpenClawModelsJson } from "./models-config.js";
-import { sanitizeSessionHistory } from "./pi-embedded-runner/replay-history.js";
-import { discoverAuthStorage, discoverModels } from "./pi-model-discovery.js";
 import { transformTransportMessages } from "./transport-message-transform.js";
 
 const LIVE = isLiveTestEnabled();
 const REQUIRE_PROFILE_KEYS = isLiveProfileKeyModeEnabled();
-const LIVE_CREDENTIAL_PRECEDENCE = REQUIRE_PROFILE_KEYS ? "profile-first" : "env-first";
-const DEFAULT_TARGET_MODEL_REFS = "openai-codex/gpt-5.5,google/gemini-3-flash-preview";
+const DEFAULT_TARGET_MODEL_REFS = "openai/gpt-5.6-luna,google/gemini-3-flash-preview";
 const TARGET_MODEL_REFS = parseTargetModelRefs(
   process.env.OPENCLAW_LIVE_TOOL_REPLAY_REPAIR_MODELS ?? DEFAULT_TARGET_MODEL_REFS,
 );
@@ -26,6 +36,34 @@ type TargetModelRef = {
   provider: string;
   modelId: string;
 };
+
+function createDirectTargetModel(target: TargetModelRef): Model | null {
+  const common = {
+    id: target.modelId,
+    name: target.modelId,
+    provider: target.provider,
+    reasoning: true,
+    input: ["text"] as Model["input"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200_000,
+    maxTokens: 8_192,
+  };
+  if (target.provider === "openai") {
+    return {
+      ...common,
+      api: "openai-responses",
+      baseUrl: "https://api.openai.com/v1",
+    };
+  }
+  if (target.provider === "anthropic") {
+    return {
+      ...common,
+      api: "anthropic-messages",
+      baseUrl: "https://api.anthropic.com",
+    };
+  }
+  return null;
+}
 
 function parseTargetModelRefs(raw: string | undefined): TargetModelRef[] {
   const refs: TargetModelRef[] = [];
@@ -46,48 +84,34 @@ function parseTargetModelRefs(raw: string | undefined): TargetModelRef[] {
   return refs;
 }
 
-function logProgress(message: string): void {
-  process.stderr.write(`[live] ${message}\n`);
-}
-
-async function completeSimpleWithTimeout<TApi extends Api>(
-  model: Model<TApi>,
-  context: Parameters<typeof completeSimple<TApi>>[1],
-  options: Parameters<typeof completeSimple<TApi>>[2],
-  timeoutMs: number,
-): Promise<Awaited<ReturnType<typeof completeSimple<TApi>>>> {
-  const controller = new AbortController();
-  const abortTimer = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
-  abortTimer.unref?.();
-  try {
-    return await Promise.race([
-      completeSimple(model, context, {
-        ...options,
-        signal: controller.signal,
-      }),
-      new Promise<never>((_, reject) => {
-        const hardTimer = setTimeout(() => {
-          reject(new Error(`model call timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
-        hardTimer.unref?.();
-      }),
-    ]);
-  } finally {
-    clearTimeout(abortTimer);
-  }
-}
+const logProgress = logLiveProgress;
 
 function isOpenAIResponsesFamily(api: string): boolean {
   return (
     api === "openai-responses" ||
-    api === "openai-codex-responses" ||
+    api === "openai-chatgpt-responses" ||
     api === "azure-openai-responses"
   );
 }
 
-function buildReplayMessages(model: Model<Api>): AgentMessage[] {
+function createNoopTools() {
+  return [
+    {
+      name: "noop",
+      description: "Return ok.",
+      parameters: Type.Object({}, { additionalProperties: false }),
+    },
+  ];
+}
+
+function replayValidationTools(model: Model) {
+  // Responses-family providers may force or reject fresh tool-choice policy
+  // when tools are present. These probes validate repaired historical transcript
+  // shape, not new tool invocation.
+  return isOpenAIResponsesFamily(model.api) ? undefined : createNoopTools();
+}
+
+function buildReplayMessages(model: Model): AgentMessage[] {
   const now = Date.now();
   // Gemini source metadata deliberately simulates a model switch from a
   // provider-owned transcript. That forces the same id sanitization and replay
@@ -107,6 +131,21 @@ function buildReplayMessages(model: Model<Api>): AgentMessage[] {
         };
 
   return [
+    {
+      role: "assistant",
+      provider: source.provider,
+      api: source.api,
+      model: source.model,
+      stopReason: "length",
+      timestamp: now - 1,
+      content: [
+        {
+          type: "thinking",
+          thinking: "partial hidden reasoning",
+          thinkingSignature: "partial-signature",
+        },
+      ],
+    },
     {
       role: "user",
       content: "Use noop.",
@@ -141,7 +180,7 @@ function buildReplayMessages(model: Model<Api>): AgentMessage[] {
   ] as unknown as AgentMessage[];
 }
 
-function buildAbortedTransportMessages(model: Model<Api>): Context["messages"] {
+function buildAbortedTransportMessages(model: Model): Context["messages"] {
   const now = Date.now();
   return [
     {
@@ -182,16 +221,6 @@ function assistantToolCallIds(message: AgentMessage): string[] {
   return ids;
 }
 
-function responseText(content: Awaited<ReturnType<typeof completeSimple<Api>>>["content"]): string {
-  const parts: string[] = [];
-  for (const block of content) {
-    if (block.type === "text") {
-      parts.push(block.text.trim());
-    }
-  }
-  return parts.join(" ").trim();
-}
-
 function isKnownLiveBlocker(errorMessage: string): boolean {
   return (
     /not supported when using codex with a chatgpt account/i.test(errorMessage) ||
@@ -199,42 +228,76 @@ function isKnownLiveBlocker(errorMessage: string): boolean {
   );
 }
 
+async function prepareLiveTarget(target: TargetModelRef) {
+  const cfg = await readLiveTestConfig();
+  await ensureOpenClawModelsJson(cfg);
+
+  const agentDir = resolveDefaultAgentDir(cfg);
+  const { authStorage } = await discoverAuthStorageFacts(agentDir);
+  const modelRegistry = await discoverModelsAsync(authStorage, agentDir);
+  const model =
+    (modelRegistry.find(target.provider, target.modelId) as Model | null) ??
+    createDirectTargetModel(target);
+
+  if (!model) {
+    logProgress(`[tool-replay-repair] model missing from registry: ${target.ref}`);
+    return undefined;
+  }
+
+  let apiKeyInfo;
+  try {
+    apiKeyInfo = await getApiKeyForModelCore({
+      model,
+      cfg,
+      credentialPrecedence: resolveLiveCredentialPrecedence(model.provider, REQUIRE_PROFILE_KEYS),
+    });
+  } catch (error) {
+    logProgress(`[tool-replay-repair] skip ${target.ref} (${String(error)})`);
+    return undefined;
+  }
+
+  if (REQUIRE_PROFILE_KEYS && !apiKeyInfo.source.startsWith("profile:")) {
+    logProgress(
+      `[tool-replay-repair] skip ${target.ref} (non-profile credential source: ${apiKeyInfo.source})`,
+    );
+    return undefined;
+  }
+  return { model, apiKeyInfo };
+}
+
+async function completeReplay(
+  model: Model,
+  apiKeyInfo: Awaited<ReturnType<typeof getApiKeyForModelCore>>,
+  messages: Context["messages"],
+) {
+  const response = await completeSimpleWithTimeout(
+    model,
+    {
+      systemPrompt: "You are a concise assistant. Follow the user's instruction exactly.",
+      messages,
+      tools: replayValidationTools(model),
+    },
+    { apiKey: requireApiKey(apiKeyInfo, model.provider), reasoning: "low", maxTokens: 96 },
+    120_000,
+  );
+  const text = extractLiveResponseText(response.content);
+  const errorMessage =
+    typeof (response as { errorMessage?: unknown }).errorMessage === "string"
+      ? ((response as { errorMessage?: string }).errorMessage ?? "")
+      : "";
+  return { response, text, errorMessage };
+}
+
 describeLive("tool replay repair live", () => {
   for (const target of TARGET_MODEL_REFS) {
     it(
       `accepts repaired displaced and missing tool results with ${target.ref}`,
       async () => {
-        const cfg = getRuntimeConfig();
-        await ensureOpenClawModelsJson(cfg);
-
-        const agentDir = resolveDefaultAgentDir(cfg);
-        const authStorage = discoverAuthStorage(agentDir);
-        const modelRegistry = discoverModels(authStorage, agentDir);
-        const model = modelRegistry.find(target.provider, target.modelId) as Model<Api> | null;
-
-        if (!model) {
-          logProgress(`[tool-replay-repair] model missing from registry: ${target.ref}`);
+        const prepared = await prepareLiveTarget(target);
+        if (!prepared) {
           return;
         }
-
-        let apiKeyInfo;
-        try {
-          apiKeyInfo = await getApiKeyForModel({
-            model,
-            cfg,
-            credentialPrecedence: LIVE_CREDENTIAL_PRECEDENCE,
-          });
-        } catch (error) {
-          logProgress(`[tool-replay-repair] skip ${target.ref} (${String(error)})`);
-          return;
-        }
-
-        if (REQUIRE_PROFILE_KEYS && !apiKeyInfo.source.startsWith("profile:")) {
-          logProgress(
-            `[tool-replay-repair] skip ${target.ref} (non-profile credential source: ${apiKeyInfo.source})`,
-          );
-          return;
-        }
+        const { model, apiKeyInfo } = prepared;
 
         logProgress(`[tool-replay-repair] target=${target.ref} auth source=${apiKeyInfo.source}`);
         const sanitized = await sanitizeSessionHistory({
@@ -254,7 +317,7 @@ describeLive("tool replay repair live", () => {
           "toolResult",
           "user",
         ]);
-        const assistantMessage = sanitized[1];
+        const assistantMessage = expectDefined(sanitized[1], "sanitized[1] test invariant");
         expect(assistantMessage?.role).toBe("assistant");
         expect(
           sanitized.slice(2, 5).map((message) => (message as { toolCallId?: string }).toolCallId),
@@ -273,32 +336,11 @@ describeLive("tool replay repair live", () => {
         // Sending the repaired transcript to the real model is the live proof:
         // providers reject malformed tool-call adjacency before generation, so
         // any non-error response here validates the repair shape end to end.
-        const response = await completeSimpleWithTimeout(
+        const { response, text, errorMessage } = await completeReplay(
           model,
-          {
-            systemPrompt: "You are a concise assistant. Follow the user's instruction exactly.",
-            messages: sanitized as never,
-            tools: [
-              {
-                name: "noop",
-                description: "Return ok.",
-                parameters: Type.Object({}, { additionalProperties: false }),
-              },
-            ],
-          },
-          {
-            apiKey: requireApiKey(apiKeyInfo, model.provider),
-            reasoning: "low",
-            maxTokens: 96,
-          },
-          120_000,
+          apiKeyInfo,
+          sanitized as never,
         );
-
-        const text = responseText(response.content);
-        const errorMessage =
-          typeof (response as { errorMessage?: unknown }).errorMessage === "string"
-            ? ((response as { errorMessage?: string }).errorMessage ?? "")
-            : "";
         if (errorMessage && isKnownLiveBlocker(errorMessage)) {
           logProgress(`[tool-replay-repair] skip ${target.ref} (${errorMessage})`);
           return;
@@ -315,37 +357,11 @@ describeLive("tool replay repair live", () => {
     it(
       `accepts transport replay after dropping aborted assistant tool calls with ${target.ref}`,
       async () => {
-        const cfg = getRuntimeConfig();
-        await ensureOpenClawModelsJson(cfg);
-
-        const agentDir = resolveDefaultAgentDir(cfg);
-        const authStorage = discoverAuthStorage(agentDir);
-        const modelRegistry = discoverModels(authStorage, agentDir);
-        const model = modelRegistry.find(target.provider, target.modelId) as Model<Api> | null;
-
-        if (!model) {
-          logProgress(`[tool-replay-repair] model missing from registry: ${target.ref}`);
+        const prepared = await prepareLiveTarget(target);
+        if (!prepared) {
           return;
         }
-
-        let apiKeyInfo;
-        try {
-          apiKeyInfo = await getApiKeyForModel({
-            model,
-            cfg,
-            credentialPrecedence: LIVE_CREDENTIAL_PRECEDENCE,
-          });
-        } catch (error) {
-          logProgress(`[tool-replay-repair] skip ${target.ref} (${String(error)})`);
-          return;
-        }
-
-        if (REQUIRE_PROFILE_KEYS && !apiKeyInfo.source.startsWith("profile:")) {
-          logProgress(
-            `[tool-replay-repair] skip ${target.ref} (non-profile credential source: ${apiKeyInfo.source})`,
-          );
-          return;
-        }
+        const { model, apiKeyInfo } = prepared;
 
         const transformed = transformTransportMessages(buildAbortedTransportMessages(model), model);
         expect(transformed.map((message) => message.role)).toEqual(["user"]);
@@ -354,32 +370,11 @@ describeLive("tool replay repair live", () => {
         // This is the transport replay regression proof: providers reject
         // assistant(tool_call)->user replays without a matching result, so the
         // dropped transcript must still be accepted by real model APIs.
-        const response = await completeSimpleWithTimeout(
+        const { response, text, errorMessage } = await completeReplay(
           model,
-          {
-            systemPrompt: "You are a concise assistant. Follow the user's instruction exactly.",
-            messages: transformed as never,
-            tools: [
-              {
-                name: "noop",
-                description: "Return ok.",
-                parameters: Type.Object({}, { additionalProperties: false }),
-              },
-            ],
-          },
-          {
-            apiKey: requireApiKey(apiKeyInfo, model.provider),
-            reasoning: "low",
-            maxTokens: 96,
-          },
-          120_000,
+          apiKeyInfo,
+          transformed as never,
         );
-
-        const text = responseText(response.content);
-        const errorMessage =
-          typeof (response as { errorMessage?: unknown }).errorMessage === "string"
-            ? ((response as { errorMessage?: string }).errorMessage ?? "")
-            : "";
         if (errorMessage && isKnownLiveBlocker(errorMessage)) {
           logProgress(`[tool-replay-repair] skip ${target.ref} (${errorMessage})`);
           return;

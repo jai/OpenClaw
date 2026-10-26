@@ -1,4 +1,10 @@
-import { explainShellCommand, formatCommandSpans } from "../infra/command-explainer/index.js";
+/**
+ * Lazy runtime for exec approval command highlighting.
+ * Kept separate so importing approval request code does not load the command
+ * explainer until command spans are explicitly requested.
+ */
+import { explainShellCommand } from "../infra/command-explainer/extract.js";
+import { formatCommandSpans } from "../infra/command-explainer/format.js";
 import type { ExecApprovalCommandSpan } from "../infra/exec-approvals.js";
 
 export async function resolveExecApprovalCommandSpans(

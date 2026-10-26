@@ -1,12 +1,11 @@
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { MigrationPlan } from "../../plugins/types.js";
 
-export type MigrationConfigPatchMode = "return";
-
 export type MigrateCommonOptions = {
   provider?: string;
   source?: string;
   includeSecrets?: boolean;
+  authCredentials?: boolean;
   overwrite?: boolean;
   skills?: string[];
   plugins?: string[];
@@ -22,7 +21,13 @@ export type MigrateCommonOptions = {
   configOverride?: OpenClawConfig;
   // Internal embedded mode for config patch items. Default CLI behavior persists
   // patches when this is omitted; onboarding can request returned patch details.
-  configPatchMode?: MigrationConfigPatchMode;
+  configPatchMode?: "return";
+  // Internal embedded target. Standalone CLI migrations use the configured default agent.
+  targetAgentId?: string;
+  // Internal embedded scope. Providers may skip unrelated discovery when this is set.
+  itemKinds?: string[];
+  // Exact item selection used by reviewed UI plans and the standalone CLI.
+  itemIds?: string[];
 };
 
 export type MigrateApplyOptions = MigrateCommonOptions & {
@@ -31,6 +36,8 @@ export type MigrateApplyOptions = MigrateCommonOptions & {
   force?: boolean;
   backupOutput?: string;
   preflightPlan?: MigrationPlan;
+  // Internal RPC mode: return item-level failures with recovery metadata.
+  allowPartialResult?: boolean;
 };
 
 export type MigrateDefaultOptions = MigrateApplyOptions & {

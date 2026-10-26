@@ -1,28 +1,20 @@
-const DEFAULT_MAX_PREAUTH_CONNECTIONS_PER_IP = 32;
-const UNKNOWN_CLIENT_IP_BUDGET_KEY = "__openclaw_unknown_client_ip__";
+import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
+import { isVitestRuntimeEnv } from "../../infra/env.js";
 
-function getMaxPreauthConnectionsPerIpFromEnv(env: NodeJS.ProcessEnv = process.env): number {
-  const configured =
-    env.OPENCLAW_MAX_PREAUTH_CONNECTIONS_PER_IP ||
-    (env.VITEST && env.OPENCLAW_TEST_MAX_PREAUTH_CONNECTIONS_PER_IP);
-  if (!configured) {
-    return DEFAULT_MAX_PREAUTH_CONNECTIONS_PER_IP;
-  }
-  const parsed = Number(configured);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    return DEFAULT_MAX_PREAUTH_CONNECTIONS_PER_IP;
-  }
-  return Math.max(1, Math.floor(parsed));
-}
+const DEFAULT_MAX_PREAUTH_CONNECTIONS_PER_IP = 128;
+const UNKNOWN_CLIENT_IP_BUDGET_KEY = "__openclaw_unknown_client_ip__";
 
 export type PreauthConnectionBudget = {
   acquire(clientIp: string | undefined): boolean;
   release(clientIp: string | undefined): void;
 };
 
-export function createPreauthConnectionBudget(
-  limit = getMaxPreauthConnectionsPerIpFromEnv(),
-): PreauthConnectionBudget {
+export function createPreauthConnectionBudget(): PreauthConnectionBudget {
+  const configured =
+    process.env.OPENCLAW_MAX_PREAUTH_CONNECTIONS_PER_IP ||
+    (isVitestRuntimeEnv() ? process.env.OPENCLAW_TEST_MAX_PREAUTH_CONNECTIONS_PER_IP : undefined);
+  const maxConnectionsPerIp =
+    parseStrictPositiveInteger(configured) ?? DEFAULT_MAX_PREAUTH_CONNECTIONS_PER_IP;
   const counts = new Map<string, number>();
   const normalizeBudgetKey = (clientIp: string | undefined) => {
     const ip = clientIp?.trim();
@@ -36,7 +28,7 @@ export function createPreauthConnectionBudget(
     acquire(clientIp) {
       const ip = normalizeBudgetKey(clientIp);
       const next = (counts.get(ip) ?? 0) + 1;
-      if (next > limit) {
+      if (next > maxConnectionsPerIp) {
         return false;
       }
       counts.set(ip, next);

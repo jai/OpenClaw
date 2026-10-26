@@ -1,3 +1,4 @@
+/** Tests inactive Telegram SecretRefs remain unresolved and diagnostic-only. */
 import { describe, expect, it } from "vitest";
 import "./runtime-telegram.test-support.ts";
 import { asConfig, setupSecretsRuntimeSnapshotTestHooks } from "./runtime.test-support.ts";
@@ -32,6 +33,7 @@ describe("secrets runtime snapshot inactive telegram surfaces", () => {
           telegram: {
             botToken: { source: "env", provider: "default", id: "DISABLED_TELEGRAM_BASE_TOKEN" },
             accounts: {
+              default: { enabled: false },
               disabled: {
                 enabled: false,
                 botToken: {

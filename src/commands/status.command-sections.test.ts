@@ -1,263 +1,242 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { stripAnsi } from "../../packages/terminal-core/src/ansi.js";
+import * as terminalTable from "../../packages/terminal-core/src/table.js";
+import { theme } from "../../packages/terminal-core/src/theme.js";
 import type { HealthSummary } from "./health.js";
+import { pluginHealthError } from "./health.test-fixtures.js";
+import { buildStatusCommandReportLines } from "./status.command-report.js";
 import {
-  buildStatusFooterLines,
-  buildStatusHealthRows,
-  buildStatusPairingRecoveryLines,
-  buildStatusPluginCompatibilityLines,
-  buildStatusSecurityAuditLines,
-  buildStatusSessionsRows,
-  buildStatusSystemEventsRows,
-  buildStatusSystemEventsTrailer,
-  statusHealthColumns,
-} from "./status.command-sections.ts";
+  baseStatusSession,
+  createStatusCommandReportDataParams,
+  createStatusHealth,
+} from "./status.test-support.ts";
 
-describe("status.command-sections", () => {
-  it("formats security audit lines with finding caps and follow-up commands", () => {
-    const lines = buildStatusSecurityAuditLines({
-      securityAudit: {
-        summary: { critical: 1, warn: 6, info: 2 },
-        findings: [
-          {
-            severity: "warn",
-            title: "Warn first",
-            detail: "warn detail",
-          },
-          {
-            severity: "critical",
-            title: "Critical first",
-            detail: "critical\ndetail",
-            remediation: "fix it",
-          },
-          ...Array.from({ length: 5 }, (_, index) => ({
-            severity: "warn" as const,
-            title: `Warn ${index + 2}`,
-            detail: `detail ${index + 2}`,
-          })),
-        ],
-      },
-      theme: {
-        error: (value) => `error(${value})`,
-        warn: (value) => `warn(${value})`,
-        muted: (value) => `muted(${value})`,
-      },
-      shortenText: (value) => value,
-      formatCliCommand: (value) => `cmd:${value}`,
-    });
+// mock-isolation: Formatting consumes fixed facts, not live backup or database inspection.
+vi.mock("../state/backup-run-records.js", () => ({ readBackupRunFreshness: async () => ({}) }));
+vi.mock("./status-database-engines.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./status-database-engines.js")>()),
+  resolveStatusDatabaseEngines: async () => ({ source: "admitted", stores: [] }),
+}));
 
-    expect(lines[0]).toBe("muted(Summary: error(1 critical) · warn(6 warn) · muted(2 info))");
-    expect(lines).toContain("  error(CRITICAL) Critical first");
-    expect(lines).toContain("    critical detail");
-    expect(lines).toContain("    muted(Fix: fix it)");
-    expect(lines).toContain("muted(… +1 more)");
-    expect(lines.at(-2)).toBe("muted(Full report: cmd:openclaw security audit)");
-    expect(lines.at(-1)).toBe("muted(Deep probe: cmd:openclaw security audit --deep)");
-  });
+beforeEach(() => {
+  for (const color of ["success", "warn", "muted", "error"] as const) {
+    vi.spyOn(theme, color).mockImplementation(String);
+  }
+  vi.stubEnv("OPENCLAW_PROFILE", undefined);
+  vi.stubEnv("OPENCLAW_CONTAINER_HINT", undefined);
+  vi.spyOn(terminalTable, "renderTable").mockReturnValue("table");
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
 
-  it("builds verbose sessions rows and returns no rows for empty sessions", () => {
-    const verboseRows = buildStatusSessionsRows({
-      recent: [
+async function report(overrides: Parameters<typeof createStatusCommandReportDataParams>[0]) {
+  const lines = await buildStatusCommandReportLines(createStatusCommandReportDataParams(overrides));
+  return lines.map(stripAnsi);
+}
+
+async function healthRows(health: Partial<HealthSummary>) {
+  await report({ health: createStatusHealth(health) });
+  return vi
+    .mocked(terminalTable.renderTable)
+    .mock.calls.find(([options]) => options.columns.some((column) => column.key === "Status"))?.[0]
+    .rows;
+}
+
+it("prioritizes critical audit findings, caps warnings, and preserves remediation", async () => {
+  const lines = await report({
+    securityAudit: {
+      ts: 1,
+      summary: { critical: 1, warn: 6, info: 2 },
+      findings: [
+        ...Array.from({ length: 6 }, (_, index) => ({
+          checkId: `warn-${index}`,
+          severity: "warn" as const,
+          title: `Warn ${index}`,
+          detail: "warn detail",
+        })),
         {
-          key: "session-key-1234567890",
-          kind: "direct",
-          updatedAt: 1,
-          age: 5_000,
-          model: "gpt-5.4",
-          runtime: "OpenAI Codex",
-          totalTokens: null,
-          totalTokensFresh: false,
-          remainingTokens: null,
-          percentUsed: null,
-          contextTokens: null,
-          flags: [],
-        },
-        {
-          key: "agent:main:cron:daily-digest",
-          kind: "cron",
-          updatedAt: 2,
-          age: 7_000,
-          model: "gpt-5.5",
-          runtime: "OpenClaw Pi Default",
-          totalTokens: null,
-          totalTokensFresh: false,
-          remainingTokens: null,
-          percentUsed: null,
-          contextTokens: null,
-          flags: [],
+          checkId: "critical",
+          severity: "critical",
+          title: "Critical first",
+          detail: "critical\ndetail",
+          remediation: "fix it",
         },
       ],
-      verbose: true,
-      shortenText: (value) => value.slice(0, 8),
-      formatTimeAgo: (value) => `${value}ms`,
-      formatTokensCompact: () => "12k",
-      formatPromptCacheCompact: () => "cache ok",
-      muted: (value) => `muted(${value})`,
-    });
-
-    expect(verboseRows).toEqual([
-      {
-        Key: "session-",
-        Kind: "direct",
-        Age: "5000ms",
-        Model: "gpt-5.4",
-        Runtime: "OpenAI Codex",
-        Tokens: "12k",
-        Cache: "cache ok",
-      },
-      {
-        Key: "agent:ma",
-        Kind: "cron",
-        Age: "7000ms",
-        Model: "gpt-5.5",
-        Runtime: "OpenClaw Pi Default",
-        Tokens: "12k",
-        Cache: "cache ok",
-      },
-    ]);
-
-    const emptyRows = buildStatusSessionsRows({
-      recent: [],
-      verbose: true,
-      shortenText: (value) => value,
-      formatTimeAgo: () => "",
-      formatTokensCompact: () => "",
-      formatPromptCacheCompact: () => null,
-      muted: (value) => `muted(${value})`,
-    });
-
-    expect(emptyRows).toEqual([]);
+    },
   });
+  const start = lines.indexOf("Security audit") + 1;
+  expect(lines.slice(start, start + 4)).toEqual([
+    "Summary: 1 critical · 6 warn · 2 info",
+    "  CRITICAL Critical first",
+    "    critical detail",
+    "    Fix: fix it",
+  ]);
+  expect(lines).toContain("… +1 more");
+  expect(lines).not.toContain("  WARN Warn 5");
+  expect(lines).toContain("Full report: openclaw security audit");
+  expect(lines).toContain("Deep check: openclaw security audit --deep");
+});
 
-  it("maps health channel detail lines into status rows", () => {
-    const rows = buildStatusHealthRows({
-      health: { durationMs: 42 } as HealthSummary,
-      formatHealthChannelLines: () => [
-        "QuietChat: OK · ready",
-        "WorkChat: failed · auth",
-        "Forum: not configured",
-        "Matrix: linked",
-        "Pager: not linked",
-      ],
-      ok: (value) => `ok(${value})`,
-      warn: (value) => `warn(${value})`,
-      muted: (value) => `muted(${value})`,
-    });
-
-    expect(rows).toEqual([
-      { Item: "Gateway", Status: "ok(reachable)", Detail: "42ms" },
-      { Item: "QuietChat", Status: "ok(OK)", Detail: "OK · ready" },
-      { Item: "WorkChat", Status: "warn(WARN)", Detail: "failed · auth" },
-      { Item: "Forum", Status: "muted(OFF)", Detail: "not configured" },
-      { Item: "Matrix", Status: "ok(LINKED)", Detail: "linked" },
-      { Item: "Pager", Status: "warn(UNLINKED)", Detail: "not linked" },
-    ]);
-  });
-
-  it("adds degraded event-loop health to status rows", () => {
-    const rows = buildStatusHealthRows({
-      health: {
-        durationMs: 42,
-        eventLoop: {
-          degraded: true,
-          reasons: ["event_loop_delay"],
-          intervalMs: 62_000,
-          delayP99Ms: 61_000,
-          delayMaxMs: 62_000,
-          utilization: 1,
-          cpuCoreRatio: 1,
-        },
-      } as HealthSummary,
-      formatHealthChannelLines: () => [],
-      ok: (value) => `ok(${value})`,
-      warn: (value) => `warn(${value})`,
-      muted: (value) => `muted(${value})`,
-    });
-
-    expect(rows).toEqual([
-      { Item: "Gateway", Status: "ok(reachable)", Detail: "42ms" },
-      {
-        Item: "Event loop",
-        Status: "warn(WARN)",
-        Detail: "reasons event_loop_delay · max 62000ms · p99 61000ms · util 1 · cpu 1",
-      },
-    ]);
-  });
-
-  it("builds footer lines from update and reachability state", () => {
-    expect(
-      buildStatusFooterLines({
-        updateHint: "upgrade ready",
-        warn: (value) => `warn(${value})`,
-        formatCliCommand: (value) => `cmd:${value}`,
-        nodeOnlyGateway: null,
-        gatewayReachable: false,
-      }),
-    ).toEqual([
-      "FAQ: https://docs.openclaw.ai/faq",
-      "Troubleshooting: https://docs.openclaw.ai/troubleshooting",
-      "",
-      "warn(upgrade ready)",
-      "Next steps:",
-      "  Need to share?      cmd:openclaw status --all",
-      "  Need to debug live? cmd:openclaw logs --follow",
-      "  Fix reachability first: cmd:openclaw gateway probe",
-    ]);
-  });
-
-  it("builds plugin compatibility lines and pairing recovery guidance", () => {
-    expect(
-      buildStatusPluginCompatibilityLines({
-        notices: [
-          { severity: "warn" as const, message: "legacy" },
-          { severity: "info" as const, message: "heads-up" },
-          { severity: "warn" as const, message: "extra" },
+it("distinguishes pinned sessions from automatic fallbacks in a session report", async () => {
+  const params = createStatusCommandReportDataParams();
+  const lines = await report({
+    summary: {
+      ...params.summary,
+      sessions: {
+        ...params.summary.sessions,
+        recent: [
+          {
+            ...baseStatusSession,
+            key: "pinned",
+            configuredModel: "first/a",
+            selectedModel: "second/b",
+            modelSelectionReason: "session override",
+          },
+          {
+            ...baseStatusSession,
+            key: "fallback",
+            configuredModel: "third/c",
+            selectedModel: "fourth/d",
+            modelSelectionReason: "fallback selected",
+          },
         ],
-        limit: 2,
-        formatNotice: (notice) => notice.message,
-        warn: (value) => `warn(${value})`,
-        muted: (value) => `muted(${value})`,
-      }),
-    ).toEqual(["  warn(WARN) legacy", "  muted(INFO) heads-up", "muted(  … +1 more)"]);
-
-    expect(
-      buildStatusPairingRecoveryLines({
-        pairingRecovery: {
-          requestId: "req-123",
-          reason: "scope-upgrade",
-          remediationHint: "Review the requested scopes, then approve the pending upgrade.",
-        },
-        warn: (value) => `warn(${value})`,
-        muted: (value) => `muted(${value})`,
-        formatCliCommand: (value) => `cmd:${value}`,
-      }),
-    ).toEqual([
-      "warn(Gateway scope upgrade approval required.)",
-      "muted(Reason: device is asking for more scopes than currently approved.)",
-      "muted(Hint: Review the requested scopes, then approve the pending upgrade.)",
-      "muted(Recovery: cmd:openclaw devices approve req-123)",
-      "muted(Fallback: cmd:openclaw devices approve --latest)",
-      "muted(Inspect: cmd:openclaw devices list)",
-    ]);
+      },
+    },
   });
+  expect(lines).toEqual(
+    expect.arrayContaining([
+      "Session pinned is pinned to second/b; config primary first/a will apply to new/unpinned sessions.",
+      "  Configured default: first/a",
+      "  Session selected: second/b",
+      "  Reason: session override",
+      "  Clear with: /model default",
+      "Session fallback is running fourth/d (auto fallback); config primary is third/c.",
+      "  Reason: fallback selected",
+      "  Action: check provider availability or retry with /model",
+    ]),
+  );
+});
 
-  it("builds system event rows and health columns", () => {
-    expect(
-      buildStatusSystemEventsRows({
-        queuedSystemEvents: ["one", "two", "three"],
-        limit: 2,
-      }),
-    ).toEqual([{ Event: "one" }, { Event: "two" }]);
-    expect(
-      buildStatusSystemEventsTrailer({
-        queuedSystemEvents: ["one", "two", "three"],
-        limit: 2,
-        muted: (value) => `muted(${value})`,
-      }),
-    ).toBe("muted(… +1 more)");
-    expect(statusHealthColumns).toEqual([
-      { key: "Item", header: "Item", minWidth: 10 },
-      { key: "Status", header: "Status", minWidth: 8 },
-      { key: "Detail", header: "Detail", flex: true, minWidth: 28 },
-    ]);
+it("classifies a mixed channel report through the real health formatter", async () => {
+  const account = {
+    accountId: "default",
+    configured: true,
+    linked: true,
+    healthState: "healthy",
+  } satisfies HealthSummary["channels"][string];
+  expect(
+    await healthRows({
+      channels: {
+        healthy: account,
+        failed: { ...account, probe: { ok: false, error: "sync rejected" } },
+        unknown: { ...account, healthState: "unknown" },
+        unconfigured: { ...account, configured: false },
+        disabled: { ...account, enabled: false, lastError: "previous start failed" },
+        linked: { accountId: "default", linked: true },
+        unlinked: { accountId: "default", linked: false },
+        probed: {
+          accountId: "default",
+          probe: { ok: true, elapsedMs: 5, bot: { username: "testbot" } },
+        },
+      },
+    }),
+  ).toEqual([
+    { Item: "Gateway", Status: "reachable", Detail: "42ms" },
+    { Item: "healthy", Status: "OK", Detail: "healthy" },
+    { Item: "failed", Status: "WARN", Detail: "failed (unknown) - sync rejected" },
+    { Item: "unknown", Status: "WARN", Detail: "unknown" },
+    { Item: "unconfigured", Status: "OFF", Detail: "not configured" },
+    { Item: "disabled", Status: "OFF", Detail: "disabled (previous start failed)" },
+    { Item: "linked", Status: "LINKED", Detail: "linked" },
+    { Item: "unlinked", Status: "UNLINKED", Detail: "not linked" },
+    { Item: "probed", Status: "OK", Detail: "ok (@testbot) (5ms)" },
+  ]);
+});
+
+it("marks colon-bearing plugin failures as warnings", async () => {
+  const rows = await healthRows({
+    plugins: {
+      loaded: ["broken:ok"],
+      errors: [
+        pluginHealthError("broken:ok", "service scheduler: address already in use", {
+          activated: true,
+          failurePhase: "service",
+        }),
+      ],
+    },
+  });
+  expect(rows).toContainEqual({
+    Item: "Plugin",
+    Status: "WARN",
+    Detail: "failed - broken:ok: service scheduler: address already in use; run openclaw doctor",
+  });
+});
+
+it("shows blocked ingress even when the channel connection is healthy", async () => {
+  const rows = await healthRows({
+    channels: { Telegram: { accountId: "ops", healthState: "healthy" } },
+    deliveryQueues: {
+      failed: [],
+      ingressPressure: [
+        {
+          channelId: "telegram",
+          accountId: "ops",
+          laneCount: 1,
+          pendingCount: 2,
+          claimedCount: 0,
+          blockedCount: 1,
+          oldestReceivedAt: Date.now(),
+        },
+      ],
+    },
+  });
+  expect(rows).toContainEqual({ Item: "Telegram", Status: "OK", Detail: "healthy" });
+  expect(rows).toContainEqual({
+    Item: "Delivery queue",
+    Status: "WARN",
+    Detail: expect.stringContaining(
+      "inbound telegram/ops: 1 pressured lane, 2 pending, 0 claimed, 1 blocked",
+    ),
+  });
+});
+
+it("adds degraded event-loop health to status rows", async () => {
+  expect(
+    await healthRows({
+      eventLoop: {
+        degraded: true,
+        degradedSinceMs: 180_000,
+        reasons: ["event_loop_delay"],
+        intervalMs: 62_000,
+        delayP99Ms: 61_000,
+        delayMaxMs: 62_000,
+        utilization: 1,
+        cpuCoreRatio: 1,
+      },
+    }),
+  ).toEqual([
+    { Item: "Gateway", Status: "reachable", Detail: "42ms" },
+    {
+      Item: "Event loop",
+      Status: "WARN",
+      Detail:
+        "degraded for 3m · reasons event_loop_delay · max 62000ms · p99 61000ms · util 1 · cpu 1",
+    },
+  ]);
+});
+
+it("warns when deep health says the retained Node executable is gone", async () => {
+  const execPath = "/opt/homebrew/Cellar/node@24/24.20.0/bin/node";
+  vi.spyOn(theme, "success").mockImplementation((value) => `ok(${String(value)})`);
+  vi.spyOn(theme, "warn").mockImplementation((value) => `warn(${String(value)})`);
+  const rows = await healthRows({ childRuntime: { execPath, available: false } });
+
+  expect(rows?.[0]).toEqual({ Item: "Gateway", Status: "ok(reachable)", Detail: "42ms" });
+  expect(rows?.[1]).toEqual({
+    Item: "Gateway runtime",
+    Status: "warn(WARN)",
+    Detail: `The Node.js runtime this Gateway started with (${execPath}) can no longer start worker processes, likely because it was upgraded or removed. Restart the Gateway.`,
   });
 });

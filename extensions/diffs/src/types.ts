@@ -8,9 +8,9 @@ export const DIFF_IMAGE_QUALITY_PRESETS = ["standard", "hq", "print"] as const;
 export const DIFF_OUTPUT_FORMATS = ["png", "pdf"] as const;
 
 export type DiffLayout = (typeof DIFF_LAYOUTS)[number];
-export type DiffMode = (typeof DIFF_MODES)[number];
+type DiffMode = (typeof DIFF_MODES)[number];
 export type DiffTheme = (typeof DIFF_THEMES)[number];
-export type DiffIndicators = (typeof DIFF_INDICATORS)[number];
+type DiffIndicators = (typeof DIFF_INDICATORS)[number];
 export type DiffImageQualityPreset = (typeof DIFF_IMAGE_QUALITY_PRESETS)[number];
 export type DiffOutputFormat = (typeof DIFF_OUTPUT_FORMATS)[number];
 export type DiffRenderTarget = "viewer" | "image" | "both";
@@ -40,22 +40,20 @@ export type DiffToolDefaults = DiffPresentationDefaults &
     ttlSeconds: number;
   };
 
-type BeforeAfterDiffInput = {
-  kind: "before_after";
-  before: string;
-  after: string;
-  path?: string;
-  lang?: string;
-  title?: string;
-};
-
-type PatchDiffInput = {
-  kind: "patch";
-  patch: string;
-  title?: string;
-};
-
-export type DiffInput = BeforeAfterDiffInput | PatchDiffInput;
+export type DiffInput =
+  | {
+      kind: "before_after";
+      before: string;
+      after: string;
+      path?: string;
+      lang?: string;
+      title?: string;
+    }
+  | {
+      kind: "patch";
+      patch: string;
+      title?: string;
+    };
 
 export type DiffRenderOptions = {
   presentation: DiffPresentationDefaults;
@@ -67,6 +65,7 @@ export type DiffRenderOptions = {
     maxPixels: number;
   };
   expandUnchanged: boolean;
+  languagePackAvailable?: boolean;
 };
 
 export type DiffViewerOptions = {
@@ -93,14 +92,6 @@ export type DiffViewerPayload = {
   fileDiff?: FileDiffMetadata;
 };
 
-export type RenderedDiffDocument = {
-  html?: string;
-  imageHtml?: string;
-  title: string;
-  fileCount: number;
-  inputKind: DiffInput["kind"];
-};
-
 export type DiffArtifactContext = {
   agentId?: string;
   sessionId?: string;
@@ -108,19 +99,36 @@ export type DiffArtifactContext = {
   agentAccountId?: string;
 };
 
+export type DiffViewerArtifactMetadata = {
+  version: 1;
+  kind: "viewer";
+  encoding: "gzip";
+  tokenHash: string;
+  title: string;
+  inputKind: DiffInput["kind"];
+  fileCount: number;
+  decodedBytes: number;
+  context?: DiffArtifactContext;
+};
+
+export type DiffRenderedFileArtifactMetadata = {
+  version: 1;
+  kind: "rendered_file";
+  format: DiffOutputFormat;
+  context?: DiffArtifactContext;
+};
+
+export type DiffArtifactBlobMetadata =
+  | DiffViewerArtifactMetadata
+  | DiffRenderedFileArtifactMetadata;
+
 export type DiffArtifactMeta = {
   id: string;
-  token: string;
-  createdAt: string;
   expiresAt: string;
   title: string;
   inputKind: DiffInput["kind"];
   fileCount: number;
   viewerPath: string;
-  htmlPath: string;
-  context?: DiffArtifactContext;
-  filePath?: string;
-  imagePath?: string;
 };
 
 export const DIFF_ARTIFACT_ID_PATTERN = /^[0-9a-f]{20}$/;

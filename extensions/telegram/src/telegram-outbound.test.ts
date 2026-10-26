@@ -1,32 +1,52 @@
+// Telegram tests cover telegram outbound plugin behavior.
 import { describe, expect, it } from "vitest";
-import { markdownToTelegramHtmlChunks, splitTelegramHtmlChunks } from "./format.js";
 import { telegramOutbound } from "./outbound-adapter.js";
-import { clearTelegramRuntime } from "./runtime.js";
+import { clearTelegramRuntimeForTest as clearTelegramRuntime } from "./runtime.test-support.js";
 
 describe("telegramPlugin outbound", () => {
-  it("uses static outbound contract when Telegram runtime is uninitialized", () => {
-    clearTelegramRuntime();
-    const text = `${"hello\n".repeat(1200)}tail`;
-    const expected = markdownToTelegramHtmlChunks(text, 4000);
-
-    expect(telegramOutbound.chunker?.(text, 4000)).toEqual(expected);
-    expect(telegramOutbound.deliveryMode).toBe("direct");
-    expect(telegramOutbound.chunkerMode).toBe("markdown");
-    expect(telegramOutbound.chunkedTextFormatting).toEqual({ parseMode: "HTML" });
-    expect(telegramOutbound.textChunkLimit).toBe(4000);
-    expect(telegramOutbound.sanitizeText).toBeUndefined();
-    expect(telegramOutbound.pollMaxOptions).toBe(10);
+  it("resolves the rich-message delivery limit", () => {
+    const resolveLimit = telegramOutbound.resolveEffectiveTextChunkLimit;
+    expect(resolveLimit?.({ cfg: {}, accountId: "default", fallbackLimit: 4000 })).toBe(4000);
+    expect(
+      resolveLimit?.({
+        cfg: { channels: { telegram: { richMessages: true } } },
+        accountId: "default",
+        fallbackLimit: 4000,
+      }),
+    ).toBe(32768);
   });
 
-  it("preserves explicit HTML parse mode before chunking", () => {
+  it("preserves a selected account's lower rich-message limit", () => {
+    expect(
+      telegramOutbound.resolveEffectiveTextChunkLimit?.({
+        cfg: {
+          channels: {
+            telegram: {
+              accounts: { rich: { richMessages: true, textChunkLimit: 1200 } },
+            },
+          },
+        },
+        accountId: "rich",
+        fallbackLimit: 4000,
+      }),
+    ).toBe(1200);
+  });
+  it("strips GLM arg_key shadow XML and keeps a finished literal marker", () => {
     clearTelegramRuntime();
-    const text = "<b>hi</b>";
-
-    expect(telegramOutbound.chunker?.(text, 4000, { formatting: { parseMode: "HTML" } })).toEqual(
-      splitTelegramHtmlChunks(text, 4000),
+    const shadow =
+      "Visible\n<tool_call>exec<arg_key>command</arg_key><arg_value>echo redacted</arg_value></tool_call>\nDone.";
+    const literal = "Use <tool_call>exec<arg_key> literally. Example: `</arg_key>`.";
+    const cfg = { channels: { telegram: { richMessages: true } } };
+    expect(telegramOutbound.sanitizeText?.({ text: shadow, payload: { text: shadow } })).toBe(
+      "Visible\n\nDone.",
     );
-    expect(telegramOutbound.chunker?.(text, 4000)).toEqual(
-      markdownToTelegramHtmlChunks(text, 4000),
-    );
+    expect(
+      telegramOutbound.sanitizeText?.({
+        text: literal,
+        payload: { text: literal },
+        cfg,
+        accountId: "default",
+      }),
+    ).toBe(literal);
   });
 });

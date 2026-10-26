@@ -1,32 +1,50 @@
+import { resolveGatewayPublicOrigin } from "./gateway-public-origin.js";
 import { DEFAULT_GATEWAY_PORT } from "./paths.js";
 import type { OpenClawConfig } from "./types.openclaw.js";
 
+/** An authored list overrides the advertised origin, including an empty list. */
+export function resolveControlUiAllowedOrigins(
+  config: Pick<OpenClawConfig, "gateway"> | undefined,
+): string[] {
+  const configured = config?.gateway?.controlUi?.allowedOrigins;
+  if (configured !== undefined) {
+    return configured;
+  }
+  const origin = resolveGatewayPublicOrigin(config);
+  return origin ? [origin] : [];
+}
+
+/** Non-loopback gateway bind modes that require explicit Control UI allowed origins. */
 export type GatewayNonLoopbackBindMode = "lan" | "tailnet" | "custom" | "auto";
 
 export function isGatewayNonLoopbackBindMode(bind: unknown): bind is GatewayNonLoopbackBindMode {
   return bind === "lan" || bind === "tailnet" || bind === "custom" || bind === "auto";
 }
 
+/** Returns whether Control UI origin config is already explicit enough for non-loopback binds. */
 export function hasConfiguredControlUiAllowedOrigins(params: {
   allowedOrigins: unknown;
   dangerouslyAllowHostHeaderOriginFallback: unknown;
+  publicOrigin?: unknown;
 }): boolean {
   if (params.dangerouslyAllowHostHeaderOriginFallback === true) {
     return true;
   }
+  const allowedOrigins =
+    params.allowedOrigins === undefined && typeof params.publicOrigin === "string"
+      ? resolveControlUiAllowedOrigins({ gateway: { publicOrigin: params.publicOrigin } })
+      : params.allowedOrigins;
   return (
-    Array.isArray(params.allowedOrigins) &&
-    params.allowedOrigins.some((origin) => typeof origin === "string" && origin.trim().length > 0)
+    Array.isArray(allowedOrigins) &&
+    allowedOrigins.some((origin) => typeof origin === "string" && origin.trim().length > 0)
   );
 }
 
-export function resolveGatewayPortWithDefault(
-  port: unknown,
-  fallback = DEFAULT_GATEWAY_PORT,
-): number {
-  return typeof port === "number" && port > 0 ? port : fallback;
+export function resolveGatewayPortWithDefault(port: unknown): number {
+  return typeof port === "number" && port > 0 ? port : DEFAULT_GATEWAY_PORT;
 }
 
+/** Builds loopback plus custom-bind Control UI origins for a resolved gateway port. */
 export function buildDefaultControlUiAllowedOrigins(params: {
   port: number;
   bind: unknown;
@@ -43,10 +61,10 @@ export function buildDefaultControlUiAllowedOrigins(params: {
   return [...origins];
 }
 
+/** Seeds safe default Control UI origins before non-loopback gateway startup validation. */
 export function ensureControlUiAllowedOriginsForNonLoopbackBind(
   config: OpenClawConfig,
   opts?: {
-    defaultPort?: number;
     requireControlUiEnabled?: boolean;
     /** Resolved runtime bind override. Mirrors Gateway runtime precedence:
      *  explicit CLI/runtime bind wins over gateway.bind. */
@@ -82,6 +100,7 @@ export function ensureControlUiAllowedOriginsForNonLoopbackBind(
   if (
     hasConfiguredControlUiAllowedOrigins({
       allowedOrigins: config.gateway?.controlUi?.allowedOrigins,
+      publicOrigin: config.gateway?.publicOrigin,
       dangerouslyAllowHostHeaderOriginFallback:
         config.gateway?.controlUi?.dangerouslyAllowHostHeaderOriginFallback,
     })
@@ -89,10 +108,7 @@ export function ensureControlUiAllowedOriginsForNonLoopbackBind(
     return { config, seededOrigins: null, bind: effectiveBind };
   }
 
-  const port = resolveGatewayPortWithDefault(
-    opts?.runtimePort ?? config.gateway?.port,
-    opts?.defaultPort,
-  );
+  const port = resolveGatewayPortWithDefault(opts?.runtimePort ?? config.gateway?.port);
   const seededOrigins = buildDefaultControlUiAllowedOrigins({
     port,
     bind: effectiveBind,

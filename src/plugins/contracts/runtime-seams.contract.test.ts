@@ -1,131 +1,85 @@
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
 } from "../../config/runtime-snapshot.js";
 import { fetchWithSsrFGuard } from "../../infra/net/fetch-guard.js";
-import { TEST_UNDICI_RUNTIME_DEPS_KEY } from "../../infra/net/undici-runtime.js";
+import * as activationCheck from "../../plugin-sdk/facade-activation-check.runtime.js";
+import * as facadeRuntime from "../../plugin-sdk/facade-runtime.js";
+import { writeFacadeFiles } from "../../plugin-sdk/facade-runtime.test-support.js";
+import { captureEnv } from "../../test-utils/env.js";
 
-const originalBundledPluginsDir = process.env.OPENCLAW_BUNDLED_PLUGINS_DIR;
-const originalStateDir = process.env.OPENCLAW_STATE_DIR;
-const originalGlobalFetch = globalThis.fetch;
-const tempDirs: string[] = [];
+vi.mock("../../config/plugin-auto-enable.js", () => ({
+  applyPluginAutoEnable: ({ config }: { config?: unknown }) => ({
+    config: config ?? {},
+    autoEnabledReasons: {},
+  }),
+}));
 
-function createInstalledRuntimePluginDir(
-  pluginId: string,
-  marker: string,
-): {
-  bundledDir: string;
-  stateDir: string;
-  pluginRoot: string;
-} {
-  const bundledDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), `openclaw-runtime-contract-bundled-${pluginId}-`),
-  );
-  const stateDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), `openclaw-runtime-contract-state-${pluginId}-`),
-  );
-  tempDirs.push(bundledDir, stateDir);
+const originalEnv = captureEnv(["OPENCLAW_BUNDLED_PLUGINS_DIR", "OPENCLAW_STATE_DIR"]);
+const TEST_UNDICI_RUNTIME_DEPS_KEY = "__OPENCLAW_TEST_UNDICI_RUNTIME_DEPS__";
+const tempDirs = createTempDirTracker();
+
+function createInstalledRuntimePluginDir(pluginId: string, marker: string) {
+  const bundledDir = tempDirs.make(`openclaw-runtime-contract-bundled-${pluginId}-`);
+  const stateDir = tempDirs.make(`openclaw-runtime-contract-state-${pluginId}-`);
   const pluginRoot = path.join(stateDir, "extensions", pluginId);
-  fs.mkdirSync(pluginRoot, { recursive: true });
-  fs.writeFileSync(
-    path.join(pluginRoot, "runtime-api.js"),
-    `export const marker = ${JSON.stringify(marker)};\n`,
-    "utf8",
-  );
-  fs.writeFileSync(
-    path.join(pluginRoot, "package.json"),
-    JSON.stringify({
+  writeFacadeFiles(pluginRoot, {
+    "runtime-api.js": `export const marker = ${JSON.stringify(marker)};\n`,
+    "package.json": {
       name: `@openclaw/${pluginId}`,
       version: "0.0.0",
-      openclaw: {
-        extensions: ["./runtime-api.js"],
-        channel: { id: pluginId },
-      },
-    }),
-    "utf8",
-  );
-  fs.writeFileSync(
-    path.join(pluginRoot, "openclaw.plugin.json"),
-    JSON.stringify({
+      type: "module",
+      openclaw: { extensions: ["./runtime-api.js"], channel: { id: pluginId } },
+    },
+    "openclaw.plugin.json": {
       id: pluginId,
       channels: [pluginId],
       configSchema: { type: "object", additionalProperties: false, properties: {} },
-    }),
-    "utf8",
-  );
-  return {
-    bundledDir,
-    stateDir,
-    pluginRoot,
-  };
+    },
+  });
+  return { bundledDir, stateDir, pluginRoot };
 }
 
 afterEach(() => {
   clearRuntimeConfigSnapshot();
+  facadeRuntime.resetFacadeRuntimeStateForTest();
   vi.restoreAllMocks();
-  vi.resetModules();
-  vi.doUnmock("../../config/plugin-auto-enable.js");
-  Reflect.deleteProperty(globalThis as object, TEST_UNDICI_RUNTIME_DEPS_KEY);
-  if (originalBundledPluginsDir === undefined) {
-    delete process.env.OPENCLAW_BUNDLED_PLUGINS_DIR;
-  } else {
-    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = originalBundledPluginsDir;
-  }
-  if (originalStateDir === undefined) {
-    delete process.env.OPENCLAW_STATE_DIR;
-  } else {
-    process.env.OPENCLAW_STATE_DIR = originalStateDir;
-  }
-  if (originalGlobalFetch) {
-    (globalThis as Record<string, unknown>).fetch = originalGlobalFetch;
-  } else {
-    Reflect.deleteProperty(globalThis as object, "fetch");
-  }
-  for (const dir of tempDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  vi.unstubAllGlobals();
+  originalEnv.restore();
+  tempDirs.cleanup();
 });
 
 describe("shared runtime seam contracts", () => {
   it("allows activated runtime facades when the resolved plugin root matches an installed-style manifest record", async () => {
     const pluginId = "line-contract-fixture";
-    const { bundledDir, stateDir } = createInstalledRuntimePluginDir(pluginId, "line-ok");
+    const { bundledDir, stateDir, pluginRoot } = createInstalledRuntimePluginDir(
+      pluginId,
+      "line-ok",
+    );
     process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = bundledDir;
     process.env.OPENCLAW_STATE_DIR = stateDir;
-    setRuntimeConfigSnapshot({
-      plugins: {
-        entries: {
-          [pluginId]: {
-            enabled: true,
-          },
-        },
-      },
-    });
-    vi.resetModules();
-    vi.doMock("../../config/plugin-auto-enable.js", () => ({
-      applyPluginAutoEnable: ({ config }: { config?: unknown }) => ({
-        config: config ?? {},
-        autoEnabledReasons: {},
-      }),
-    }));
-
-    const facadeRuntime = await import("../../plugin-sdk/facade-runtime.js");
+    setRuntimeConfigSnapshot({ plugins: { entries: { [pluginId]: { enabled: true } } } });
     facadeRuntime.resetFacadeRuntimeStateForTest();
 
+    const location = {
+      modulePath: path.join(pluginRoot, "runtime-api.js"),
+      boundaryRoot: pluginRoot,
+    };
     expect(
-      facadeRuntime.canLoadActivatedBundledPluginPublicSurface({
+      activationCheck.resolveBundledPluginPublicSurfaceAccess({
         dirName: pluginId,
         artifactBasename: "runtime-api.js",
-      }),
+        location,
+        sourceExtensionsRoot: bundledDir,
+      }).allowed,
     ).toBe(true);
     expect(
-      facadeRuntime.loadActivatedBundledPluginPublicSurfaceModuleSync<{ marker: string }>({
-        dirName: pluginId,
-        artifactBasename: "runtime-api.js",
+      facadeRuntime.testing.loadFacadeModuleAtLocationSync<{ marker: string }>({
+        location,
+        trackedPluginId: pluginId,
       }).marker,
     ).toBe("line-ok");
     expect(facadeRuntime.listImportedBundledPluginFacadeIds()).toEqual([pluginId]);
@@ -149,13 +103,13 @@ describe("shared runtime seam contracts", () => {
       return new Response("mock", { status: 200 });
     });
 
-    (globalThis as Record<string, unknown>).fetch = globalFetch as typeof fetch;
-    (globalThis as Record<string, unknown>)[TEST_UNDICI_RUNTIME_DEPS_KEY] = {
+    vi.stubGlobal("fetch", globalFetch);
+    vi.stubGlobal(TEST_UNDICI_RUNTIME_DEPS_KEY, {
       Agent: MockAgent,
       EnvHttpProxyAgent: MockEnvHttpProxyAgent,
       ProxyAgent: MockProxyAgent,
       fetch: runtimeFetch,
-    };
+    });
 
     const lookupFn = vi.fn(
       async () => ({ address: "93.184.216.34", family: 4 }) as const,

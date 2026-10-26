@@ -1,3 +1,4 @@
+// Whatsapp plugin module implements pairing security harness behavior.
 import { vi, type Mock } from "vitest";
 
 export type AsyncMock<TArgs extends unknown[] = unknown[], TResult = unknown> = {
@@ -24,7 +25,8 @@ vi.mock("openclaw/plugin-sdk/runtime-config-snapshot", async () => {
   >("openclaw/plugin-sdk/runtime-config-snapshot");
   return {
     ...actual,
-    getRuntimeConfig: (...args: unknown[]) => loadConfigMock(...args),
+    readRuntimeConfig: (...args: unknown[]) => loadConfigMock(...args),
+    captureRuntimeConfigAsyncReader: () => async () => loadConfigMock(),
   };
 });
 

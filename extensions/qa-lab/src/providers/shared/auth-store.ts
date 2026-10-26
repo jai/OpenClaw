@@ -1,36 +1,56 @@
-import fs from "node:fs/promises";
 import path from "node:path";
-
-type QaAuthProfileCredential =
-  | {
-      type: "api_key";
-      provider: string;
-      key: string;
-      displayName?: string;
-    }
-  | {
-      type: "token";
-      provider: string;
-      token: string;
-    };
-
-export function resolveQaAgentAuthDir(params: { stateDir: string; agentId: string }): string {
-  return path.join(params.stateDir, "agents", params.agentId, "agent");
-}
+import {
+  loadAuthProfileStoreForRuntimeAsync,
+  type AuthProfileCredential,
+} from "openclaw/plugin-sdk/agent-runtime";
+import { updateAuthProfileStoreWithLock } from "openclaw/plugin-sdk/provider-auth";
 
 export async function writeQaAuthProfiles(params: {
-  agentDir: string;
-  profiles: Record<string, QaAuthProfileCredential>;
+  agentId: string;
+  profiles: Record<string, AuthProfileCredential>;
+  replace?: boolean;
+  stateDir: string;
 }): Promise<void> {
-  const authPath = path.join(params.agentDir, "auth-profiles.json");
-  const existing = await fs
-    .readFile(authPath, "utf8")
-    .then((raw) => JSON.parse(raw) as { profiles?: Record<string, QaAuthProfileCredential> })
-    .catch(() => ({ profiles: {} }));
-  await fs.mkdir(params.agentDir, { recursive: true });
-  await fs.writeFile(
-    authPath,
-    `${JSON.stringify({ version: 1, profiles: { ...existing.profiles, ...params.profiles } }, null, 2)}\n`,
-    "utf8",
+  const agentDir = path.join(params.stateDir, "agents", params.agentId, "agent");
+  // Surface pending legacy-source errors before the locked updater, whose
+  // public failure contract is intentionally nullable.
+  await readQaAuthProfiles(agentDir);
+  const updated = await updateAuthProfileStoreWithLock({
+    agentDir,
+    stateDir: params.stateDir,
+    saveOptions: {
+      filterExternalAuthProfiles: false,
+      syncExternalCli: false,
+    },
+    updater: (store) => {
+      store.version = 1;
+      store.profiles = params.replace
+        ? { ...params.profiles }
+        : { ...store.profiles, ...params.profiles };
+      if (params.replace) {
+        delete store.order;
+        delete store.lastGood;
+        delete store.usageStats;
+      }
+      return true;
+    },
+  });
+  if (!updated) {
+    throw new Error("Failed to stage the isolated QA auth profile store.");
+  }
+}
+
+export async function readQaAuthProfiles(agentDir: string): Promise<{
+  version: number;
+  profiles: Record<string, AuthProfileCredential>;
+}> {
+  const store = await loadAuthProfileStoreForRuntimeAsync(
+    agentDir,
+    { inheritedAuthDir: agentDir, readOnly: true, externalCli: { mode: "none" } },
+    { ...process.env, OPENCLAW_STATE_DIR: path.resolve(agentDir, "../../..") },
   );
+  return {
+    version: store.version,
+    profiles: store.profiles,
+  };
 }

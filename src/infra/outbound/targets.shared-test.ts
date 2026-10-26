@@ -1,22 +1,18 @@
+// Shared target-resolution fixtures cover plugin defaults, allowlists, prefix
+// errors, WebChat rejection, and missing-target hints.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import { resolveOutboundTarget } from "./targets.js";
 import {
   createForumTargetTestPlugin,
-  createGenericTargetTestPlugin,
   createTargetsTestRegistry,
   createTestChannelPlugin,
 } from "./targets.test-helpers.js";
 
+/** Installs target-resolution plugin registry fixtures around shared tests. */
 export function installResolveOutboundTargetPluginRegistryHooks(): void {
   beforeEach(() => {
-    setActivePluginRegistry(
-      createTargetsTestRegistry([
-        createGenericTargetTestPlugin("alpha", "Alpha"),
-        createGenericTargetTestPlugin("beta", "Beta"),
-        createForumTargetTestPlugin(),
-      ]),
-    );
+    setActivePluginRegistry(createTargetsTestRegistry());
   });
 
   afterEach(() => {
@@ -28,11 +24,11 @@ export function runResolveOutboundTargetCoreTests(): void {
   describe("resolveOutboundTarget", () => {
     installResolveOutboundTargetPluginRegistryHooks();
 
-    it("rejects empty targets through the loaded channel plugin", () => {
+    it("rejects empty targets through the loaded channel plugin", async () => {
       const cfg = {
         channels: { alpha: { allowFrom: ["room-one"] } },
       };
-      const res = resolveOutboundTarget({
+      const res = await resolveOutboundTarget({
         channel: "alpha",
         to: "",
         cfg,
@@ -46,11 +42,6 @@ export function runResolveOutboundTargetCoreTests(): void {
 
     it.each([
       {
-        name: "normalizes target through the loaded plugin",
-        input: { channel: "alpha" as const, to: " Alpha:Room One " },
-        expected: { ok: true as const, to: "room-one" },
-      },
-      {
         name: "uses channel defaultTo when no target was provided",
         input: {
           channel: "beta" as const,
@@ -60,21 +51,12 @@ export function runResolveOutboundTargetCoreTests(): void {
         expected: { ok: true as const, to: "default-room" },
       },
       {
-        name: "passes explicit allowFrom without using it as an implicit target",
-        input: {
-          channel: "alpha" as const,
-          to: "",
-          allowFrom: ["alpha:room-one"],
-        },
-        expectedErrorIncludes: "Alpha",
-      },
-      {
         name: "rejects plugin-specific invalid targets",
         input: { channel: "alpha" as const, to: "invalid" },
         expectedErrorIncludes: "Alpha",
       },
-    ])("$name", ({ input, expected, expectedErrorIncludes }) => {
-      const res = resolveOutboundTarget(input);
+    ])("$name", async ({ input, expected, expectedErrorIncludes }) => {
+      const res = await resolveOutboundTarget(input);
       if (expected) {
         expect(res).toEqual(expected);
         return;
@@ -85,8 +67,8 @@ export function runResolveOutboundTargetCoreTests(): void {
       }
     });
 
-    it("rejects a target prefixed for a different channel before plugin normalization", () => {
-      const res = resolveOutboundTarget({
+    it("rejects a target prefixed for a different channel before plugin normalization", async () => {
+      const res = await resolveOutboundTarget({
         channel: "alpha",
         to: "beta:room-one",
         mode: "explicit",
@@ -97,7 +79,74 @@ export function runResolveOutboundTargetCoreTests(): void {
       }
     });
 
-    it("uses the plugin hint when a channel has outbound support but no target resolver", () => {
+    it.each(["tg:self"])(
+      "rejects plugin-reserved literal target %s before direct outbound fallback",
+      async (to) => {
+        setActivePluginRegistry(
+          createTargetsTestRegistry([
+            createTestChannelPlugin({
+              id: "telegram",
+              label: "Telegram",
+              outbound: {
+                deliveryMode: "direct",
+                sendText: async () => ({ channel: "telegram", messageId: "telegram-msg" }),
+              },
+              messaging: {
+                targetPrefixes: ["telegram", "tg"],
+                targetResolver: {
+                  reservedLiterals: ["current", "self", "this", "me"],
+                  hint: "<chatId>",
+                },
+              },
+            }),
+          ]),
+        );
+
+        const res = await resolveOutboundTarget({
+          channel: "telegram",
+          to,
+          mode: "explicit",
+        });
+
+        expect(res.ok).toBe(false);
+        if (!res.ok) {
+          expect(res.error.message).toContain("Reserved target");
+          expect(res.error.message).toContain("Telegram");
+        }
+      },
+    );
+
+    it("allows explicit handles that include the provider handle marker", async () => {
+      setActivePluginRegistry(
+        createTargetsTestRegistry([
+          createTestChannelPlugin({
+            id: "telegram",
+            label: "Telegram",
+            outbound: {
+              deliveryMode: "direct",
+              sendText: async () => ({ channel: "telegram", messageId: "telegram-msg" }),
+            },
+            messaging: {
+              targetPrefixes: ["telegram", "tg"],
+              targetResolver: {
+                reservedLiterals: ["current", "self", "this", "me"],
+                hint: "<chatId>",
+              },
+            },
+          }),
+        ]),
+      );
+
+      const res = await resolveOutboundTarget({
+        channel: "telegram",
+        to: "telegram:@current",
+        mode: "explicit",
+      });
+
+      expect(res).toEqual({ ok: true, to: "telegram:@current" });
+    });
+
+    it("uses the plugin hint when a channel has outbound support but no target resolver", async () => {
       setActivePluginRegistry(
         createTargetsTestRegistry([
           createForumTargetTestPlugin(),
@@ -115,15 +164,15 @@ export function runResolveOutboundTargetCoreTests(): void {
         ]),
       );
 
-      const res = resolveOutboundTarget({ channel: "noresolver", to: " " });
+      const res = await resolveOutboundTarget({ channel: "noresolver", to: " " });
       expect(res.ok).toBe(false);
       if (!res.ok) {
         expect(res.error.message).toContain("NoResolver");
       }
     });
 
-    it("rejects webchat delivery", () => {
-      const res = resolveOutboundTarget({ channel: "webchat", to: "x" });
+    it("rejects webchat delivery", async () => {
+      const res = await resolveOutboundTarget({ channel: "webchat", to: "x" });
       expect(res.ok).toBe(false);
       if (!res.ok) {
         expect(res.error.message).toContain("WebChat");

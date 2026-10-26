@@ -1,11 +1,26 @@
 import path from "node:path";
-import { isPathInside } from "./path-safety.js";
 
-export type BundledPluginLoadPathAliasKind = "current" | "legacy";
+/** Alias class for current packaged paths and legacy bundled extension paths. */
+type BundledPluginLoadPathAliasKind = "current" | "legacy";
 
-export type BundledPluginLoadPathAlias = {
+/** Load path alias used while resolving bundled plugins across package layouts. */
+type BundledPluginLoadPathAlias = {
   kind: BundledPluginLoadPathAliasKind;
   path: string;
+};
+
+/** Parsed path metadata for a bundled plugin in a packaged dist root. */
+type PackagedBundledPluginPath = {
+  packageRoot: string;
+  bundledRoot: string;
+  bundledLeaf: string;
+};
+
+/** Parsed path metadata for a bundled plugin in the legacy extensions root. */
+type LegacyBundledPluginPath = {
+  packageRoot: string;
+  legacyRoot: string;
+  bundledLeaf: string;
 };
 
 const PACKAGED_BUNDLED_ROOTS = [
@@ -13,6 +28,7 @@ const PACKAGED_BUNDLED_ROOTS = [
   path.join("dist-runtime", "extensions"),
 ] as const;
 
+/** Normalizes bundled lookup paths without preserving trailing separators. */
 export function normalizeBundledLookupPath(targetPath: string): string {
   const normalized = path.normalize(targetPath);
   const root = path.parse(normalized).root;
@@ -23,12 +39,12 @@ export function normalizeBundledLookupPath(targetPath: string): string {
   return trimmed;
 }
 
-function findPackagedBundledRoot(localPath: string): {
-  packageRoot: string;
-  bundledRoot: string;
-} | null {
+function findBundledRoot(
+  localPath: string,
+  roots: readonly string[] = PACKAGED_BUNDLED_ROOTS,
+): PackagedBundledPluginPath | null {
   const normalized = normalizeBundledLookupPath(localPath);
-  for (const packagedRoot of PACKAGED_BUNDLED_ROOTS) {
+  for (const packagedRoot of roots) {
     const marker = `${path.sep}${packagedRoot}`;
     const markerIndex = normalized.lastIndexOf(marker);
     if (markerIndex === -1) {
@@ -41,29 +57,49 @@ function findPackagedBundledRoot(localPath: string): {
     return {
       packageRoot: normalized.slice(0, markerIndex),
       bundledRoot: normalized.slice(0, markerEnd),
+      bundledLeaf: normalized.slice(markerEnd + path.sep.length),
     };
   }
   return null;
 }
 
-export function buildLegacyBundledPath(localPath: string): string | null {
-  const packaged = findPackagedBundledRoot(localPath);
+/** Parses a path under a packaged bundled plugin root. */
+export function parsePackagedBundledPluginPath(
+  localPath: string,
+): PackagedBundledPluginPath | null {
+  const packaged = findBundledRoot(localPath);
+  return packaged?.bundledLeaf ? packaged : null;
+}
+
+/** Builds the legacy extensions-root alias for a packaged bundled plugin path. */
+function buildLegacyBundledPath(localPath: string): string | null {
+  const packaged = parsePackagedBundledPluginPath(localPath);
   if (!packaged) {
     return null;
   }
-  const normalized = normalizeBundledLookupPath(localPath);
-  const bundledLeaf =
-    normalized === packaged.bundledRoot
-      ? ""
-      : normalized.slice(packaged.bundledRoot.length + path.sep.length);
-  return bundledLeaf ? path.join(packaged.packageRoot, "extensions", bundledLeaf) : null;
+  return path.join(packaged.packageRoot, "extensions", packaged.bundledLeaf);
 }
 
+/** Builds the legacy extensions root for a packaged bundled plugin root. */
 export function buildLegacyBundledRootPath(localPath: string): string | null {
-  const packaged = findPackagedBundledRoot(localPath);
+  const packaged = findBundledRoot(localPath);
   return packaged ? path.join(packaged.packageRoot, "extensions") : null;
 }
 
+/** Parses a path under the legacy bundled extensions root. */
+export function parseLegacyBundledPluginPath(localPath: string): LegacyBundledPluginPath | null {
+  const legacy = findBundledRoot(localPath, ["extensions"]);
+  if (!legacy?.bundledLeaf) {
+    return null;
+  }
+  return {
+    packageRoot: legacy.packageRoot,
+    legacyRoot: legacy.bundledRoot,
+    bundledLeaf: legacy.bundledLeaf,
+  };
+}
+
+/** Builds current and legacy aliases for a packaged bundled plugin path. */
 export function buildBundledPluginLoadPathAliases(localPath: string): BundledPluginLoadPathAlias[] {
   const legacyPath = buildLegacyBundledPath(localPath);
   if (!legacyPath) {
@@ -73,31 +109,4 @@ export function buildBundledPluginLoadPathAliases(localPath: string): BundledPlu
     { kind: "current", path: localPath },
     { kind: "legacy", path: legacyPath },
   ];
-}
-
-function isSameOrInside(baseDir: string, targetPath: string): boolean {
-  const base = path.resolve(normalizeBundledLookupPath(baseDir));
-  const target = path.resolve(normalizeBundledLookupPath(targetPath));
-  return target === base || isPathInside(base, target);
-}
-
-export function resolvePackagedBundledLoadPathAlias(params: {
-  bundledRoot?: string;
-  loadPath: string;
-}): BundledPluginLoadPathAlias | null {
-  if (!params.bundledRoot) {
-    return null;
-  }
-  const packaged = findPackagedBundledRoot(params.bundledRoot);
-  if (!packaged) {
-    return null;
-  }
-  const legacyRoot = path.join(packaged.packageRoot, "extensions");
-  if (isSameOrInside(params.bundledRoot, params.loadPath)) {
-    return { kind: "current", path: params.loadPath };
-  }
-  if (isSameOrInside(legacyRoot, params.loadPath)) {
-    return { kind: "legacy", path: params.loadPath };
-  }
-  return null;
 }

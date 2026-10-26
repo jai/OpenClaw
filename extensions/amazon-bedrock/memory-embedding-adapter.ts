@@ -1,7 +1,4 @@
-import {
-  isMissingEmbeddingApiKeyError,
-  type MemoryEmbeddingProviderAdapter,
-} from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
+import type { MemoryEmbeddingProviderAdapter } from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
 import {
   createBedrockEmbeddingProvider,
   DEFAULT_BEDROCK_EMBEDDING_MODEL,
@@ -14,8 +11,6 @@ export const bedrockMemoryEmbeddingProviderAdapter: MemoryEmbeddingProviderAdapt
   transport: "remote",
   authProviderId: "amazon-bedrock",
   autoSelectPriority: 60,
-  allowExplicitWhenConfiguredAuto: true,
-  shouldContinueAutoSelection: isMissingEmbeddingApiKeyError,
   create: async (options) => {
     if (!(await hasAwsCredentials())) {
       throw new Error(
@@ -23,7 +18,7 @@ export const bedrockMemoryEmbeddingProviderAdapter: MemoryEmbeddingProviderAdapt
           "AWS credentials are not available. " +
           "Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_PROFILE, or AWS_BEARER_TOKEN_BEDROCK, " +
           "configure an EC2/ECS/EKS role, " +
-          "or set agents.defaults.memorySearch.provider to another provider.",
+          "or set memory.search.provider to another provider.",
       );
     }
     const { provider, client } = await createBedrockEmbeddingProvider({
@@ -40,6 +35,7 @@ export const bedrockMemoryEmbeddingProviderAdapter: MemoryEmbeddingProviderAdapt
           region: client.region,
           model: client.model,
           dimensions: client.dimensions,
+          ...(client.endpoint ? { endpoint: client.endpoint } : {}),
         },
       },
     };

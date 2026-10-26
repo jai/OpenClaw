@@ -1,13 +1,11 @@
-import { normalizeOptionalString } from "../shared/string-coerce.js";
+import { safeParseJson } from "@openclaw/normalization-core/json-coercion";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 
-export function safeParseJson(value: string | null | undefined): unknown {
+export function parseGatewayPayload(value: string | null | undefined): unknown {
   const trimmed = normalizeOptionalString(value);
   if (!trimmed) {
     return undefined;
   }
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    return { payloadJSON: value };
-  }
+  const parsed = safeParseJson(trimmed);
+  return parsed === undefined ? { payloadJSON: value } : parsed;
 }

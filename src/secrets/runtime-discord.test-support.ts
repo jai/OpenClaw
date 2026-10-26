@@ -1,25 +1,13 @@
+/** Test bootstrap shim for Discord runtime-secret surface coverage. */
 import { vi } from "vitest";
-import { loadBundledChannelSecretContractApi } from "./channel-contract-api.js";
+import { createRuntimeChannelSecretRegistry } from "./runtime-channel-secret.test-support.js";
 
-const discordSecrets = loadBundledChannelSecretContractApi("discord");
-if (!discordSecrets?.collectRuntimeConfigAssignments) {
-  throw new Error("Missing Discord secret contract api");
-}
-const discordAssignments = discordSecrets.collectRuntimeConfigAssignments;
+/** Test-only bootstrap registry mock for Discord secret surface tests. */
+const discordRegistry = createRuntimeChannelSecretRegistry("discord", "Discord");
 
+// Keep the hoisted mock lazy while loading the real contract during module initialization.
+// mock-isolation: Use the real channel secret contract without loading plugin bootstrap state.
 vi.mock("../channels/plugins/bootstrap-registry.js", () => ({
-  getBootstrapChannelPlugin: (id: string) =>
-    id === "discord"
-      ? {
-          secrets: {
-            collectRuntimeConfigAssignments: discordAssignments,
-          },
-        }
-      : undefined,
-  getBootstrapChannelSecrets: (id: string) =>
-    id === "discord"
-      ? {
-          collectRuntimeConfigAssignments: discordAssignments,
-        }
-      : undefined,
+  getBootstrapChannelPlugin: (id: string) => discordRegistry.getBootstrapChannelPlugin(id),
+  getBootstrapChannelSecrets: (id: string) => discordRegistry.getBootstrapChannelSecrets(id),
 }));

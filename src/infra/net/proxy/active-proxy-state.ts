@@ -1,18 +1,20 @@
+// Active managed proxy registry tracks process-local proxy ownership plus
+// inherited child-process loopback policy carried through environment vars.
 import type { ProxyConfig } from "../../../config/zod-schema.proxy.js";
 import type { ManagedProxyTlsOptions } from "./proxy-tls.js";
 
 export type ActiveManagedProxyUrl = Readonly<URL>;
 
-export type ActiveManagedProxyLoopbackMode = NonNullable<NonNullable<ProxyConfig>["loopbackMode"]>;
+/** Managed proxy loopback behavior shared by gateway and child-process fetch paths. */
+type ActiveManagedProxyLoopbackMode = NonNullable<NonNullable<ProxyConfig>["loopbackMode"]>;
 
+/** Active proxy handle; its owner must stop it when the proxy scope ends. */
 export type ActiveManagedProxyRegistration = {
-  proxyUrl: ActiveManagedProxyUrl;
-  loopbackMode: ActiveManagedProxyLoopbackMode;
-  proxyTls?: ManagedProxyTlsOptions;
   stopped: boolean;
 };
 
-export type RegisterActiveManagedProxyOptions = {
+/** Registration metadata for managed proxy URLs and their TLS trust material. */
+type RegisterActiveManagedProxyOptions = {
   loopbackMode?: ActiveManagedProxyLoopbackMode;
   proxyTls?: ManagedProxyTlsOptions;
 };
@@ -20,7 +22,6 @@ export type RegisterActiveManagedProxyOptions = {
 let activeProxyUrl: ActiveManagedProxyUrl | undefined;
 let activeProxyLoopbackMode: ActiveManagedProxyLoopbackMode | undefined;
 let activeProxyTlsOptions: ManagedProxyTlsOptions | undefined;
-let activeProxyRegistrationCount = 0;
 
 function parseActiveManagedProxyLoopbackMode(
   value: string | undefined,
@@ -35,20 +36,20 @@ function readInheritedActiveManagedProxyLoopbackMode(): ActiveManagedProxyLoopba
   if (process.env["OPENCLAW_PROXY_ACTIVE"] !== "1") {
     return undefined;
   }
+  // Child processes inherit loopback policy through env even when they do not
+  // own the in-process proxy registration.
   return (
     parseActiveManagedProxyLoopbackMode(process.env["OPENCLAW_PROXY_LOOPBACK_MODE"]) ??
     "gateway-only"
   );
 }
 
+/** Registers the process's single active managed proxy. */
 export function registerActiveManagedProxyUrl(
   proxyUrl: URL,
-  options: ActiveManagedProxyLoopbackMode | RegisterActiveManagedProxyOptions = "gateway-only",
+  { loopbackMode = "gateway-only", proxyTls }: RegisterActiveManagedProxyOptions = {},
 ): ActiveManagedProxyRegistration {
   const normalizedProxyUrl = new URL(proxyUrl.href);
-  const loopbackMode =
-    typeof options === "string" ? options : (options.loopbackMode ?? "gateway-only");
-  const proxyTls = typeof options === "string" ? undefined : options.proxyTls;
   if (activeProxyUrl !== undefined) {
     if (activeProxyUrl.href !== normalizedProxyUrl.href) {
       throw new Error(
@@ -62,35 +63,25 @@ export function registerActiveManagedProxyUrl(
           "stop the current proxy before changing proxy.loopbackMode.",
       );
     }
-    if (!areProxyTlsOptionsEqual(activeProxyTlsOptions, proxyTls)) {
+    if (activeProxyTlsOptions?.ca !== proxyTls?.ca) {
       throw new Error(
         "proxy: cannot activate a managed proxy with different proxy TLS options while another proxy is active; " +
           "stop the current proxy before changing proxy.tls.",
       );
     }
-    activeProxyRegistrationCount += 1;
-    return {
-      proxyUrl: activeProxyUrl,
-      loopbackMode,
-      proxyTls: activeProxyTlsOptions,
-      stopped: false,
-    };
+    throw new Error(
+      "proxy: cannot activate a managed proxy while another proxy is active; " +
+        "stop the current proxy before changing proxy.proxyUrl.",
+    );
   }
 
   activeProxyUrl = normalizedProxyUrl;
   activeProxyLoopbackMode = loopbackMode;
   activeProxyTlsOptions = proxyTls;
-  activeProxyRegistrationCount = 1;
-  return { proxyUrl: activeProxyUrl, loopbackMode, proxyTls, stopped: false };
+  return { stopped: false };
 }
 
-function areProxyTlsOptionsEqual(
-  left: ManagedProxyTlsOptions | undefined,
-  right: ManagedProxyTlsOptions | undefined,
-): boolean {
-  return left?.ca === right?.ca;
-}
-
+/** Stops the active proxy registration and clears its process-wide state. */
 export function stopActiveManagedProxyRegistration(
   registration: ActiveManagedProxyRegistration,
 ): void {
@@ -98,32 +89,22 @@ export function stopActiveManagedProxyRegistration(
     return;
   }
   registration.stopped = true;
-  if (activeProxyUrl?.href !== registration.proxyUrl.href) {
-    return;
-  }
-  activeProxyRegistrationCount = Math.max(0, activeProxyRegistrationCount - 1);
-  if (activeProxyRegistrationCount === 0) {
-    activeProxyUrl = undefined;
-    activeProxyLoopbackMode = undefined;
-    activeProxyTlsOptions = undefined;
-  }
+  activeProxyUrl = undefined;
+  activeProxyLoopbackMode = undefined;
+  activeProxyTlsOptions = undefined;
 }
 
+/** Returns local loopback policy from in-process state or inherited proxy env. */
 export function getActiveManagedProxyLoopbackMode(): ActiveManagedProxyLoopbackMode | undefined {
   return activeProxyLoopbackMode ?? readInheritedActiveManagedProxyLoopbackMode();
 }
 
+/** Returns the in-process managed proxy URL, if this process owns the proxy. */
 export function getActiveManagedProxyUrl(): ActiveManagedProxyUrl | undefined {
   return activeProxyUrl;
 }
 
+/** Returns the active managed proxy TLS options used by undici/proxyline dispatchers. */
 export function getActiveManagedProxyTlsOptions(): ManagedProxyTlsOptions | undefined {
   return activeProxyTlsOptions;
-}
-
-export function _resetActiveManagedProxyStateForTests(): void {
-  activeProxyUrl = undefined;
-  activeProxyLoopbackMode = undefined;
-  activeProxyTlsOptions = undefined;
-  activeProxyRegistrationCount = 0;
 }

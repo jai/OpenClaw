@@ -1,30 +1,44 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { OPENCLAW_CRABLINE_DEFAULT_CHANNEL } from "@openclaw/crabline";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
-import {
-  buildQaAgenticParityComparison,
-  buildQaRuntimeParityReport,
-  renderQaAgenticParityMarkdownReport,
-  renderQaRuntimeParityMarkdownReport,
-  type QaParitySuiteSummary,
-  type QaRuntimeParitySuiteSummary,
-} from "./agentic-parity-report.js";
+import { parseBooleanValue, uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveQaParityPackScenarioIds } from "./agentic-parity.js";
+import { createQaArtifactRunId } from "./artifact-run-id.js";
 import { runQaCharacterEval, type QaCharacterModelOptions } from "./character-eval.js";
 import { resolveRepoRelativeOutputDir } from "./cli-paths.js";
-import { buildQaCoverageInventory, renderQaCoverageMarkdownReport } from "./coverage-report.js";
+import {
+  resolveQaCommandOutputDir,
+  writeQaCliReport,
+  writeQaCommandVerdict,
+} from "./cli-report.js";
+import {
+  buildQaConfidenceReport,
+  readQaConfidenceManifestFile,
+  renderQaConfidenceMarkdownReport,
+} from "./confidence-report.js";
+import { writeQaConfidenceSelfTestArtifacts } from "./confidence-self-test.js";
 import { buildQaDockerHarnessImage, writeQaDockerHarnessFiles } from "./docker-harness.js";
 import { runQaDockerUp } from "./docker-up.runtime.js";
+import {
+  resolveQaGatewayChildCommand,
+  type QaGatewayChildCommand,
+} from "./gateway-child-command.js";
 import type { QaCliBackendAuthMode } from "./gateway-child.js";
+import { renderJsonlReplayMarkdownReport, runJsonlReplay } from "./jsonl-replay.js";
 import { startQaLabServer } from "./lab-server.js";
 import { runQaManualLane } from "./manual-lane.runtime.js";
+import { resolveQaRuntimeModelPair } from "./model-selection.runtime.js";
 import { runQaMultipass } from "./multipass.runtime.js";
-import { DEFAULT_QA_LIVE_PROVIDER_MODE, getQaProvider } from "./providers/index.js";
+import { resolveQaChannelDriverSelection } from "./profile-channel-selection.runtime.js";
+import { qaProfileEvidencePlan } from "./profile-evidence-plan.js";
 import {
-  QA_FRONTIER_PARITY_BASELINE_LABEL,
-  QA_FRONTIER_PARITY_CANDIDATE_LABEL,
-} from "./providers/live-frontier/parity.js";
-import { startQaProviderServer } from "./providers/server-runtime.js";
+  resolveQaRunProfileExecutionSelection,
+  resolveQaRunProfileMembership,
+} from "./profile-planning.js";
+import { DEFAULT_QA_LIVE_PROVIDER_MODE } from "./providers/index.js";
+import { QA_CHANNEL_DEFAULT_SUITE_CONCURRENCY } from "./qa-channel-transport.js";
 import {
   addQaCredentialSet,
   diagnoseQaCredentialBroker,
@@ -33,48 +47,120 @@ import {
   removeQaCredentialSet,
   type QaCredentialRecord,
 } from "./qa-credentials-admin.runtime.js";
+import { parseQaCredentialPositiveIntegerEnv } from "./qa-credentials-common.runtime.js";
 import { normalizeQaThinkingLevel, type QaThinkingLevel } from "./qa-gateway-config.js";
-import { normalizeQaTransportId, type QaTransportId } from "./qa-transport-registry.js";
+import { normalizeQaTransportId } from "./qa-transport-registry.js";
 import {
   defaultQaModelForMode,
   normalizeQaProviderMode,
   type QaProviderMode,
   type QaProviderModeInput,
 } from "./run-config.js";
-import type { RuntimeId } from "./runtime-parity.js";
-import { readQaScenarioPack } from "./scenario-catalog.js";
-import { resolveQaScenarioPackScenarioIds } from "./scenario-packs.js";
-import { runQaSuiteFromRuntime } from "./suite-launch.runtime.js";
-import { readQaSuiteFailedScenarioCountFromSummary } from "./suite-summary.js";
+import type { RuntimeId } from "./runtime-id.js";
 import {
-  buildQaToolCoverageReport,
-  renderQaToolCoverageMarkdownReport,
-  type QaToolCoverageSuiteSummary,
-} from "./tool-coverage-report.js";
+  resolveQaRuntimePairLaneScenarioIds,
+  resolveQaRuntimePairScenarioSupport,
+} from "./runtime-pair-lane-selection.js";
+import {
+  QA_RUNTIME_PAIR_LANES,
+  readQaScenarioPack,
+  type QaRuntimePairLane,
+  type QaSeedScenarioWithSource,
+} from "./scenario-catalog.js";
+import { attachQaProfileScorecardEvidenceToFile } from "./scorecard-evidence.js";
+import {
+  qaScorecardChannelDriverSchema,
+  readQaScorecardTaxonomyReport,
+  type QaScorecardChannelDriver,
+  type QaScorecardEvidenceMode,
+} from "./scorecard-taxonomy.js";
+import { isQaSelfCheckSuccessful } from "./self-check.js";
+import { runQaSuiteWithInfraRetry } from "./suite-infra-retry.js";
+import { runQaFlowSuiteFromRuntime, runQaSuite } from "./suite-launch.runtime.js";
+import {
+  resolveQaSuiteScenarioChannel,
+  resolveQaSuiteScenarioChannels,
+  selectQaScenarioDefinitionsForChannelResolution,
+} from "./suite-planning.js";
+import {
+  readQaSuiteFailedOrSkippedScenarioCountFromFile,
+  resolveQaReportOnlyOptionalScenarioNames,
+} from "./suite-summary.js";
+export { runQaLabUiCommand, runQaProviderServerCommand } from "./cli-server.runtime.js";
 
-const QA_SUITE_INFRA_RETRY_LIMIT = 1;
+const QA_CREDENTIAL_PAYLOAD_MAX_BYTES_ENV = "OPENCLAW_QA_CREDENTIAL_PAYLOAD_MAX_BYTES";
+const DEFAULT_QA_CREDENTIAL_PAYLOAD_MAX_BYTES = 64 * 1024 * 1024;
+const QA_HARNESS_ROOT_MAX_PARENT_HOPS = 8;
 
-type InterruptibleServer = {
-  baseUrl: string;
-  stop(): Promise<void>;
+type QaCredentialCommandOptions = {
+  actorId?: string;
+  endpointPrefix?: string;
+  json?: boolean;
+  siteUrl?: string;
 };
-
-function resolveQaManualLaneModels(opts: {
-  providerMode: QaProviderMode;
+export type QaLabSelfCheckCommandOptions = {
+  repoRoot?: string;
+  output?: string;
+};
+type QaScenarioProviderCommandOptions = {
+  transportId?: string;
+  providerMode?: QaProviderModeInput;
   primaryModel?: string;
   alternateModel?: string;
-}) {
-  const primaryModel = opts.primaryModel?.trim() || defaultQaModelForMode(opts.providerMode);
-  const alternateModel = opts.alternateModel?.trim();
-  return {
-    primaryModel,
-    alternateModel:
-      alternateModel && alternateModel.length > 0
-        ? alternateModel
-        : opts.primaryModel?.trim()
-          ? primaryModel
-          : defaultQaModelForMode(opts.providerMode, true),
-  };
+  fastMode?: boolean;
+};
+type QaScenarioRunCommandOptions = QaScenarioProviderCommandOptions & {
+  evidenceMode?: QaScorecardEvidenceMode;
+  repoRoot?: string;
+  outputDir?: string;
+  concurrency?: number;
+  allowFailures?: boolean;
+  failFast?: boolean;
+};
+export type QaProfileCommandOptions = QaScenarioRunCommandOptions & {
+  profile: string;
+  surface?: string;
+  category?: string;
+  scenarioIds?: string[];
+};
+
+export type QaSuiteCommandOptions = QaScenarioRunCommandOptions & {
+  expandScenarioChannels?: boolean;
+  channelDriver?: string;
+  channel?: string;
+  runner?: string;
+  thinking?: string;
+  cliAuthMode?: string;
+  parityPack?: string;
+  scenarioIds?: string[];
+  scenarioDefinitions?: QaSeedScenarioWithSource[];
+  enabledPluginIds?: string[];
+  image?: string;
+  cpus?: number;
+  memory?: string;
+  disk?: string;
+  preflight?: boolean;
+  runtimePair?: string;
+  runtimePairLane?: string[];
+  sutAccountId?: string;
+  credentialFile?: string;
+  credentialSource?: string;
+  credentialRole?: string;
+  explicitScenarioSelection?: boolean;
+};
+
+function normalizeQaSuiteChannelDriver(
+  input?: string | null,
+): QaScorecardChannelDriver | undefined {
+  const normalized = input?.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+  const parsed = qaScorecardChannelDriverSchema.safeParse(normalized);
+  if (parsed.success) {
+    return parsed.data;
+  }
+  throw new Error(`--channel-driver must be one of qa-channel, crabline, or live, got "${input}".`);
 }
 
 function parseQaThinkingLevel(
@@ -111,176 +197,145 @@ function parseQaModelThinkingOverrides(entries: readonly string[] | undefined) {
 }
 
 function parseQaBooleanModelOption(label: string, value: string) {
-  switch (value.trim().toLowerCase()) {
-    case "1":
-    case "on":
-    case "true":
-    case "yes":
-      return true;
-    case "0":
-    case "false":
-    case "no":
-    case "off":
-      return false;
-    default:
-      throw new Error(`${label} fast must be one of true, false, on, off, yes, no, 1, 0`);
+  const parsed = parseBooleanValue(value);
+  if (parsed === undefined) {
+    throw new Error(`${label} fast must be one of true, false, on, off, yes, no, 1, 0`);
   }
+  return parsed;
 }
 
 function parseQaPositiveIntegerOption(label: string, value: number | undefined) {
   if (value === undefined) {
     return undefined;
   }
-  if (!Number.isFinite(value) || value < 1) {
+  if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`${label} must be a positive integer`);
   }
-  return Math.floor(value);
+  return value;
 }
 
-function normalizeQaOptionalModelRef(input: string | undefined) {
-  const model = input?.trim();
-  return model && model.length > 0 ? model : undefined;
+function normalizeQaRuntimeId(value: string): RuntimeId | undefined {
+  if (value === "openclaw" || value === "pi") {
+    return "openclaw";
+  }
+  if (value === "codex") {
+    return "codex";
+  }
+  return undefined;
 }
 
 function parseQaRuntimePair(value: string | undefined): [RuntimeId, RuntimeId] | undefined {
   if (!value?.trim()) {
     return undefined;
   }
-  const parts = value
-    .split(",")
-    .map((part) => part.trim().toLowerCase())
-    .filter(Boolean);
-  if (parts.length !== 2) {
-    throw new Error('--runtime-pair must use exactly two runtimes, e.g. "pi,codex".');
+  const runtimeNames = value.split(",");
+  if (runtimeNames.length !== 2) {
+    throw new Error('--runtime-pair must use exactly two runtimes, e.g. "openclaw,codex".');
   }
-  const [left, right] = parts;
-  if ((left !== "pi" && left !== "codex") || (right !== "pi" && right !== "codex")) {
-    throw new Error('--runtime-pair only supports "pi" and "codex".');
+  const [left, right] = runtimeNames.map((part) => normalizeQaRuntimeId(part.trim().toLowerCase()));
+  if (!left || !right) {
+    throw new Error('--runtime-pair only supports "openclaw" and "codex".');
   }
   if (left === right) {
     throw new Error("--runtime-pair must compare two different runtimes.");
   }
-  return ["pi", "codex"];
+  return [left, right];
 }
 
-async function readQaFailedScenarioCountFromSummary(summaryPath: string) {
-  let summaryText: string;
-  try {
-    summaryText = await fs.readFile(summaryPath, "utf8");
-  } catch (error) {
-    throw new Error(
-      `Could not read QA summary JSON at ${summaryPath}: ${formatErrorMessage(error)}`,
-      { cause: error },
-    );
-  }
-  let payload: unknown;
-  try {
-    payload = JSON.parse(summaryText) as unknown;
-  } catch (error) {
-    throw new Error(
-      `Could not parse QA summary JSON at ${summaryPath}: ${formatErrorMessage(error)}`,
-      { cause: error },
-    );
-  }
-  const failedScenarioCount = readQaSuiteFailedScenarioCountFromSummary(payload);
-  if (failedScenarioCount !== null) {
-    return failedScenarioCount;
-  }
-  throw new Error(
-    `QA summary at ${summaryPath} did not include counts.failed or scenarios[].status.`,
-  );
-}
-
-function isQaSuiteInfraRetryableError(error: unknown) {
-  const message = formatErrorMessage(error).toLowerCase();
-  return (
-    message.includes("agent.wait timeout") ||
-    message.includes("qa cli timed out") ||
-    message.includes("readyz") ||
-    message.includes("gateway healthy") ||
-    message.includes("transport ready") ||
-    message.includes("waiting for qa-channel ready") ||
-    message.includes("econnreset") ||
-    message.includes("econnrefused") ||
-    message.includes("socket hang up") ||
-    message.includes("could not read qa summary json") ||
-    message.includes("could not parse qa summary json") ||
-    message.includes("did not include counts.failed or scenarios[].status") ||
-    message.includes("did not produce report artifact")
-  );
-}
-
-async function assertQaSuiteArtifacts(result: { reportPath: string; summaryPath: string }) {
-  try {
-    await fs.access(result.reportPath);
-  } catch (error) {
-    throw new Error(
-      `QA suite did not produce report artifact at ${result.reportPath}: ${formatErrorMessage(error)}`,
-      { cause: error },
-    );
-  }
-  await readQaFailedScenarioCountFromSummary(result.summaryPath);
-}
-
-async function runQaSuiteFromRuntimeWithInfraRetry(
-  params: Parameters<typeof runQaSuiteFromRuntime>[0],
-  maxRetries = QA_SUITE_INFRA_RETRY_LIMIT,
-) {
-  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-    try {
-      const result = await runQaSuiteFromRuntime(params);
-      await assertQaSuiteArtifacts(result);
-      return result;
-    } catch (error) {
-      const retryable = isQaSuiteInfraRetryableError(error);
-      if (!retryable || attempt >= maxRetries) {
-        throw error;
-      }
-      process.stderr.write(
-        `[qa-suite] infra retry ${attempt + 1}/${maxRetries}: ${formatErrorMessage(error)}\n`,
+function parseQaRuntimePairLaneFilters(input: string[] | undefined): QaRuntimePairLane[] {
+  const rawValues = [
+    ...new Set(
+      (input ?? [])
+        .flatMap((value) => value.split(","))
+        .map((value) => value.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+  const validLanes = new Set<string>(QA_RUNTIME_PAIR_LANES);
+  for (const value of rawValues) {
+    if (!validLanes.has(value)) {
+      throw new Error(
+        `--runtime-pair-lane must be one of ${QA_RUNTIME_PAIR_LANES.join(", ")}, got "${value}".`,
       );
     }
   }
-  throw new Error("unreachable qa suite retry state");
+  return rawValues as QaRuntimePairLane[];
 }
 
-async function runQaParityPreflight(params: {
-  repoRoot: string;
-  transportId: QaTransportId;
-  providerMode: QaProviderMode;
-  primaryModel?: string;
-  alternateModel?: string;
-  allowFailures?: boolean;
+function rejectNonFlowScenarioIds(params: {
+  option: "--runner multipass" | "--runtime-pair";
+  scenarioIds: readonly string[];
 }) {
-  const outputDir = path.join(
-    params.repoRoot,
-    ".artifacts",
-    "qa-e2e",
-    "preflight",
-    `suite-${Date.now().toString(36)}`,
+  const scenarioIds = params.scenarioIds;
+  if (scenarioIds.length === 0) {
+    return;
+  }
+  const scenarioById = new Map(
+    readQaScenarioPack().scenarios.map((scenario) => [scenario.id, scenario]),
   );
-  const result = await runQaSuiteFromRuntimeWithInfraRetry({
-    repoRoot: params.repoRoot,
-    outputDir,
-    transportId: params.transportId,
-    providerMode: params.providerMode,
-    primaryModel: params.primaryModel,
-    alternateModel: params.alternateModel,
-    scenarioIds: ["approval-turn-tool-followthrough"],
-    concurrency: 1,
+  const selectedScenarios = scenarioIds.flatMap((scenarioId) => {
+    const scenario = scenarioById.get(scenarioId);
+    return scenario ? [scenario] : [];
   });
-  process.stdout.write(`QA parity preflight watch: ${result.watchUrl}\n`);
-  process.stdout.write(`QA parity preflight report: ${result.reportPath}\n`);
-  process.stdout.write(`QA parity preflight summary: ${result.summaryPath}\n`);
-  const failedScenarioCount = await readQaFailedScenarioCountFromSummary(result.summaryPath);
-  if (failedScenarioCount > 0) {
-    if (params.allowFailures === true) {
-      return;
-    }
+  const nonFlowScenarios = resolveQaRuntimePairScenarioSupport(
+    selectedScenarios,
+  ).excludedScenarios.map((scenario) => `${scenario.id} (${scenario.execution.kind})`);
+  if (nonFlowScenarios.length > 0) {
     throw new Error(
-      `QA parity preflight failed with ${failedScenarioCount} failing scenario${failedScenarioCount === 1 ? "" : "s"}.`,
+      `${params.option} requires execution.kind: flow scenarios; unsupported scenario(s): ${nonFlowScenarios.join(", ")}`,
     );
   }
+}
+
+export async function resolveQaHarnessRepoRoot(moduleUrl = import.meta.url): Promise<string> {
+  const modulePath = fileURLToPath(moduleUrl);
+  let candidateDir = path.dirname(modulePath);
+  for (let parentHops = 0; parentHops <= QA_HARNESS_ROOT_MAX_PARENT_HOPS; parentHops += 1) {
+    const packagePath = path.join(candidateDir, "package.json");
+    try {
+      const packageJson: unknown = JSON.parse(await fs.readFile(packagePath, "utf8"));
+      if (
+        packageJson !== null &&
+        typeof packageJson === "object" &&
+        "name" in packageJson &&
+        packageJson.name === "openclaw"
+      ) {
+        return candidateDir;
+      }
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? error.code : undefined;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        throw new Error(
+          `Unable to inspect QA harness package at ${packagePath}: ${formatErrorMessage(error)}`,
+          { cause: error },
+        );
+      }
+    }
+    const parentDir = path.dirname(candidateDir);
+    if (parentDir === candidateDir) {
+      break;
+    }
+    candidateDir = parentDir;
+  }
+  throw new Error(
+    `Unable to resolve QA harness repository root from ${modulePath}: no ancestor package.json named "openclaw" within ${QA_HARNESS_ROOT_MAX_PARENT_HOPS} parent directories.`,
+  );
+}
+
+async function resolveExternalQaCandidateCommand(
+  repoRoot: string,
+): Promise<QaGatewayChildCommand | undefined> {
+  const harnessRepoRoot = await resolveQaHarnessRepoRoot();
+  const [realHarnessRepoRoot, targetRepoRoot] = await Promise.all([
+    fs.realpath(harnessRepoRoot),
+    fs.realpath(repoRoot),
+  ]);
+  // An explicit path may be "." or a symlink back to this harness checkout.
+  // Only a different checkout needs candidate-owned CLI setup and state writes.
+  if (targetRepoRoot === realHarnessRepoRoot) {
+    return undefined;
+  }
+  return resolveQaGatewayChildCommand(repoRoot);
 }
 
 function parseQaCliBackendAuthMode(value: string | undefined): QaCliBackendAuthMode | undefined {
@@ -305,33 +360,38 @@ function parseQaCredentialListStatus(value: string | undefined) {
   throw new Error('--status must be one of "active", "disabled", or "all".');
 }
 
-function normalizeQaCredentialAdminError(error: unknown) {
-  if (error instanceof QaCredentialAdminError) {
-    return {
-      code: error.code,
-      message: error.message,
-    };
+async function runQaCredentialCommand<T extends object>(
+  action: string,
+  json: boolean | undefined,
+  run: () => Promise<T>,
+  print: (result: T) => void,
+) {
+  try {
+    const result = await run();
+    if (json) {
+      process.stdout.write(`${JSON.stringify({ status: "ok", action, ...result }, null, 2)}\n`);
+    } else {
+      print(result);
+    }
+  } catch (error) {
+    if (!json) {
+      throw error;
+    }
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          status: "error",
+          action,
+          code: error instanceof QaCredentialAdminError ? error.code : "UNEXPECTED_ERROR",
+          message:
+            error instanceof QaCredentialAdminError ? error.message : formatErrorMessage(error),
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    process.exitCode = 1;
   }
-  return {
-    code: "UNEXPECTED_ERROR",
-    message: formatErrorMessage(error),
-  };
-}
-
-function writeQaCredentialCommandErrorJson(action: string, error: unknown) {
-  const normalized = normalizeQaCredentialAdminError(error);
-  process.stdout.write(
-    `${JSON.stringify(
-      {
-        status: "error",
-        action,
-        code: normalized.code,
-        message: normalized.message,
-      },
-      null,
-      2,
-    )}\n`,
-  );
 }
 
 function parseQaModelSpecs(label: string, entries: readonly string[] | undefined) {
@@ -368,13 +428,7 @@ function parseQaModelSpecs(label: string, entries: readonly string[] | undefined
       const value = part.slice(separatorIndex + 1).trim();
       switch (key) {
         case "thinking": {
-          const thinkingDefault = parseQaThinkingLevel(`${label} thinking`, value);
-          if (!thinkingDefault) {
-            throw new Error(
-              `${label} thinking must be one of off, minimal, low, medium, high, xhigh, adaptive, max`,
-            );
-          }
-          options.thinkingDefault = thinkingDefault;
+          options.thinkingDefault = parseQaThinkingLevel(`${label} thinking`, value);
           break;
         }
         case "fast":
@@ -395,27 +449,21 @@ function parseQaModelSpecs(label: string, entries: readonly string[] | undefined
   };
 }
 
-async function runInterruptibleServer(label: string, server: InterruptibleServer) {
-  process.stdout.write(`${label}: ${server.baseUrl}\n`);
-  process.stdout.write("Press Ctrl+C to stop.\n");
-
-  const shutdown = async () => {
-    process.off("SIGINT", onSignal);
-    process.off("SIGTERM", onSignal);
-    await server.stop();
-    process.exit(0);
-  };
-
-  const onSignal = () => {
-    void shutdown();
-  };
-
-  process.on("SIGINT", onSignal);
-  process.on("SIGTERM", onSignal);
-  await new Promise(() => undefined);
-}
-
 async function readQaCredentialPayloadFile(filePath: string) {
+  const maxBytes = parseQaCredentialPositiveIntegerEnv({
+    env: process.env,
+    key: QA_CREDENTIAL_PAYLOAD_MAX_BYTES_ENV,
+    fallback: DEFAULT_QA_CREDENTIAL_PAYLOAD_MAX_BYTES,
+  });
+  const stat = await fs.stat(filePath);
+  if (!stat.isFile()) {
+    throw new Error("Payload file must be a regular JSON file.");
+  }
+  if (stat.size > maxBytes) {
+    throw new Error(
+      `Payload file exceeds ${QA_CREDENTIAL_PAYLOAD_MAX_BYTES_ENV} (${maxBytes} bytes).`,
+    );
+  }
   const text = await fs.readFile(filePath, "utf8");
   let payload: unknown;
   try {
@@ -431,13 +479,6 @@ async function readQaCredentialPayloadFile(filePath: string) {
   return payload as Record<string, unknown>;
 }
 
-function formatQaCredentialLeaseState(credential: QaCredentialRecord) {
-  if (!credential.lease) {
-    return "no";
-  }
-  return `yes(${credential.lease.actorRole}:${credential.lease.ownerId})`;
-}
-
 function printQaCredentialListTable(credentials: QaCredentialRecord[]) {
   if (credentials.length === 0) {
     process.stdout.write("No credentials matched.\n");
@@ -445,21 +486,24 @@ function printQaCredentialListTable(credentials: QaCredentialRecord[]) {
   }
   const rows = credentials.map((credential) => ({
     credentialId: credential.credentialId,
+    fingerprint: credential.credentialFingerprint ?? "",
     kind: credential.kind,
     status: credential.status,
-    leased: formatQaCredentialLeaseState(credential),
+    leased: credential.lease
+      ? `yes(${credential.lease.actorRole}:${credential.lease.ownerId})`
+      : "no",
     note: credential.note ?? "",
   }));
-  const idWidth = Math.max("credentialId".length, ...rows.map((row) => row.credentialId.length));
-  const kindWidth = Math.max("kind".length, ...rows.map((row) => row.kind.length));
-  const statusWidth = Math.max("status".length, ...rows.map((row) => row.status.length));
-  const leaseWidth = Math.max("leased".length, ...rows.map((row) => row.leased.length));
-  process.stdout.write(
-    `${"credentialId".padEnd(idWidth)}  ${"kind".padEnd(kindWidth)}  ${"status".padEnd(statusWidth)}  ${"leased".padEnd(leaseWidth)}  note\n`,
-  );
+  const columns = (
+    ["credentialId", "fingerprint", "kind", "status", "leased", "note"] as const
+  ).map((name) => ({
+    name,
+    width: name === "note" ? 0 : Math.max(name.length, ...rows.map((row) => row[name].length)),
+  }));
+  process.stdout.write(`${columns.map(({ name, width }) => name.padEnd(width)).join("  ")}\n`);
   for (const row of rows) {
     process.stdout.write(
-      `${row.credentialId.padEnd(idWidth)}  ${row.kind.padEnd(kindWidth)}  ${row.status.padEnd(statusWidth)}  ${row.leased.padEnd(leaseWidth)}  ${row.note}\n`,
+      `${columns.map(({ name, width }) => row[name].padEnd(width)).join("  ")}\n`,
     );
   }
 }
@@ -476,7 +520,7 @@ function printQaCredentialDoctorTable(
   }
 }
 
-export async function runQaLabSelfCheckCommand(opts: { repoRoot?: string; output?: string }) {
+export async function runQaLabSelfCheckCommand(opts: QaLabSelfCheckCommandOptions) {
   const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
   const server = await startQaLabServer({
     repoRoot,
@@ -485,57 +529,293 @@ export async function runQaLabSelfCheckCommand(opts: { repoRoot?: string; output
   try {
     const result = await server.runSelfCheck();
     process.stdout.write(`QA self-check report: ${result.outputPath}\n`);
+    if (!isQaSelfCheckSuccessful(result)) {
+      throw new Error(`QA self-check failed. See ${result.outputPath}.`);
+    }
   } finally {
     await server.stop();
   }
 }
 
-export async function runQaSuiteCommand(opts: {
-  repoRoot?: string;
-  outputDir?: string;
-  transportId?: string;
-  runner?: string;
-  providerMode?: QaProviderModeInput;
-  primaryModel?: string;
-  alternateModel?: string;
-  fastMode?: boolean;
-  thinking?: string;
-  cliAuthMode?: string;
-  parityPack?: string;
-  pack?: string;
-  scenarioIds?: string[];
-  concurrency?: number;
-  allowFailures?: boolean;
-  enabledPluginIds?: string[];
-  image?: string;
-  cpus?: number;
-  memory?: string;
-  disk?: string;
-  preflight?: boolean;
-  runtimePair?: string;
-}) {
+export async function runQaProfileCommand(opts: QaProfileCommandOptions) {
+  const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
+  const scenarioPack = readQaScenarioPack();
+  const scorecardReport = readQaScorecardTaxonomyReport(scenarioPack.scenarios);
+  const profile = opts.profile.trim();
+  const profileReport = scorecardReport.profiles.find((entry) => entry.id === profile);
+  if (!profileReport) {
+    if (scorecardReport.profiles.length === 0) {
+      throw new Error("taxonomy.yaml does not define QA run profiles.");
+    }
+    throw new Error(
+      `--qa-profile must be one of ${scorecardReport.profiles.map((entry) => entry.id).join(", ")}, got "${opts.profile}".`,
+    );
+  }
+  if (!scorecardReport.taxonomy) {
+    throw new Error("QA profile evidence requires a taxonomy identity.");
+  }
+  // Capture before the suite runs so later taxonomy reads cannot rebind its evidence.
+  const taxonomyIdentity = { ...scorecardReport.taxonomy.identity };
+  const proofRequirements = profileReport.proofRequirements;
+  const evidenceMode = opts.evidenceMode ?? profileReport.evidenceMode;
+  const membership = resolveQaRunProfileMembership(
+    {
+      profile,
+      surface: opts.surface,
+      category: opts.category,
+      scenarioIds: opts.scenarioIds,
+    },
+    { scenarios: scenarioPack.scenarios, scorecardReport },
+  );
+  const categories = membership.categories;
+  if (categories.length === 0) {
+    throw new Error(
+      `qa run did not find taxonomy categories for ${formatQaRunProfileFilterList(opts)}.`,
+    );
+  }
+
+  const requestedScenarioIds = uniqueStrings(
+    (opts.scenarioIds ?? []).map((scenarioId) => scenarioId.trim()).filter(Boolean),
+  );
+  const taxonomyScenarios = membership.selectedScenarios;
+  const missingScenarioIds = membership.excludedScenarioIds;
+  const providerMode =
+    opts.providerMode ?? (profile === "smoke-ci" ? "mock-openai" : DEFAULT_QA_LIVE_PROVIDER_MODE);
+  const normalizedProviderMode = normalizeQaProviderMode(providerMode);
+  const primaryModel = opts.primaryModel?.trim() || defaultQaModelForMode(normalizedProviderMode);
+  const missingScenarioIdSet = new Set(missingScenarioIds);
+  const executionScenarios =
+    missingScenarioIds.length > 0
+      ? [
+          ...taxonomyScenarios,
+          ...scenarioPack.scenarios.filter((scenario) => missingScenarioIdSet.has(scenario.id)),
+        ]
+      : taxonomyScenarios;
+  const { defaultChannel, supportsChannel, resolveModuleFlowSupport } =
+    resolveQaChannelDriverSelection(profileReport.channelDriver);
+  const executionSelection = resolveQaRunProfileExecutionSelection({
+    scenarios: executionScenarios,
+    providerMode: normalizedProviderMode,
+    primaryModel,
+    channelDriver: profileReport.channelDriver,
+    defaultChannel,
+    supportsChannel,
+    resolveModuleFlowSupport,
+  });
+  if (requestedScenarioIds.length > 0 && executionSelection.excludedScenarios.length > 0) {
+    const exclusions = executionSelection.excludedScenarios
+      .map(({ scenario, reasons }) => `${scenario.id} (${reasons.join(", ")})`)
+      .join(", ");
+    throw new Error(
+      `qa run --qa-profile ${profile} cannot run explicitly selected scenario(s): ${exclusions}.`,
+    );
+  }
+  if (requestedScenarioIds.length > 0 && taxonomyScenarios.length === 0) {
+    throw new Error(
+      `qa run did not find taxonomy scenarios for ${formatQaRunProfileFilterList(opts)} --scenario ${requestedScenarioIds.join(",")}.`,
+    );
+  }
+  if (missingScenarioIds.length > 0) {
+    throw new Error(
+      `qa run did not find taxonomy scenarios for ${formatQaRunProfileFilterList(opts)} --scenario ${missingScenarioIds.join(",")}.`,
+    );
+  }
+  const scenarios = executionSelection.selectedScenarios;
+  if (scenarios.length === 0) {
+    throw new Error(
+      `qa run --qa-profile ${profile} did not resolve any executable QA scenarios for provider mode ${normalizedProviderMode}.`,
+    );
+  }
+
+  process.stdout.write(
+    `QA run profile: ${profile}; categories: ${categories.length}; scenarios: ${scenarios.length}\n`,
+  );
+  const suiteResult = await withTemporaryQaProfileEnv(profile, () =>
+    runQaSuiteCommand({
+      repoRoot,
+      outputDir: opts.outputDir,
+      evidenceMode,
+      transportId: opts.transportId,
+      providerMode,
+      primaryModel: opts.primaryModel,
+      alternateModel: opts.alternateModel,
+      fastMode: opts.fastMode,
+      failFast: opts.failFast,
+      scenarioIds: scenarios.map((scenario) => scenario.id),
+      explicitScenarioSelection: requestedScenarioIds.length > 0,
+      concurrency: opts.concurrency,
+      allowFailures: opts.allowFailures,
+      channelDriver: profileReport.channelDriver,
+      expandScenarioChannels: true,
+    }),
+  );
+  if (!suiteResult || !("evidencePath" in suiteResult) || !suiteResult.evidencePath) {
+    throw new Error("qa run --qa-profile did not produce qa-evidence.json.");
+  }
+  const { evidencePath, expectedCells, observedCells } = suiteResult;
+  const profilePlan = qaProfileEvidencePlan.build({
+    profile,
+    taxonomyIdentity,
+    proofRequirements,
+    membershipScenarios: taxonomyScenarios,
+    selectedScenarios: scenarios,
+    excludedScenarios: executionSelection.excludedScenarios,
+    expectedCells,
+    observedCells,
+  });
+  await attachQaProfileScorecardEvidenceToFile({
+    evidencePath,
+    evidenceMode,
+    profile,
+    profilePlan,
+    filters: {
+      surface: opts.surface,
+      category: opts.category,
+    },
+    categories,
+  });
+  process.stdout.write(`QA profile scorecard: ${evidencePath}\n`);
+}
+
+function formatQaRunProfileFilterList(
+  opts: Pick<QaProfileCommandOptions, "profile" | "surface" | "category">,
+) {
+  const filters = [
+    `--qa-profile ${opts.profile}`,
+    opts.surface?.trim() ? `--surface ${opts.surface.trim()}` : null,
+    opts.category?.trim() ? `--category ${opts.category.trim()}` : null,
+  ].filter((filter): filter is string => filter !== null);
+  return filters.join(" ");
+}
+
+async function withTemporaryQaProfileEnv<T>(profile: string, run: () => Promise<T>): Promise<T> {
+  const previousProfile = process.env.OPENCLAW_QA_PROFILE;
+  process.env.OPENCLAW_QA_PROFILE = profile;
+  try {
+    return await run();
+  } finally {
+    if (previousProfile === undefined) {
+      delete process.env.OPENCLAW_QA_PROFILE;
+    } else {
+      process.env.OPENCLAW_QA_PROFILE = previousProfile;
+    }
+  }
+}
+
+async function setQaSuiteCommandExitCode(
+  summaryPath: string,
+  scenarioIds: readonly string[],
+  opts: Pick<QaSuiteCommandOptions, "allowFailures" | "explicitScenarioSelection">,
+) {
+  const allowFailures = opts.allowFailures === true;
+  const blockingScenarioCount = await readQaSuiteFailedOrSkippedScenarioCountFromFile(summaryPath, {
+    optionalScenarioNames:
+      (opts.explicitScenarioSelection ?? scenarioIds.length > 0)
+        ? undefined
+        : resolveQaReportOnlyOptionalScenarioNames(readQaScenarioPack().scenarios),
+    requireExecutedScenario: allowFailures,
+  });
+  if (!allowFailures && blockingScenarioCount > 0) {
+    process.exitCode = 1;
+  }
+}
+
+export async function runQaSuiteCommand(opts: QaSuiteCommandOptions) {
   const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
   const transportId = normalizeQaTransportId(opts.transportId);
   const runner = (opts.runner ?? "host").trim().toLowerCase();
-  const scenarioIds = resolveQaScenarioPackScenarioIds({
-    pack: opts.pack,
-    scenarioIds: resolveQaParityPackScenarioIds({
-      parityPack: opts.parityPack,
-      scenarioIds: opts.scenarioIds,
-    }),
+  const runtimePair = parseQaRuntimePair(opts.runtimePair);
+  const providerMode = normalizeQaProviderMode(opts.providerMode);
+  const claudeCliAuthMode = parseQaCliBackendAuthMode(opts.cliAuthMode);
+  const primaryModel = opts.primaryModel?.trim() || undefined;
+  const alternateModel = opts.alternateModel?.trim() || undefined;
+  const channelDriver = normalizeQaSuiteChannelDriver(opts.channelDriver);
+  const explicitScenarioIds = resolveQaParityPackScenarioIds({
+    parityPack: opts.parityPack,
+    scenarioIds: opts.scenarioIds,
   });
+  const liveChannelId = channelDriver === "live" ? opts.channel?.trim() : undefined;
+  const { liveAdapterFactories, defaultChannel, resolveModuleFlowSupport } =
+    resolveQaChannelDriverSelection(channelDriver);
+  const runtimePairLanes = parseQaRuntimePairLaneFilters(opts.runtimePairLane);
+  const runtimePairLaneSelection = resolveQaRuntimePairLaneScenarioIds({
+    channel: opts.channel,
+    channelDriver,
+    claudeCliAuthMode,
+    defaultChannel,
+    primaryModel: primaryModel ?? defaultQaModelForMode(providerMode),
+    providerMode,
+    scenarioIds: explicitScenarioIds,
+    runtimePairLanes,
+    runtimePair: runtimePair !== undefined,
+    resolveModuleFlowSupport,
+  });
+  const scenarioIds = runtimePairLaneSelection.scenarioIds;
+  if (runtimePair) {
+    rejectNonFlowScenarioIds({ option: "--runtime-pair", scenarioIds });
+  }
+  if (runtimePairLaneSelection.excludedNonFlowScenarios.length > 0) {
+    process.stderr.write(
+      `QA runtime-pair lane selection excluded incompatible non-flow scenario(s): ${runtimePairLaneSelection.excludedNonFlowScenarios.map((scenario) => `${scenario.id} (${scenario.execution.kind})`).join(", ")}\n`,
+    );
+  }
+  if (runtimePairLaneSelection.excludedLaneScenarios.length > 0) {
+    process.stderr.write(
+      `QA runtime-pair lane selection excluded lane-incompatible scenario(s): ${runtimePairLaneSelection.excludedLaneScenarios.map((scenario) => scenario.id).join(", ")}\n`,
+    );
+  }
   const allowFailures = opts.allowFailures === true;
+  if (opts.channel?.trim() && channelDriver !== "crabline" && channelDriver !== "live") {
+    throw new Error("--channel override requires --channel-driver crabline or live.");
+  }
+  const liveAdapterFactory = liveChannelId
+    ? liveAdapterFactories?.find((factory) => factory.id === liveChannelId)
+    : undefined;
+  if (liveChannelId && !liveAdapterFactory) {
+    throw new Error(`unknown live QA adapter: ${liveChannelId}`);
+  }
   if (runner !== "host" && runner !== "multipass") {
     throw new Error(`--runner must be one of host or multipass, got "${opts.runner}".`);
   }
-  const providerMode = normalizeQaProviderMode(opts.providerMode);
-  const runtimePair = parseQaRuntimePair(opts.runtimePair);
-  const claudeCliAuthMode = parseQaCliBackendAuthMode(opts.cliAuthMode);
-  const primaryModel = normalizeQaOptionalModelRef(opts.primaryModel);
-  const alternateModel = normalizeQaOptionalModelRef(opts.alternateModel);
   if (opts.preflight === true && runner !== "host") {
     throw new Error("--preflight requires --runner host.");
   }
+  const channelDriverScenarios =
+    channelDriver === "crabline"
+      ? selectQaScenarioDefinitionsForChannelResolution({
+          scenarioIds,
+          providerMode,
+          primaryModel: primaryModel ?? defaultQaModelForMode(providerMode),
+          channelDriver,
+          // Without an override, discover every declared channel here; the host suite launcher
+          // owns partitioning mixed Crabline runs, while explicit scenario IDs bypass this filter.
+          channel: opts.channel,
+          claudeCliAuthMode,
+        })
+      : [];
+  const channelDriverChannels =
+    channelDriver === "crabline"
+      ? resolveQaSuiteScenarioChannels({
+          defaultChannel: OPENCLAW_CRABLINE_DEFAULT_CHANNEL,
+          explicitChannel: opts.channel,
+          scenarios: channelDriverScenarios,
+        })
+      : [];
+  if (runner === "multipass" && channelDriverChannels.length > 1) {
+    resolveQaSuiteScenarioChannel({
+      defaultChannel: OPENCLAW_CRABLINE_DEFAULT_CHANNEL,
+      explicitChannel: opts.channel,
+      scenarios: channelDriverScenarios,
+    });
+  }
+  const [singleChannelDriverChannel] = channelDriverChannels;
+  const channelId = channelDriverChannels.length === 1 ? singleChannelDriverChannel : liveChannelId;
+  const hostScenarioIds =
+    runner === "host" && channelDriverChannels.length > 1 && scenarioIds.length === 0
+      ? channelDriverScenarios
+          .filter((scenario) => scenario.execution.kind === "flow")
+          .map((scenario) => scenario.id)
+      : scenarioIds;
   if (
     runner === "host" &&
     (opts.image !== undefined ||
@@ -548,23 +828,30 @@ export async function runQaSuiteCommand(opts: {
   if (runner === "multipass" && opts.cliAuthMode !== undefined) {
     throw new Error("--cli-auth-mode requires --runner host.");
   }
+  if (runner === "multipass" && liveChannelId) {
+    throw new Error("--channel-driver live with --channel requires --runner host.");
+  }
   if (runner === "multipass") {
+    rejectNonFlowScenarioIds({ option: "--runner multipass", scenarioIds });
     const thinkingDefault = parseQaThinkingLevel("--thinking", opts.thinking);
     const result = await runQaMultipass({
       repoRoot,
       outputDir: resolveRepoRelativeOutputDir(repoRoot, opts.outputDir),
       transportId,
-      providerMode,
+      ...(opts.providerMode !== undefined ? { providerMode } : {}),
       primaryModel,
       alternateModel,
       fastMode: opts.fastMode,
       ...(thinkingDefault ? { thinkingDefault } : {}),
       allowFailures: true,
+      ...(opts.failFast ? { failFast: true } : {}),
       scenarioIds,
       ...(opts.concurrency !== undefined
         ? { concurrency: parseQaPositiveIntegerOption("--concurrency", opts.concurrency) }
         : {}),
       ...(runtimePair ? { runtimePair } : {}),
+      ...(channelDriver && channelId ? { channelDriver, channelId } : {}),
+      ...(opts.enabledPluginIds !== undefined ? { enabledPluginIds: opts.enabledPluginIds } : {}),
       image: opts.image,
       cpus: parseQaPositiveIntegerOption("--cpus", opts.cpus),
       memory: opts.memory,
@@ -575,167 +862,190 @@ export async function runQaSuiteCommand(opts: {
     process.stdout.write(`QA Multipass summary: ${result.summaryPath}\n`);
     process.stdout.write(`QA Multipass host log: ${result.hostLogPath}\n`);
     process.stdout.write(`QA Multipass bootstrap log: ${result.bootstrapLogPath}\n`);
-    if (!allowFailures) {
-      const failedScenarioCount = await readQaFailedScenarioCountFromSummary(result.summaryPath);
-      if (failedScenarioCount > 0) {
-        process.exitCode = 1;
-      }
-    }
-    return;
+    await setQaSuiteCommandExitCode(result.summaryPath, scenarioIds, opts);
+    return result;
   }
+  const sutOpenClawCommand =
+    opts.repoRoot === undefined ? undefined : await resolveExternalQaCandidateCommand(repoRoot);
   if (opts.preflight === true) {
-    await runQaParityPreflight({
+    const outputDir = path.join(
       repoRoot,
-      transportId,
-      providerMode,
-      primaryModel,
-      alternateModel,
-      allowFailures,
-    });
-    return;
+      ".artifacts",
+      "qa-e2e",
+      "preflight",
+      `suite-${createQaArtifactRunId()}`,
+    );
+    const result = await runQaSuiteWithInfraRetry(() =>
+      runQaFlowSuiteFromRuntime({
+        repoRoot,
+        outputDir,
+        transportId,
+        providerMode,
+        primaryModel,
+        alternateModel,
+        scenarioIds: ["approval-turn-tool-followthrough"],
+        concurrency: 1,
+        ...(sutOpenClawCommand ? { sutOpenClawCommand } : {}),
+      }),
+    );
+    process.stdout.write(`QA parity preflight watch: ${result.watchUrl}\n`);
+    process.stdout.write(`QA parity preflight report: ${result.reportPath}\n`);
+    process.stdout.write(`QA parity preflight summary: ${result.summaryPath}\n`);
+    const blockingScenarioCount = await readQaSuiteFailedOrSkippedScenarioCountFromFile(
+      result.summaryPath,
+      { requireExecutedScenario: allowFailures },
+    );
+    if (blockingScenarioCount > 0 && !allowFailures) {
+      throw new Error(
+        `QA parity preflight failed with ${blockingScenarioCount} failing or skipped scenario${blockingScenarioCount === 1 ? "" : "s"}.`,
+      );
+    }
+    return undefined;
   }
   const thinkingDefault = parseQaThinkingLevel("--thinking", opts.thinking);
-  const result = await runQaSuiteFromRuntimeWithInfraRetry({
+  // Only isolated live adapters may share the host budget; keep disposable
+  // servers bounded even when a caller requests a larger suite concurrency.
+  const liveConcurrencyLimit =
+    liveAdapterFactory?.isolatesInstances === true
+      ? QA_CHANNEL_DEFAULT_SUITE_CONCURRENCY
+      : undefined;
+  const runtimeResult = await runQaSuite({
     repoRoot,
     outputDir: resolveRepoRelativeOutputDir(repoRoot, opts.outputDir),
+    evidenceMode: opts.evidenceMode,
     transportId,
-    providerMode,
+    channelDriver,
+    ...(opts.expandScenarioChannels ? { expandScenarioChannels: true } : {}),
+    ...(liveAdapterFactories
+      ? {
+          adapterFactories: liveAdapterFactories,
+          ...(liveChannelId ? { channelId: liveChannelId } : {}),
+          adapterOptions: {
+            repoRoot,
+            sutAccountId: opts.sutAccountId,
+            credentialFile: opts.credentialFile,
+            credentialSource: opts.credentialSource,
+            credentialRole: opts.credentialRole,
+            explicitScenarioSelection:
+              opts.explicitScenarioSelection ?? Boolean(opts.scenarioIds?.length),
+          },
+        }
+      : {}),
+    ...(channelId ? { channelId } : {}),
+    ...(opts.providerMode !== undefined ? { providerMode } : {}),
     primaryModel,
     alternateModel,
     fastMode: opts.fastMode,
+    failFast: opts.failFast,
     ...(thinkingDefault ? { thinkingDefault } : {}),
     ...(claudeCliAuthMode ? { claudeCliAuthMode } : {}),
-    scenarioIds,
+    scenarioIds: liveChannelId ? scenarioIds : hostScenarioIds,
+    ...(opts.scenarioDefinitions ? { scenarioDefinitions: opts.scenarioDefinitions } : {}),
     ...(opts.enabledPluginIds !== undefined ? { enabledPluginIds: opts.enabledPluginIds } : {}),
-    ...(opts.concurrency !== undefined
-      ? { concurrency: parseQaPositiveIntegerOption("--concurrency", opts.concurrency) }
-      : {}),
+    ...(liveChannelId
+      ? {
+          concurrency:
+            liveConcurrencyLimit === undefined
+              ? 1
+              : Math.min(
+                  liveConcurrencyLimit,
+                  parseQaPositiveIntegerOption("--concurrency", opts.concurrency) ??
+                    liveConcurrencyLimit,
+                ),
+        }
+      : opts.concurrency !== undefined
+        ? { concurrency: parseQaPositiveIntegerOption("--concurrency", opts.concurrency) }
+        : {}),
     ...(runtimePair ? { runtimePair } : {}),
+    ...(sutOpenClawCommand ? { sutOpenClawCommand } : {}),
   });
-  process.stdout.write(`QA suite watch: ${result.watchUrl}\n`);
+  const result = runtimeResult.result;
+  if (runtimeResult.executionKind === "flow") {
+    process.stdout.write(`QA suite watch: ${runtimeResult.result.watchUrl}\n`);
+  }
   process.stdout.write(`QA suite report: ${result.reportPath}\n`);
+  process.stdout.write(`QA suite evidence: ${result.evidencePath}\n`);
   process.stdout.write(`QA suite summary: ${result.summaryPath}\n`);
-  const failedScenarioCount = readQaSuiteFailedScenarioCountFromSummary(result);
-  if (!allowFailures && failedScenarioCount !== null && failedScenarioCount > 0) {
-    process.exitCode = 1;
-  }
+  await setQaSuiteCommandExitCode(result.summaryPath, scenarioIds, opts);
+  return {
+    ...result,
+    expectedCells: runtimeResult.expectedCells,
+    observedCells: runtimeResult.observedCells,
+  };
 }
 
-export async function runQaParityReportCommand(opts: {
+export async function runQaConfidenceReportCommand(opts: {
   repoRoot?: string;
-  candidateSummary?: string;
-  baselineSummary?: string;
-  candidateLabel?: string;
-  baselineLabel?: string;
+  manifest: string;
+  artifactRoot?: string;
   outputDir?: string;
-  runtimeAxis?: boolean;
-  summary?: string;
+  strictZeroUnknowns?: boolean;
+  strictGlobalPass?: boolean;
 }) {
   const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
-  const outputDir =
-    resolveRepoRelativeOutputDir(repoRoot, opts.outputDir) ??
-    path.join(repoRoot, ".artifacts", "qa-e2e", `parity-${Date.now().toString(36)}`);
+  const manifestPath = path.resolve(repoRoot, opts.manifest);
+  const artifactRoot = path.resolve(repoRoot, opts.artifactRoot ?? ".");
+  const outputDir = resolveQaCommandOutputDir(repoRoot, opts.outputDir, "confidence");
   await fs.mkdir(outputDir, { recursive: true });
-
-  if (opts.runtimeAxis === true) {
-    if (!opts.summary?.trim()) {
-      throw new Error("--runtime-axis requires --summary.");
-    }
-    const summaryPath = path.resolve(repoRoot, opts.summary);
-    const summary = JSON.parse(
-      await fs.readFile(summaryPath, "utf8"),
-    ) as QaRuntimeParitySuiteSummary;
-    const reportPayload = buildQaRuntimeParityReport({ summary });
-    const report = renderQaRuntimeParityMarkdownReport(reportPayload);
-    const reportPath = path.join(outputDir, "qa-runtime-parity-report.md");
-    const runtimeSummaryPath = path.join(outputDir, "qa-runtime-parity-summary.json");
-    await fs.writeFile(reportPath, report, "utf8");
-    await fs.writeFile(runtimeSummaryPath, `${JSON.stringify(reportPayload, null, 2)}\n`, "utf8");
-
-    process.stdout.write(`QA runtime parity report: ${reportPath}\n`);
-    process.stdout.write(`QA runtime parity summary: ${runtimeSummaryPath}\n`);
-    process.stdout.write(`QA runtime parity verdict: ${reportPayload.pass ? "pass" : "fail"}\n`);
-    if (!reportPayload.pass) {
-      process.exitCode = 1;
-    }
-    return;
-  }
-
-  if (!opts.candidateSummary?.trim() || !opts.baselineSummary?.trim()) {
-    throw new Error(
-      "--candidate-summary and --baseline-summary are required unless --runtime-axis is set.",
-    );
-  }
-  const candidateSummaryPath = path.resolve(repoRoot, opts.candidateSummary);
-  const baselineSummaryPath = path.resolve(repoRoot, opts.baselineSummary);
-  const candidateSummary = JSON.parse(
-    await fs.readFile(candidateSummaryPath, "utf8"),
-  ) as QaParitySuiteSummary;
-  const baselineSummary = JSON.parse(
-    await fs.readFile(baselineSummaryPath, "utf8"),
-  ) as QaParitySuiteSummary;
-
-  const comparison = buildQaAgenticParityComparison({
-    candidateLabel: opts.candidateLabel?.trim() || QA_FRONTIER_PARITY_CANDIDATE_LABEL,
-    baselineLabel: opts.baselineLabel?.trim() || QA_FRONTIER_PARITY_BASELINE_LABEL,
-    candidateSummary,
-    baselineSummary,
+  const manifest = await readQaConfidenceManifestFile(manifestPath);
+  const reportPayload = await buildQaConfidenceReport({
+    manifest,
+    artifactRoot,
+    strictZeroUnknowns: opts.strictZeroUnknowns === true,
+    strictGlobalPass: opts.strictGlobalPass === true,
   });
-  const report = renderQaAgenticParityMarkdownReport(comparison);
-  const reportPath = path.join(outputDir, "qa-agentic-parity-report.md");
-  const summaryPath = path.join(outputDir, "qa-agentic-parity-summary.json");
-  await fs.writeFile(reportPath, report, "utf8");
-  await fs.writeFile(summaryPath, `${JSON.stringify(comparison, null, 2)}\n`, "utf8");
-
-  process.stdout.write(`QA parity report: ${reportPath}\n`);
-  process.stdout.write(`QA parity summary: ${summaryPath}\n`);
-  process.stdout.write(`QA parity verdict: ${comparison.pass ? "pass" : "fail"}\n`);
-  if (!comparison.pass) {
-    process.exitCode = 1;
-  }
+  await writeQaCliReport(
+    outputDir,
+    "qa-confidence",
+    renderQaConfidenceMarkdownReport(reportPayload),
+    reportPayload,
+  );
+  writeQaCommandVerdict("QA confidence", reportPayload.pass);
 }
 
-export async function runQaCoverageReportCommand(opts: {
+export async function runQaConfidenceSelfTestCommand(opts: {
   repoRoot?: string;
-  output?: string;
-  json?: boolean;
-  tools?: boolean;
-  summary?: string;
+  outputDir?: string;
 }) {
   const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
-  const outputPath = opts.output ? path.resolve(repoRoot, opts.output) : undefined;
-  const scenarios = readQaScenarioPack().scenarios;
-  let body: string;
-  let outputLabel = "QA coverage report";
-  if (opts.tools === true) {
-    const summary = opts.summary?.trim()
-      ? (JSON.parse(
-          await fs.readFile(path.resolve(repoRoot, opts.summary), "utf8"),
-        ) as QaToolCoverageSuiteSummary)
-      : undefined;
-    const report = buildQaToolCoverageReport({ scenarios, summary });
-    body = opts.json
-      ? `${JSON.stringify(report, null, 2)}\n`
-      : renderQaToolCoverageMarkdownReport(report);
-    outputLabel = "QA tool coverage report";
-  } else {
-    if (opts.summary?.trim()) {
-      throw new Error("--summary requires --tools.");
-    }
-    const inventory = buildQaCoverageInventory(scenarios);
-    body = opts.json
-      ? `${JSON.stringify(inventory, null, 2)}\n`
-      : renderQaCoverageMarkdownReport(inventory);
-  }
+  const outputDir = resolveQaCommandOutputDir(repoRoot, opts.outputDir, "confidence-self-test");
+  const result = await writeQaConfidenceSelfTestArtifacts({ outputDir });
+  process.stdout.write(`QA confidence self-test report: ${result.reportPath}\n`);
+  process.stdout.write(`QA confidence self-test summary: ${result.summaryPath}\n`);
+  writeQaCommandVerdict("QA confidence self-test", result.summary.pass);
+}
 
-  if (outputPath) {
-    await fs.mkdir(path.dirname(outputPath), { recursive: true });
-    await fs.writeFile(outputPath, body, "utf8");
-    process.stdout.write(`${outputLabel}: ${outputPath}\n`);
-    return;
+export async function runQaJsonlReplayCommand(opts: {
+  repoRoot?: string;
+  transcripts?: string;
+  outputDir?: string;
+  runtimePair?: string;
+  providerMode?: QaProviderModeInput;
+}) {
+  const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
+  const runtimePair = parseQaRuntimePair(opts.runtimePair) ?? ["openclaw", "codex"];
+  if (runtimePair[0] !== "openclaw" || runtimePair[1] !== "codex") {
+    throw new Error('--runtime-pair for jsonl-replay must be "openclaw,codex".');
   }
-
-  process.stdout.write(body);
+  const providerMode = normalizeQaProviderMode(opts.providerMode ?? "mock-openai");
+  if (providerMode !== "mock-openai") {
+    throw new Error("qa jsonl-replay currently supports mock-openai curated fixtures only.");
+  }
+  const transcriptDir = path.resolve(repoRoot, opts.transcripts ?? "qa/scenarios/jsonl-replay");
+  const outputDir = resolveQaCommandOutputDir(repoRoot, opts.outputDir, "jsonl-replay");
+  await fs.mkdir(outputDir, { recursive: true });
+  const result = await runJsonlReplay(transcriptDir);
+  await writeQaCliReport(
+    outputDir,
+    "qa-jsonl-replay",
+    renderJsonlReplayMarkdownReport({
+      generatedAt: new Date().toISOString(),
+      providerMode,
+      runtimePair: [runtimePair[0], runtimePair[1]],
+      transcripts: result.transcripts,
+    }),
+    result,
+  );
 }
 
 export async function runQaCharacterEvalCommand(opts: {
@@ -774,28 +1084,37 @@ export async function runQaCharacterEvalCommand(opts: {
   });
   process.stdout.write(`QA character eval report: ${result.reportPath}\n`);
   process.stdout.write(`QA character eval summary: ${result.summaryPath}\n`);
+  const failedCandidateCount = result.runs.filter((run) => run.status === "fail").length;
+  const failedJudgeCount = result.judgments.filter(
+    (judgment) => judgment.rankings.length === 0,
+  ).length;
+  if (failedCandidateCount > 0 || failedJudgeCount > 0) {
+    process.stderr.write(
+      `QA character eval failed: ${failedCandidateCount} candidate(s), ${failedJudgeCount} judge(s).\n`,
+    );
+    process.exitCode = 1;
+  }
 }
 
-export async function runQaManualLaneCommand(opts: {
-  repoRoot?: string;
-  transportId?: string;
-  providerMode?: QaProviderModeInput;
-  primaryModel?: string;
-  alternateModel?: string;
-  fastMode?: boolean;
-  message: string;
-  timeoutMs?: number;
-}) {
+export async function runQaManualLaneCommand(
+  opts: QaScenarioProviderCommandOptions & {
+    repoRoot?: string;
+    message: string;
+    timeoutMs?: number;
+  },
+) {
   const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
   const transportId = normalizeQaTransportId(opts.transportId);
   const providerMode: QaProviderMode =
     opts.providerMode === undefined
       ? DEFAULT_QA_LIVE_PROVIDER_MODE
       : normalizeQaProviderMode(opts.providerMode);
-  const models = resolveQaManualLaneModels({
+  // `--model` is a one-model probe unless the operator also supplies `--alt-model`.
+  const primaryModel = opts.primaryModel?.trim();
+  const models = resolveQaRuntimeModelPair({
     providerMode,
-    primaryModel: opts.primaryModel,
-    alternateModel: opts.alternateModel,
+    primaryModel,
+    alternateModel: opts.alternateModel?.trim() || primaryModel,
   });
   const result = await runQaManualLane({
     repoRoot,
@@ -811,154 +1130,106 @@ export async function runQaManualLaneCommand(opts: {
   process.stdout.write("\n");
 }
 
-export async function runQaCredentialsAddCommand(opts: {
-  actorId?: string;
-  endpointPrefix?: string;
-  json?: boolean;
-  kind: string;
-  note?: string;
-  payloadFile: string;
-  repoRoot?: string;
-  siteUrl?: string;
-}) {
+export async function runQaCredentialsAddCommand(
+  opts: QaCredentialCommandOptions & {
+    kind: string;
+    note?: string;
+    payloadFile: string;
+    repoRoot?: string;
+  },
+) {
   const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
-  try {
-    const payloadPath = path.resolve(repoRoot, opts.payloadFile);
-    const payload = await readQaCredentialPayloadFile(payloadPath);
-    const result = await addQaCredentialSet({
-      kind: opts.kind,
-      payload,
-      note: opts.note,
-      actorId: opts.actorId,
-      siteUrl: opts.siteUrl,
-      endpointPrefix: opts.endpointPrefix,
-    });
-    if (opts.json) {
-      process.stdout.write(
-        `${JSON.stringify({ status: "ok", action: "add", credential: result.credential }, null, 2)}\n`,
-      );
-      return;
-    }
-    process.stdout.write(`QA credential added: ${result.credential.credentialId}\n`);
-    process.stdout.write(`Kind: ${result.credential.kind}\n`);
-    process.stdout.write(`Status: ${result.credential.status}\n`);
-    if (result.credential.note) {
-      process.stdout.write(`Note: ${result.credential.note}\n`);
-    }
-  } catch (error) {
-    if (opts.json) {
-      writeQaCredentialCommandErrorJson("add", error);
-      process.exitCode = 1;
-      return;
-    }
-    throw error;
-  }
-}
-
-export async function runQaCredentialsRemoveCommand(opts: {
-  actorId?: string;
-  credentialId: string;
-  endpointPrefix?: string;
-  json?: boolean;
-  siteUrl?: string;
-}) {
-  try {
-    const result = await removeQaCredentialSet({
-      credentialId: opts.credentialId,
-      actorId: opts.actorId,
-      siteUrl: opts.siteUrl,
-      endpointPrefix: opts.endpointPrefix,
-    });
-    if (opts.json) {
-      process.stdout.write(
-        `${JSON.stringify(
-          {
-            status: "ok",
-            action: "remove",
-            changed: result.changed,
-            credential: result.credential,
-          },
-          null,
-          2,
-        )}\n`,
-      );
-      return;
-    }
-    process.stdout.write(
-      result.changed
-        ? `QA credential removed (disabled): ${result.credential.credentialId}\n`
-        : `QA credential already disabled: ${result.credential.credentialId}\n`,
-    );
-  } catch (error) {
-    if (opts.json) {
-      writeQaCredentialCommandErrorJson("remove", error);
-      process.exitCode = 1;
-      return;
-    }
-    throw error;
-  }
-}
-
-export async function runQaCredentialsListCommand(opts: {
-  actorId?: string;
-  endpointPrefix?: string;
-  json?: boolean;
-  kind?: string;
-  limit?: number;
-  showSecrets?: boolean;
-  siteUrl?: string;
-  status?: string;
-}) {
-  try {
-    const result = await listQaCredentialSets({
-      actorId: opts.actorId,
-      siteUrl: opts.siteUrl,
-      endpointPrefix: opts.endpointPrefix,
-      kind: opts.kind?.trim(),
-      status: parseQaCredentialListStatus(opts.status),
-      includePayload: opts.showSecrets,
-      limit: parseQaPositiveIntegerOption("--limit", opts.limit),
-    });
-    if (opts.json) {
-      process.stdout.write(
-        `${JSON.stringify(
-          {
-            status: "ok",
-            action: "list",
-            count: result.credentials.length,
-            credentials: result.credentials,
-          },
-          null,
-          2,
-        )}\n`,
-      );
-      return;
-    }
-    printQaCredentialListTable(result.credentials);
-    if (opts.showSecrets && result.credentials.length > 0) {
-      process.stdout.write("\nPayloads:\n");
-      for (const credential of result.credentials) {
-        process.stdout.write(
-          `${credential.credentialId}: ${JSON.stringify(credential.payload ?? null)}\n`,
-        );
+  await runQaCredentialCommand(
+    "add",
+    opts.json,
+    async () => {
+      const payload = await readQaCredentialPayloadFile(path.resolve(repoRoot, opts.payloadFile));
+      const { credential } = await addQaCredentialSet({
+        kind: opts.kind,
+        payload,
+        note: opts.note,
+        actorId: opts.actorId,
+        siteUrl: opts.siteUrl,
+        endpointPrefix: opts.endpointPrefix,
+      });
+      return { credential };
+    },
+    ({ credential }) => {
+      process.stdout.write(`QA credential added: ${credential.credentialId}\n`);
+      process.stdout.write(`Kind: ${credential.kind}\n`);
+      process.stdout.write(`Status: ${credential.status}\n`);
+      if (credential.note) {
+        process.stdout.write(`Note: ${credential.note}\n`);
       }
-    }
-  } catch (error) {
-    if (opts.json) {
-      writeQaCredentialCommandErrorJson("list", error);
-      process.exitCode = 1;
-      return;
-    }
-    throw error;
-  }
+    },
+  );
 }
 
-export async function runQaCredentialsDoctorCommand(opts: {
-  actorId?: string;
-  endpointPrefix?: string;
-  json?: boolean;
-  siteUrl?: string;
-}) {
+export async function runQaCredentialsRemoveCommand(
+  opts: QaCredentialCommandOptions & {
+    credentialId: string;
+  },
+) {
+  await runQaCredentialCommand(
+    "remove",
+    opts.json,
+    async () => {
+      const { changed, credential } = await removeQaCredentialSet({
+        credentialId: opts.credentialId,
+        actorId: opts.actorId,
+        siteUrl: opts.siteUrl,
+        endpointPrefix: opts.endpointPrefix,
+      });
+      return { changed, credential };
+    },
+    ({ changed, credential }) => {
+      process.stdout.write(
+        changed
+          ? `QA credential removed (disabled): ${credential.credentialId}\n`
+          : `QA credential already disabled: ${credential.credentialId}\n`,
+      );
+    },
+  );
+}
+
+export async function runQaCredentialsListCommand(
+  opts: QaCredentialCommandOptions & {
+    kind?: string;
+    limit?: number;
+    showSecrets?: boolean;
+    status?: string;
+  },
+) {
+  await runQaCredentialCommand(
+    "list",
+    opts.json,
+    async () => {
+      const { credentials } = await listQaCredentialSets({
+        actorId: opts.actorId,
+        siteUrl: opts.siteUrl,
+        endpointPrefix: opts.endpointPrefix,
+        kind: opts.kind?.trim(),
+        status: parseQaCredentialListStatus(opts.status),
+        includePayload: opts.showSecrets,
+        limit: parseQaPositiveIntegerOption("--limit", opts.limit),
+      });
+      return { count: credentials.length, credentials };
+    },
+    ({ credentials }) => {
+      printQaCredentialListTable(credentials);
+      if (opts.showSecrets && credentials.length > 0) {
+        process.stdout.write("\nPayloads:\n");
+        for (const credential of credentials) {
+          process.stdout.write(
+            `${credential.credentialId}: ${JSON.stringify(credential.payload ?? null)}\n`,
+          );
+        }
+      }
+    },
+  );
+}
+
+export async function runQaCredentialsDoctorCommand(opts: QaCredentialCommandOptions) {
   const result = await diagnoseQaCredentialBroker({
     actorId: opts.actorId,
     endpointPrefix: opts.endpointPrefix,
@@ -974,48 +1245,9 @@ export async function runQaCredentialsDoctorCommand(opts: {
   }
 }
 
-export async function runQaLabUiCommand(opts: {
-  repoRoot?: string;
-  host?: string;
-  port?: number;
-  advertiseHost?: string;
-  advertisePort?: number;
-  controlUiUrl?: string;
-  controlUiToken?: string;
-  controlUiProxyTarget?: string;
-  uiDistDir?: string;
-  autoKickoffTarget?: string;
-  embeddedGateway?: string;
-  sendKickoffOnStart?: boolean;
-}) {
-  const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
-  const server = await startQaLabServer({
-    repoRoot,
-    host: opts.host,
-    port: Number.isFinite(opts.port) ? opts.port : undefined,
-    advertiseHost: opts.advertiseHost,
-    advertisePort: Number.isFinite(opts.advertisePort) ? opts.advertisePort : undefined,
-    controlUiUrl: opts.controlUiUrl,
-    controlUiToken: opts.controlUiToken,
-    controlUiProxyTarget: opts.controlUiProxyTarget,
-    uiDistDir: opts.uiDistDir,
-    autoKickoffTarget: opts.autoKickoffTarget,
-    embeddedGateway: opts.embeddedGateway,
-    sendKickoffOnStart: opts.sendKickoffOnStart,
-  });
-  await runInterruptibleServer("QA Lab UI", server);
-}
-
-export async function runQaDockerScaffoldCommand(opts: {
-  repoRoot?: string;
-  outputDir: string;
-  gatewayPort?: number;
-  qaLabPort?: number;
-  providerBaseUrl?: string;
-  image?: string;
-  usePrebuiltImage?: boolean;
-  bindUiDist?: boolean;
-}) {
+export async function runQaDockerScaffoldCommand(
+  opts: Omit<Parameters<typeof runQaDockerUp>[0], "skipUiBuild"> & { outputDir: string },
+) {
   const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
   const outputDir = resolveRepoRelativeOutputDir(repoRoot, opts.outputDir);
   if (!outputDir) {
@@ -1043,17 +1275,7 @@ export async function runQaDockerBuildImageCommand(opts: { repoRoot?: string; im
   process.stdout.write(`QA docker image: ${result.imageName}\n`);
 }
 
-export async function runQaDockerUpCommand(opts: {
-  repoRoot?: string;
-  outputDir?: string;
-  gatewayPort?: number;
-  qaLabPort?: number;
-  providerBaseUrl?: string;
-  image?: string;
-  usePrebuiltImage?: boolean;
-  bindUiDist?: boolean;
-  skipUiBuild?: boolean;
-}) {
+export async function runQaDockerUpCommand(opts: Parameters<typeof runQaDockerUp>[0]) {
   const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
   const result = await runQaDockerUp({
     repoRoot,
@@ -1072,25 +1294,4 @@ export async function runQaDockerUpCommand(opts: {
   process.stdout.write(`Stop: ${result.stopCommand}\n`);
 }
 
-export async function runQaProviderServerCommand(
-  providerMode: QaProviderMode,
-  opts: { host?: string; port?: number },
-) {
-  const provider = getQaProvider(providerMode);
-  const standaloneCommand = provider.standaloneCommand;
-  if (!standaloneCommand) {
-    throw new Error(`QA provider "${providerMode}" does not expose a standalone server command.`);
-  }
-  const server = await startQaProviderServer(providerMode, {
-    host: opts.host,
-    port: Number.isFinite(opts.port) ? opts.port : undefined,
-  });
-  if (!server) {
-    throw new Error(`QA provider "${providerMode}" does not expose a standalone server command.`);
-  }
-  await runInterruptibleServer(standaloneCommand.serverLabel, server);
-}
-
-export const __testing = {
-  resolveRepoRelativeOutputDir,
-};
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

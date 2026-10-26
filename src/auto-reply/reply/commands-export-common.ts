@@ -1,25 +1,18 @@
-import {
-  resolveDefaultSessionStorePath,
-  resolveSessionFilePath,
-  resolveSessionFilePathOptions,
-} from "../../config/sessions/paths.js";
-import { loadSessionStore } from "../../config/sessions/store.js";
+import { resolveDefaultSessionStorePath } from "../../config/sessions/paths.js";
+import { readSessionEntryReadOnlyInWorker } from "../../config/sessions/session-entry-read-runtime.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
-import { formatErrorMessage } from "../../infra/errors.js";
-import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
-import type { ReplyPayload } from "../types.js";
+import { escapeRegExp } from "../../shared/regexp.js";
 import type { HandleCommandsParams } from "./commands-types.js";
 
-export interface ExportCommandSessionTarget {
+interface ExportCommandSessionTarget {
+  agentId: string;
   entry: SessionEntry;
-  sessionFile: string;
+  sessionId: string;
+  sessionKey: string;
+  storePath: string;
 }
 
 const MAX_EXPORT_COMMAND_OUTPUT_PATH_CHARS = 512;
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 export function parseExportCommandOutputPath(
   commandBodyNormalized: string,
@@ -31,7 +24,8 @@ export function parseExportCommandOutputPath(
   }
   const aliasPattern = aliases.map(escapeRegExp).join("|");
   const args = normalized.replace(new RegExp(`^/(${aliasPattern})\\s*`), "").trim();
-  const outputPath = args.split(/\s+/).find((part) => !part.startsWith("-"));
+  // The command registry serializes a single path argument, which may contain spaces.
+  const outputPath = args.replace(/^(?:-\S*(?:\s+|$))+/u, "").trim() || undefined;
   if (outputPath && outputPath.length > MAX_EXPORT_COMMAND_OUTPUT_PATH_CHARS) {
     return {
       error: `❌ Output path is too long. Keep it at ${MAX_EXPORT_COMMAND_OUTPUT_PATH_CHARS} characters or less.`,
@@ -40,33 +34,26 @@ export function parseExportCommandOutputPath(
   return { outputPath };
 }
 
-export function resolveExportCommandSessionTarget(
+export async function resolveExportCommandSessionTarget(
   params: HandleCommandsParams,
-): ExportCommandSessionTarget | ReplyPayload {
-  const targetAgentId = resolveAgentIdFromSessionKey(params.sessionKey) || params.agentId;
+): Promise<ExportCommandSessionTarget | { text: string }> {
+  const targetAgentId = params.agentId;
   const storePath = params.storePath ?? resolveDefaultSessionStorePath(targetAgentId);
-  const store = loadSessionStore(storePath, { skipCache: true });
-  const entry = store[params.sessionKey] as SessionEntry | undefined;
-  if (!entry?.sessionId) {
+  const entry = await readSessionEntryReadOnlyInWorker({
+    storePath,
+    sessionKey: params.sessionKey,
+    clone: false,
+  });
+  const sessionId = entry?.sessionId;
+  if (!sessionId) {
     return { text: `❌ Session not found: ${params.sessionKey}` };
   }
 
-  try {
-    const sessionFile = resolveSessionFilePath(
-      entry.sessionId,
-      entry,
-      resolveSessionFilePathOptions({ agentId: targetAgentId, storePath }),
-    );
-    return { entry, sessionFile };
-  } catch (err) {
-    return {
-      text: `❌ Failed to resolve session file: ${formatErrorMessage(err)}`,
-    };
-  }
-}
-
-export function isReplyPayload(
-  value: ExportCommandSessionTarget | ReplyPayload,
-): value is ReplyPayload {
-  return "text" in value;
+  return {
+    agentId: targetAgentId,
+    entry,
+    sessionId,
+    sessionKey: params.sessionKey,
+    storePath,
+  };
 }

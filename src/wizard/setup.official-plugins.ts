@@ -1,4 +1,7 @@
-import { ensureOnboardingPluginInstalled } from "../commands/onboarding-plugin-install.js";
+import {
+  ensureOnboardingPluginInstalled,
+  type OnboardingPluginInstallEntry,
+} from "../commands/onboarding-plugin-install.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginPackageInstall } from "../plugins/manifest.js";
 import {
@@ -14,12 +17,10 @@ import type { WizardPrompter } from "./prompts.js";
 
 const SKIP_VALUE = "__skip__";
 
-export type OfficialPluginOnboardingInstallEntry = {
-  pluginId: string;
-  label: string;
+// Official plugin onboarding lists generic official plugins not already
+// configured and installs the selected ones through the trusted install flow.
+type OfficialPluginOnboardingInstallEntry = OnboardingPluginInstallEntry & {
   description?: string;
-  install: PluginPackageInstall;
-  trustedSourceLinkedOfficialInstall?: boolean;
 };
 
 function isInstalledOrConfigured(config: OpenClawConfig, pluginId: string): boolean {
@@ -34,15 +35,15 @@ function isGenericOfficialPluginEntry(entry: { source?: string; kind?: string })
     Boolean(manifest?.plugin?.id) &&
     !manifest?.channel &&
     (manifest?.providers?.length ?? 0) === 0 &&
-    (manifest?.webSearchProviders?.length ?? 0) === 0
+    (manifest?.webSearchProviders?.length ?? 0) === 0 &&
+    // Migration owners have their own setup flow; listing them here duplicates install prompts.
+    (manifest?.contracts?.migrationProviders?.length ?? 0) === 0
   );
 }
 
 function formatInstallHint(install: PluginPackageInstall): string {
   if (install.clawhubSpec && install.npmSpec) {
-    return install.defaultChoice === "clawhub"
-      ? "ClawHub, with npm fallback"
-      : "npm, with ClawHub fallback";
+    return "npm, with ClawHub fallback";
   }
   if (install.clawhubSpec) {
     return "ClawHub";
@@ -56,13 +57,15 @@ function formatInstallHint(install: PluginPackageInstall): string {
   return "install source";
 }
 
-export const __testing = {
-  formatInstallHint,
-};
-
-export function resolveOfficialPluginOnboardingInstallEntries(params: {
+// Prompt for optional official plugin installs during onboarding. The skip entry
+// is explicit so users can leave every plugin unselected without ambiguity.
+export async function setupOfficialPluginInstalls(params: {
   config: OpenClawConfig;
-}): OfficialPluginOnboardingInstallEntry[] {
+  prompter: WizardPrompter;
+  runtime: RuntimeEnv;
+  workspaceDir?: string;
+}): Promise<OpenClawConfig> {
+  const config = params.config;
   const entries: OfficialPluginOnboardingInstallEntry[] = [];
   for (const entry of listOfficialExternalPluginCatalogEntries()) {
     if (!isGenericOfficialPluginEntry(entry)) {
@@ -70,7 +73,7 @@ export function resolveOfficialPluginOnboardingInstallEntries(params: {
     }
     const pluginId = resolveOfficialExternalPluginId(entry);
     const install = resolveOfficialExternalPluginInstall(entry);
-    if (!pluginId || !install || isInstalledOrConfigured(params.config, pluginId)) {
+    if (!pluginId || !install || isInstalledOrConfigured(config, pluginId)) {
       continue;
     }
     entries.push({
@@ -81,18 +84,7 @@ export function resolveOfficialPluginOnboardingInstallEntries(params: {
       trustedSourceLinkedOfficialInstall: true,
     });
   }
-  return entries.toSorted((left, right) => left.label.localeCompare(right.label));
-}
-
-export async function setupOfficialPluginInstalls(params: {
-  config: OpenClawConfig;
-  prompter: WizardPrompter;
-  runtime: RuntimeEnv;
-  workspaceDir?: string;
-}): Promise<OpenClawConfig> {
-  const installEntries = resolveOfficialPluginOnboardingInstallEntries({
-    config: params.config,
-  });
+  const installEntries = entries.toSorted((left, right) => left.label.localeCompare(right.label));
   if (installEntries.length === 0) {
     return params.config;
   }

@@ -5,24 +5,6 @@ import type {
   VideoGenerationTransformCapabilities,
 } from "./types.js";
 
-export function resolveVideoGenerationMode(params: {
-  inputImageCount?: number;
-  inputVideoCount?: number;
-}): VideoGenerationMode | null {
-  const inputImageCount = params.inputImageCount ?? 0;
-  const inputVideoCount = params.inputVideoCount ?? 0;
-  if (inputImageCount > 0 && inputVideoCount > 0) {
-    return null;
-  }
-  if (inputVideoCount > 0) {
-    return "videoToVideo";
-  }
-  if (inputImageCount > 0) {
-    return "imageToVideo";
-  }
-  return "generate";
-}
-
 export function listSupportedVideoGenerationModes(
   provider: Pick<VideoGenerationProvider, "capabilities">,
 ): VideoGenerationMode[] {
@@ -49,13 +31,22 @@ export function resolveVideoGenerationModeCapabilities(params: {
 } {
   const inputImageCount = params.inputImageCount ?? 0;
   const inputVideoCount = params.inputVideoCount ?? 0;
-  const mode = resolveVideoGenerationMode(params);
+  let mode: VideoGenerationMode | null = "generate";
+  if (inputImageCount > 0 && inputVideoCount > 0) {
+    mode = null;
+  } else if (inputVideoCount > 0) {
+    mode = "videoToVideo";
+  } else if (inputImageCount > 0) {
+    mode = "imageToVideo";
+  }
   const capabilities = params.provider?.capabilities;
   const withModelLimits = <
     T extends VideoGenerationModeCapabilities | VideoGenerationTransformCapabilities | undefined,
   >(
     caps: T,
   ): T => {
+    // Model-specific caps narrow the provider defaults without mutating the
+    // registered provider object shared across requests.
     const model = params.model?.trim();
     if (!caps || !model) {
       return caps;
@@ -80,25 +71,15 @@ export function resolveVideoGenerationModeCapabilities(params: {
   if (!capabilities) {
     return { mode, capabilities: undefined };
   }
-  if (mode === "generate") {
+  if (mode) {
     return {
       mode,
-      capabilities: withModelLimits(capabilities.generate),
-    };
-  }
-  if (mode === "imageToVideo") {
-    return {
-      mode,
-      capabilities: withModelLimits(capabilities.imageToVideo),
-    };
-  }
-  if (mode === "videoToVideo") {
-    return {
-      mode,
-      capabilities: withModelLimits(capabilities.videoToVideo),
+      capabilities: withModelLimits(capabilities[mode]),
     };
   }
   const videoToVideoCapabilities = withModelLimits(capabilities.videoToVideo);
+  // Mixed image+video references have no first-class mode label, but providers
+  // may support them through video-to-video capabilities that also accept images.
   if (
     inputImageCount > 0 &&
     inputVideoCount > 0 &&

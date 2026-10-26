@@ -1,47 +1,21 @@
-import { isValueToken } from "../infra/cli-root-options.js";
+// Fast-path argv parser for `openclaw gateway ...` without full Commander registration.
+import { GATEWAY_RUN_BOOLEAN_FLAGS, GATEWAY_RUN_VALUE_FLAGS } from "../../gateway-run-argv.mjs";
+import {
+  WINDOWS_TASK_SUPERVISOR_CHILD_FLAG,
+  WINDOWS_TASK_SUPERVISOR_FLAG,
+} from "../daemon/windows-task-supervisor-contract.js";
+import {
+  consumeKnownOptionToken,
+  consumeRootCommandOptionToken,
+  getCommandArgsWithRootOptions,
+  getCommandPositionalsWithRootOptions,
+  isValueToken,
+} from "../infra/cli-root-options.js";
 
-const GATEWAY_RUN_VALUE_FLAGS = new Set([
-  "--port",
-  "--bind",
-  "--token",
-  "--auth",
-  "--password",
-  "--password-file",
-  "--tailscale",
-  "--ws-log",
-  "--raw-stream-path",
-]);
-
-const GATEWAY_RUN_BOOLEAN_FLAGS = new Set([
-  "--tailscale-reset-on-exit",
-  "--allow-unconfigured",
-  "--dev",
-  "--reset",
-  "--force",
-  "--verbose",
-  "--cli-backend-logs",
-  "--claude-cli-logs",
-  "--compact",
-  "--raw-stream",
-]);
+export { isForegroundGatewayRunArgv } from "../../gateway-run-argv.mjs";
 
 export function consumeGatewayRunOptionToken(args: ReadonlyArray<string>, index: number): number {
-  const arg = args[index];
-  if (!arg || arg === "--" || !arg.startsWith("-")) {
-    return 0;
-  }
-  const equalsIndex = arg.indexOf("=");
-  const flag = equalsIndex === -1 ? arg : arg.slice(0, equalsIndex);
-  if (GATEWAY_RUN_BOOLEAN_FLAGS.has(flag)) {
-    return equalsIndex === -1 ? 1 : 0;
-  }
-  if (!GATEWAY_RUN_VALUE_FLAGS.has(flag)) {
-    return 0;
-  }
-  if (equalsIndex !== -1) {
-    return arg.slice(equalsIndex + 1).trim() ? 1 : 0;
-  }
-  return isValueToken(args[index + 1]) ? 2 : 0;
+  return consumeKnownOptionToken(args, index, GATEWAY_RUN_BOOLEAN_FLAGS, GATEWAY_RUN_VALUE_FLAGS);
 }
 
 export function consumeGatewayFastPathRootOptionToken(
@@ -64,41 +38,67 @@ export function consumeGatewayFastPathRootOptionToken(
   return 0;
 }
 
-export function resolveGatewayCatalogCommandPath(argv: string[]): string[] | null {
-  const args = argv.slice(2);
-  let sawGateway = false;
+export function resolveGatewayCommandPath(argv: string[], depth = 2): string[] | null {
+  const positionals = getCommandPositionalsWithRootOptions(argv, {
+    commandPath: ["gateway"],
+    // Supervisor commands use full parsing but still need Gateway startup selection.
+    booleanFlags: [...GATEWAY_RUN_BOOLEAN_FLAGS, WINDOWS_TASK_SUPERVISOR_FLAG],
+    valueFlags: [...GATEWAY_RUN_VALUE_FLAGS, WINDOWS_TASK_SUPERVISOR_CHILD_FLAG],
+    maxPositionals: depth - 1,
+    mode: "command-path",
+  });
+  return positionals ? ["gateway", ...positionals] : null;
+}
+
+export function isGatewayRunInvocationArgv(argv: string[]): boolean {
+  const commandPath = resolveGatewayCommandPath(argv);
+  return (
+    commandPath?.length === 1 ||
+    (commandPath?.length === 2 && commandPath[0] === "gateway" && commandPath[1] === "run")
+  );
+}
+
+export function resolveGatewayRunPreBootstrapOptions(
+  argv: string[],
+): { force: boolean; reset: boolean } | null {
+  const args = getCommandArgsWithRootOptions(argv, {
+    commandPath: ["gateway"],
+    mode: "command-path",
+  });
+  if (!args) {
+    return null;
+  }
+  let force = false;
+  let reset = false;
+  let sawRun = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg || arg === "--") {
       break;
     }
-    if (!sawGateway) {
-      const consumed = consumeGatewayFastPathRootOptionToken(args, index);
-      if (consumed > 0) {
-        index += consumed - 1;
-        continue;
-      }
-      if (arg.startsWith("-")) {
-        continue;
-      }
-      if (arg !== "gateway") {
-        return null;
-      }
-      sawGateway = true;
+    if (!sawRun && arg === "run") {
+      sawRun = true;
       continue;
     }
-
-    const consumed = consumeGatewayRunOptionToken(args, index);
+    const consumed =
+      consumeRootCommandOptionToken(args, index) ||
+      consumeGatewayRunOptionToken(args, index) ||
+      // Required values can look like flags; consume them before considering destructive options.
+      (arg && GATEWAY_RUN_VALUE_FLAGS.has(arg) && args[index + 1] !== undefined ? 2 : 0);
     if (consumed > 0) {
+      if (arg === "--force") {
+        force = true;
+      } else if (arg === "--reset") {
+        reset = true;
+      }
       index += consumed - 1;
       continue;
     }
-    if (arg.startsWith("-")) {
-      continue;
+    if (!arg.startsWith("-")) {
+      return null;
     }
-    return ["gateway", arg];
   }
 
-  return sawGateway ? ["gateway"] : null;
+  return { force, reset };
 }

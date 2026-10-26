@@ -1,31 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import { withEnvAsync } from "../../../test-utils/env.js";
 import type { OnboardOptions } from "../../onboard-types.js";
 import { applyNonInteractiveGatewayConfig } from "./gateway-config.js";
 
-// Narrow mock: reproduce normalize semantics (typeof-string + trim, reject
-// "undefined"/"null" literals) and stub randomToken so we can assert when a
-// fresh token is generated vs. reused from the resolution chain.
 const randomToken = vi.hoisted(() => vi.fn(() => "generated-random-token"));
-vi.mock("../../onboard-helpers.js", () => ({
-  normalizeGatewayTokenInput: (value: unknown): string => {
-    if (typeof value !== "string") {
-      return "";
-    }
-    const trimmed = value.trim();
-    if (trimmed === "undefined" || trimmed === "null") {
-      return "";
-    }
-    return trimmed;
-  },
-  randomToken,
-}));
+// mock-isolation: Keep generated credentials deterministic while exercising the real normalizer.
+vi.mock("../../random-token.js", () => ({ randomToken }));
 
-function createRuntime() {
-  return { log: vi.fn(), error: vi.fn(), exit: vi.fn() };
-}
-
-const baseOpts = {} as OnboardOptions;
+const runtime = { log: vi.fn(), error: vi.fn(), exit: vi.fn() };
 
 const SAMPLE_SECRET_REF = {
   source: "env" as const,
@@ -33,183 +16,244 @@ const SAMPLE_SECRET_REF = {
   id: "OPENCLAW_GATEWAY_TOKEN_REF",
 };
 
-function createTokenConfig(token: unknown): OpenClawConfig {
-  return {
-    gateway: { auth: { mode: "token", token } },
-  } as unknown as OpenClawConfig;
-}
-
 function applyGatewayConfig({
-  nextConfig = {} as OpenClawConfig,
-  opts = baseOpts,
-  runtime = createRuntime(),
+  auth,
+  gateway,
+  nextConfig = { gateway: { ...gateway, ...(auth ? { auth } : {}) } },
+  opts = {},
+  env = {},
 }: {
+  auth?: NonNullable<OpenClawConfig["gateway"]>["auth"];
+  gateway?: OpenClawConfig["gateway"];
   nextConfig?: OpenClawConfig;
   opts?: OnboardOptions;
-  runtime?: ReturnType<typeof createRuntime>;
+  env?: Record<string, string | undefined>;
 } = {}) {
-  return applyNonInteractiveGatewayConfig({
-    nextConfig,
-    opts,
-    runtime: runtime as never,
-    defaultPort: 18789,
-  });
+  return withEnvAsync(
+    {
+      OPENCLAW_GATEWAY_TOKEN: undefined,
+      OPENCLAW_GATEWAY_PASSWORD: undefined,
+      [SAMPLE_SECRET_REF.id]: undefined,
+      ...env,
+    },
+    () => applyNonInteractiveGatewayConfig({ nextConfig, opts, runtime, defaultPort: 18789 }),
+  );
 }
 
-describe("applyNonInteractiveGatewayConfig token resolution chain", () => {
-  const originalEnvToken = process.env.OPENCLAW_GATEWAY_TOKEN;
-  const originalRefValue = process.env[SAMPLE_SECRET_REF.id];
+describe("applyNonInteractiveGatewayConfig auth resolution", () => {
+  beforeEach(() => vi.clearAllMocks());
 
-  beforeEach(() => {
-    vi.clearAllMocks();
-    delete process.env.OPENCLAW_GATEWAY_TOKEN;
-    delete process.env[SAMPLE_SECRET_REF.id];
-  });
-
-  afterEach(() => {
-    if (originalEnvToken === undefined) {
-      delete process.env.OPENCLAW_GATEWAY_TOKEN;
-    } else {
-      process.env.OPENCLAW_GATEWAY_TOKEN = originalEnvToken;
-    }
-    if (originalRefValue === undefined) {
-      delete process.env[SAMPLE_SECRET_REF.id];
-    } else {
-      process.env[SAMPLE_SECRET_REF.id] = originalRefValue;
-    }
-  });
-
-  // --- Plaintext preservation (the original regression) ---
-
-  it("preserves existing plaintext gateway.auth.token when no flag or env override is provided", () => {
-    const nextConfig = createTokenConfig("existing-user-token");
-
-    const result = applyGatewayConfig({ nextConfig });
-
-    expect(result?.nextConfig.gateway?.auth?.token).toBe("existing-user-token");
-    expect(randomToken).not.toHaveBeenCalled();
-  });
-
-  it("prefers existing plaintext token over ambient OPENCLAW_GATEWAY_TOKEN on re-onboard", () => {
-    // A stale shell/launchd OPENCLAW_GATEWAY_TOKEN must not rotate a
-    // persisted token — that would break already-paired clients.
-    process.env.OPENCLAW_GATEWAY_TOKEN = "stale-env-token";
-    const nextConfig = createTokenConfig("existing-user-token");
-
-    const result = applyGatewayConfig({ nextConfig });
-
-    expect(result?.nextConfig.gateway?.auth?.token).toBe("existing-user-token");
-    expect(randomToken).not.toHaveBeenCalled();
-  });
-
-  it("prefers --gateway-token flag over existing plaintext token", () => {
-    const nextConfig = createTokenConfig("existing-user-token");
-
-    const result = applyGatewayConfig({
-      nextConfig,
-      opts: { gatewayToken: "flag-token" } as OnboardOptions,
-    });
-
-    expect(result?.nextConfig.gateway?.auth?.token).toBe("flag-token");
-    expect(randomToken).not.toHaveBeenCalled();
-  });
-
-  it("uses OPENCLAW_GATEWAY_TOKEN to fill an empty config on first-run", () => {
-    process.env.OPENCLAW_GATEWAY_TOKEN = "env-token";
-
-    const result = applyGatewayConfig();
-
-    expect(result?.nextConfig.gateway?.auth?.token).toBe("env-token");
-    expect(randomToken).not.toHaveBeenCalled();
-  });
-
-  it("generates a random token only when flag, env, and existing config are all empty", () => {
-    const result = applyGatewayConfig();
-
-    expect(randomToken).toHaveBeenCalledOnce();
-    expect(result?.nextConfig.gateway?.auth?.token).toBe("generated-random-token");
-  });
-
-  // --- SecretRef preservation ---
-
-  it("preserves an existing SecretRef when no flag or env override is provided", () => {
-    const nextConfig = createTokenConfig(SAMPLE_SECRET_REF);
-
-    const result = applyGatewayConfig({ nextConfig });
-
-    expect(result?.nextConfig.gateway?.auth?.token).toEqual(SAMPLE_SECRET_REF);
-    expect(randomToken).not.toHaveBeenCalled();
-  });
-
-  it("preserves an existing SecretRef even when ambient OPENCLAW_GATEWAY_TOKEN is set", () => {
-    // A stale ambient env must not declassify a configured SecretRef.
-    process.env.OPENCLAW_GATEWAY_TOKEN = "stale-env-token";
-    const nextConfig = createTokenConfig(SAMPLE_SECRET_REF);
-
-    const result = applyGatewayConfig({ nextConfig });
-
-    expect(result?.nextConfig.gateway?.auth?.token).toEqual(SAMPLE_SECRET_REF);
-    expect(randomToken).not.toHaveBeenCalled();
-  });
-
-  it("leaves env-source SecretRef resolution to the health probe path", () => {
-    process.env[SAMPLE_SECRET_REF.id] = "resolved-secret-value";
-    const nextConfig = createTokenConfig(SAMPLE_SECRET_REF);
-
-    const result = applyGatewayConfig({ nextConfig });
-
-    expect(result?.nextConfig.gateway?.auth?.token).toEqual(SAMPLE_SECRET_REF);
-    expect(randomToken).not.toHaveBeenCalled();
-  });
-
-  it("overrides an existing SecretRef when --gateway-token flag is provided", () => {
-    const nextConfig = createTokenConfig(SAMPLE_SECRET_REF);
-
-    const result = applyGatewayConfig({
-      nextConfig,
-      opts: { gatewayToken: "flag-token" } as OnboardOptions,
-    });
-
-    expect(result?.nextConfig.gateway?.auth?.token).toBe("flag-token");
-    expect(randomToken).not.toHaveBeenCalled();
-  });
-
-  it("overrides an existing SecretRef when --gateway-token-ref-env is provided", () => {
-    const newRefId = "OPENCLAW_GATEWAY_TOKEN_NEW_REF";
-    process.env[newRefId] = "resolved-new-ref-value";
-    try {
-      const nextConfig = createTokenConfig(SAMPLE_SECRET_REF);
-
-      const result = applyGatewayConfig({
-        nextConfig,
-        opts: { gatewayTokenRefEnv: newRefId } as OnboardOptions,
+  const ambientToken = { OPENCLAW_GATEWAY_TOKEN: "ambient" };
+  it.each([
+    ["saved", undefined, ambientToken, "saved"],
+    ["saved", "flag-token", {}, "flag-token"],
+    [SAMPLE_SECRET_REF, undefined, ambientToken, SAMPLE_SECRET_REF],
+    [SAMPLE_SECRET_REF, undefined, { [SAMPLE_SECRET_REF.id]: "resolved" }, SAMPLE_SECRET_REF],
+    [SAMPLE_SECRET_REF, "flag-token", {}, "flag-token"],
+    [undefined, undefined, { OPENCLAW_GATEWAY_TOKEN: "env-token" }, "env-token"],
+    [undefined, undefined, {}, "generated-random-token"],
+  ] as const)(
+    "preserves token precedence and reference ownership (%#)",
+    async (token, gatewayToken, env, expected) => {
+      const result = await applyGatewayConfig({
+        auth: { mode: "token", token },
+        opts: { gatewayToken },
+        env,
       });
+      expect(result?.nextConfig.gateway?.auth?.token).toEqual(expected);
+      expect(randomToken).toHaveBeenCalledTimes(expected === "generated-random-token" ? 1 : 0);
+    },
+  );
 
-      const newToken = result?.nextConfig.gateway?.auth?.token;
-      expect(typeof newToken).toBe("object");
-      const newTokenRef = typeof newToken === "object" && newToken !== null ? newToken : undefined;
-      expect(newTokenRef?.source).toBe("env");
-      expect(newTokenRef?.id).toBe(newRefId);
-      expect(newToken).not.toEqual(SAMPLE_SECRET_REF);
-      expect(randomToken).not.toHaveBeenCalled();
-    } finally {
-      delete process.env[newRefId];
-    }
-  });
-
-  it("fails when --gateway-token-ref-env points to a missing env var", () => {
-    const runtime = createRuntime();
-
-    const result = applyGatewayConfig({
-      opts: { gatewayTokenRefEnv: "MISSING_GATEWAY_TOKEN_ENV" } as OnboardOptions,
-      runtime,
+  it("selects token auth when --gateway-token overrides a no-auth config", async () => {
+    const result = await applyGatewayConfig({
+      auth: { mode: "none" },
+      opts: { gatewayToken: "flag-token" } as OnboardOptions,
     });
 
-    expect(result).toBeNull();
-    expect(runtime.error).toHaveBeenCalledWith(
-      'Environment variable "MISSING_GATEWAY_TOKEN_ENV" is missing or empty. Export it first, then rerun openclaw onboard --non-interactive.',
-    );
-    expect(runtime.exit).toHaveBeenCalledWith(1);
+    expect(result?.nextConfig.gateway?.auth).toEqual({ mode: "token", token: "flag-token" });
+  });
+
+  it("selects password auth when --gateway-password overrides an existing token SecretRef", async () => {
+    const result = await applyGatewayConfig({
+      auth: { mode: "token", token: SAMPLE_SECRET_REF },
+      opts: { gatewayPassword: "explicit-password" } as OnboardOptions,
+    });
+    expect(result?.nextConfig.gateway?.auth).toMatchObject({
+      mode: "password",
+      password: "explicit-password",
+    });
     expect(randomToken).not.toHaveBeenCalled();
   });
+
+  it("stores an explicit password as a reference to the configured env provider", async () => {
+    const result = await applyGatewayConfig({
+      nextConfig: {
+        secrets: { defaults: { env: "gatewayenv" }, providers: { gatewayenv: { source: "env" } } },
+      },
+      opts: { gatewayPassword: "gateway-password-from-env", secretInputMode: "ref" },
+      env: { OPENCLAW_GATEWAY_PASSWORD: "gateway-password-from-env" },
+    });
+    expect(result?.nextConfig.gateway?.auth).toMatchObject({
+      mode: "password",
+      password: { source: "env", provider: "gatewayenv", id: "OPENCLAW_GATEWAY_PASSWORD" },
+    });
+  });
+
+  it.each(["existing-password", { ...SAMPLE_SECRET_REF, id: "EXISTING_GATEWAY_PASSWORD" }])(
+    "preserves existing password %j in reference mode without an explicit replacement",
+    async (password) => {
+      const result = await applyGatewayConfig({
+        auth: { mode: "password", password },
+        opts: { secretInputMode: "ref" },
+      });
+      expect(result?.nextConfig.gateway?.auth?.password).toEqual(password);
+    },
+  );
+
+  it.each([
+    { name: "an explicit auth mode", opts: { gatewayAuth: "token" as const } },
+    { name: "an explicit token credential", opts: { gatewayToken: "flag-token" } },
+  ])("keeps $name authoritative over --gateway-password", async ({ opts }) => {
+    const result = await applyGatewayConfig({
+      opts: { ...opts, gatewayPassword: "explicit-password" } as OnboardOptions,
+    });
+
+    expect(result?.nextConfig.gateway?.auth?.mode).toBe("token");
+  });
+
+  it("keeps password auth when a token-only rerun targets an existing Funnel", async () => {
+    const result = await applyGatewayConfig({
+      auth: { mode: "password", password: "test-password" },
+      gateway: { tailscale: { mode: "funnel" } },
+      opts: { gatewayToken: "flag-token" } as OnboardOptions,
+    });
+    expect(result?.nextConfig.gateway?.auth).toEqual({
+      mode: "password",
+      password: "test-password",
+    });
+  });
+
+  it.each([
+    { opts: {}, expectedMode: "trusted-proxy" },
+    { opts: { tailscale: "funnel" }, expectedMode: undefined },
+    { opts: { tailscale: "funnel", gatewayAuth: "password" }, expectedMode: "password" },
+  ] as const)(
+    "preserves proxy auth unless explicitly replaced: $opts",
+    async ({ opts, expectedMode }) => {
+      const auth = {
+        mode: "trusted-proxy" as const,
+        password: "synthetic-local-password",
+        trustedProxy: { userHeader: "x-forwarded-user", allowUsers: ["operator@example.test"] },
+      };
+      const result = await applyGatewayConfig({
+        auth,
+        gateway: { trustedProxies: ["10.0.0.5"] },
+        opts,
+      });
+      if (expectedMode === undefined) {
+        expect(result).toBeNull();
+        expect(runtime.error).toHaveBeenCalledWith(
+          expect.stringContaining("--gateway-auth password"),
+        );
+        expect(runtime.exit).toHaveBeenCalledWith(1);
+      } else {
+        expect(result?.nextConfig.gateway?.auth).toEqual({ ...auth, mode: expectedMode });
+        expect(result?.nextConfig.gateway?.trustedProxies).toEqual(["10.0.0.5"]);
+        expect(runtime.exit).not.toHaveBeenCalled();
+      }
+      expect(auth.mode).toBe("trusted-proxy");
+      expect(randomToken).not.toHaveBeenCalled();
+    },
+  );
+
+  it("establishes token auth when explicitly enabling Tailscale Serve from no-auth", async () => {
+    const result = await applyGatewayConfig({
+      auth: { mode: "none" },
+      gateway: { bind: "loopback", tailscale: { mode: "off" } },
+      opts: { tailscale: "serve" } as OnboardOptions,
+    });
+    expect(result?.nextConfig.gateway?.auth).toEqual({
+      mode: "token",
+      token: "generated-random-token",
+    });
+    expect(result?.nextConfig.gateway?.tailscale?.mode).toBe("serve");
+  });
+
+  it.each([
+    { mode: "token", token: SAMPLE_SECRET_REF },
+    { mode: "password", password: "test-password" },
+  ] as const)("selects a replacement env token over $mode auth", async (auth) => {
+    const newRefId = "OPENCLAW_GATEWAY_TOKEN_NEW_REF";
+    const result = await applyGatewayConfig({
+      auth,
+      opts: { gatewayTokenRefEnv: newRefId },
+      env: { [newRefId]: "resolved-new-ref-value" },
+    });
+
+    expect(result?.nextConfig.gateway?.auth).toMatchObject({
+      mode: "token",
+      token: { source: "env", provider: "default", id: newRefId },
+    });
+    expect(randomToken).not.toHaveBeenCalled();
+  });
+
+  it("preserves environment-backed password auth without persisting the password", async () => {
+    const result = await applyGatewayConfig({
+      auth: { mode: "password" },
+      env: { OPENCLAW_GATEWAY_PASSWORD: "environment-password" },
+    });
+    expect(result?.nextConfig.gateway?.auth).toEqual({ mode: "password" });
+  });
+
+  it.each([
+    [
+      { opts: { gatewayTokenRefEnv: "MISSING_GATEWAY_TOKEN_ENV" } },
+      'Environment variable "MISSING_GATEWAY_TOKEN_ENV" is missing or empty.',
+    ],
+    [
+      { auth: { mode: "password", password: "test-password" }, opts: { gatewayPassword: " " } },
+      "Missing --gateway-password",
+    ],
+    [{ opts: { gatewayBind: "custom" } }, "--gateway-bind custom requires gateway.customBindHost"],
+    [
+      { gateway: { customBindHost: "not-an-ip" }, opts: { gatewayBind: "custom" } },
+      "Invalid IPv4 address",
+    ],
+  ] satisfies Array<[Parameters<typeof applyGatewayConfig>[0], string]>)(
+    "rejects invalid gateway options %#",
+    async (input, message) => {
+      expect(
+        await applyGatewayConfig({ ...input, opts: { ...input?.opts, json: true } }),
+      ).toBeNull();
+      expect(runtime.error).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(message));
+      expect(runtime.exit).toHaveBeenCalledWith(1);
+      const logged = JSON.parse(String(runtime.log.mock.calls[0]?.[0]));
+      const error = String(runtime.error.mock.calls[0]?.[0]);
+      expect(runtime.log).toHaveBeenCalledOnce();
+      expect(logged).toEqual({
+        ok: false,
+        error: { type: "cli_error", message: error },
+        phase: "options",
+        message: error,
+      });
+      expect(randomToken).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { gateway: { customBindHost: "192.168.1.100" }, tailscale: undefined, bind: "custom" },
+    { gateway: {}, tailscale: "serve", bind: "loopback" },
+  ] as const)(
+    "normalizes valid custom bind with tailscale=$tailscale",
+    async ({ gateway, tailscale, bind }) => {
+      const result = await applyGatewayConfig({
+        gateway,
+        opts: { gatewayBind: "custom", tailscale },
+      });
+      expect(result?.nextConfig.gateway?.bind).toBe(bind);
+      expect(runtime.error).not.toHaveBeenCalled();
+      expect(runtime.exit).not.toHaveBeenCalled();
+    },
+  );
 });

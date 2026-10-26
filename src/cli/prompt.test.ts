@@ -1,3 +1,4 @@
+// Prompt tests cover CLI prompt input handling and cancellation behavior.
 import readline from "node:readline/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isYes, setVerbose, setYes } from "../globals.js";
@@ -72,12 +73,15 @@ describe("promptYesNo", () => {
   });
 
   it("rejects when input closes before an answer is received", async () => {
-    readlineState.question.mockReturnValueOnce(new Promise<string>(() => undefined));
+    const answer = Promise.withResolvers<string>();
+    readlineState.question.mockReturnValueOnce(answer.promise);
 
-    const result = promptYesNo("Continue?");
+    const result = promptYesNo("Continue?", true);
+    const rejected = expect(result).rejects.toThrow(PromptInputClosedError);
     readlineState.emit("close");
+    answer.resolve("y");
 
-    await expect(result).rejects.toThrow(PromptInputClosedError);
+    await rejected;
     expect(readlineState.close).toHaveBeenCalledTimes(1);
   });
 });

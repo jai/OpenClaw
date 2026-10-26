@@ -8,6 +8,7 @@ export type {
   ChannelSetupDmPolicy,
   ChannelSetupWizard,
   ChannelSetupWizardAllowFromEntry,
+  ChannelSetupWizardCredential,
   ChannelSetupWizardTextInput,
 } from "../channels/plugins/setup-wizard-types.js";
 
@@ -23,7 +24,6 @@ export {
   createAccountScopedAllowFromSection,
   createAccountScopedGroupAccessSection,
   createTopLevelChannelDmPolicy,
-  createLegacyCompatChannelDmPolicy,
   createStandardChannelSetupStatus,
   mergeAllowFromEntries,
   noteChannelLookupFailure,
@@ -32,7 +32,6 @@ export {
   parseMentionOrPrefixedId,
   patchChannelConfigForAccount,
   promptResolvedAllowFrom,
-  promptLegacyChannelAllowFromForAccount,
   promptParsedAllowFromForAccount,
   resolveEntriesWithOptionalToken,
   resolveSetupAccountId,
@@ -41,9 +40,15 @@ export {
   splitSetupEntries,
 } from "../channels/plugins/setup-wizard-helpers.js";
 
+export {
+  createLegacyCompatChannelDmPolicy,
+  promptLegacyChannelAllowFromForAccount,
+} from "../channels/plugins/setup-wizard-legacy-compat.js";
+
 export { createAllowlistSetupWizardProxy } from "../channels/plugins/setup-wizard-proxy.js";
 export {
   createCliPathTextInput,
   createDelegatedTextInputShouldPrompt,
 } from "../channels/plugins/setup-wizard-binary.js";
 export { createDelegatedSetupWizardProxy } from "../channels/plugins/setup-wizard-proxy.js";
+export { baseUrlTextInput, defineTokenCredential } from "./setup-credential.js";

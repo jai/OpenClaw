@@ -1,253 +1,75 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { describe, it, expect } from "vitest";
+import { it, expect } from "vitest";
 import { sanitizeToolCallInputs } from "./session-transcript-repair.js";
-import { castAgentMessage, castAgentMessages } from "./test-helpers/agent-message-fixtures.js";
+import { castAgentMessages } from "./test-helpers/agent-message-fixtures.js";
 
-function mkSessionsSpawnToolCall(content: string): AgentMessage {
-  return castAgentMessage({
+const thinking = {
+  type: "thinking",
+  thinking: "Replay completed work.",
+  thinkingSignature: "signed-fixture",
+};
+const attachments = [{ name: "payload.txt", content: "TRANSCRIPT_ATTACHMENT_CONTENT" }];
+const spawn = (id: string, input: object) => ({
+  type: "toolUse",
+  id,
+  name: "sessions_spawn",
+  input,
+});
+const toolResult = (toolCallId: string, toolName = "sessions_spawn") => ({
+  role: "toolResult",
+  toolCallId,
+  toolName,
+  content: [{ type: "text", text: "Completed" }],
+  timestamp: 0,
+});
+const sanitize = (
+  input: ReturnType<typeof castAgentMessages>,
+  allowedToolNames = ["sessions_spawn"],
+) => sanitizeToolCallInputs(input, { allowedToolNames, allowProviderOwnedThinkingReplay: true });
+
+it("scans 1000 signed tool calls once for attachment presence", () => {
+  let attachmentReads = 0;
+  const calls = Array.from({ length: 1000 }, (_, index) => {
+    const value = index === 999 ? attachments : [];
+    return spawn(`call_${index}`, {
+      task: `Recorded task ${index}`,
+      get attachments() {
+        attachmentReads += 1;
+        return value;
+      },
+    });
+  });
+  const content = [thinking, ...calls];
+  const assistant = { role: "assistant", content, timestamp: 0 };
+  const input = castAgentMessages([
+    assistant,
+    ...calls.map(({ id, name }) => toolResult(id, name)),
+  ]);
+  const before = JSON.stringify(input);
+  attachmentReads = 0;
+  const out = sanitize(input);
+  expect(attachmentReads).toBe(1000);
+  expect(out).toBe(input);
+  expect(out).toStrictEqual(JSON.parse(before));
+  expect(out[0]).toBe(assistant);
+  expect(assistant.content).toBe(content);
+  expect(assistant.content[0]).toBe(thinking);
+  expect(JSON.stringify(input)).toBe(before);
+});
+
+it("drops the whole signed attachment turn when the read sibling has no result", () => {
+  const assistant = {
     role: "assistant",
     content: [
-      {
-        type: "toolCall",
-        id: "call_1",
-        name: "sessions_spawn",
-        arguments: {
-          task: "do thing",
-          attachments: [
-            {
-              name: "README.md",
-              encoding: "utf8",
-              content,
-            },
-          ],
-        },
-      },
+      thinking,
+      spawn("call_spawn", { task: "Inspect attachment", attachments }),
+      { type: "toolCall", id: "call_read", name: "read", arguments: { path: "README.md" } },
     ],
-    timestamp: 0,
-  });
-}
-
-describe("sanitizeToolCallInputs redacts sessions_spawn attachments", () => {
-  it("replaces attachments[].content with __OPENCLAW_REDACTED__", () => {
-    const secret = "SUPER_SECRET_SHOULD_NOT_PERSIST"; // pragma: allowlist secret
-    const input = [mkSessionsSpawnToolCall(secret)];
-    const out = sanitizeToolCallInputs(input);
-    expect(out).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "toolCall",
-            id: "call_1",
-            name: "sessions_spawn",
-            arguments: {
-              task: "do thing",
-              attachments: [
-                {
-                  name: "README.md",
-                  encoding: "utf8",
-                  content: "__OPENCLAW_REDACTED__",
-                },
-              ],
-            },
-          },
-        ],
-        timestamp: 0,
-      },
-    ]);
-    expect(JSON.stringify(out)).not.toContain(secret);
-  });
-
-  it("redacts attachments content from tool input payloads too", () => {
-    const secret = "INPUT_SECRET_SHOULD_NOT_PERSIST"; // pragma: allowlist secret
-    const input = castAgentMessages([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "toolUse",
-            id: "call_2",
-            name: "sessions_spawn",
-            input: {
-              task: "do thing",
-              attachments: [{ name: "x.txt", content: secret }],
-            },
-          },
-        ],
-      },
-    ]);
-
-    const out = sanitizeToolCallInputs(input);
-    expect(out).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "toolUse",
-            id: "call_2",
-            name: "sessions_spawn",
-            input: {
-              task: "do thing",
-              attachments: [
-                {
-                  name: "x.txt",
-                  content: "__OPENCLAW_REDACTED__",
-                },
-              ],
-            },
-          },
-        ],
-      },
-    ]);
-    expect(JSON.stringify(out)).not.toContain(secret);
-  });
-
-  it("replaces non-content attachment payload fields with a minimal redacted stub", () => {
-    const secret = "NESTED_ATTACHMENT_SECRET"; // pragma: allowlist secret
-    const input = castAgentMessages([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "toolUse",
-            id: "call_3",
-            name: "sessions_spawn",
-            input: {
-              task: "do thing",
-              attachments: [
-                {
-                  name: "payload.json",
-                  mimeType: "application/json",
-                  encoding: "utf8",
-                  data: secret,
-                  nested: { secret },
-                },
-              ],
-            },
-          },
-        ],
-      },
-    ]);
-
-    const out = sanitizeToolCallInputs(input);
-    const msg = out[0] as { content?: unknown[] };
-    const tool = (msg.content?.[0] ?? null) as {
-      input?: { attachments?: unknown[] };
-      arguments?: { attachments?: unknown[] };
-    } | null;
-    const attachment = (tool?.input?.attachments?.[0] ??
-      tool?.arguments?.attachments?.[0] ??
-      null) as Record<string, unknown> | null;
-    expect(attachment).toEqual({
-      name: "payload.json",
-      mimeType: "application/json",
-      encoding: "utf8",
-      content: "__OPENCLAW_REDACTED__",
-    });
-    expect(JSON.stringify(out)).not.toContain(secret);
-  });
-
-  it("redacts ACP-only routing fields from arguments and input payloads", () => {
-    const argumentResumeSessionId = "ACP_ARGUMENT_SESSION_ID_SHOULD_NOT_PERSIST"; // pragma: allowlist secret
-    const inputResumeSessionId = "ACP_INPUT_SESSION_ID_SHOULD_NOT_PERSIST"; // pragma: allowlist secret
-    const input = castAgentMessages([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "toolCall",
-            id: "call_4",
-            name: "sessions_spawn",
-            arguments: {
-              task: "do thing",
-              resumeSessionId: argumentResumeSessionId,
-              streamTo: "parent",
-            },
-          },
-          {
-            type: "toolUse",
-            id: "call_5",
-            name: "sessions_spawn",
-            input: {
-              task: "do other thing",
-              resumeSessionId: inputResumeSessionId,
-              streamTo: "parent",
-            },
-          },
-        ],
-      },
-    ]);
-
-    const out = sanitizeToolCallInputs(input);
-    expect(out).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "toolCall",
-            id: "call_4",
-            name: "sessions_spawn",
-            arguments: {
-              task: "do thing",
-              resumeSessionId: "__OPENCLAW_REDACTED__",
-              streamTo: "__OPENCLAW_REDACTED__",
-            },
-          },
-          {
-            type: "toolUse",
-            id: "call_5",
-            name: "sessions_spawn",
-            input: {
-              task: "do other thing",
-              resumeSessionId: "__OPENCLAW_REDACTED__",
-              streamTo: "__OPENCLAW_REDACTED__",
-            },
-          },
-        ],
-      },
-    ]);
-    expect(JSON.stringify(out)).not.toContain(argumentResumeSessionId);
-    expect(JSON.stringify(out)).not.toContain(inputResumeSessionId);
-  });
-
-  it("redacts ACP-only routing fields with non-string payloads", () => {
-    const nestedResumeSessionId = "ACP_NESTED_SESSION_ID_SHOULD_NOT_PERSIST"; // pragma: allowlist secret
-    const input = castAgentMessages([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "toolUse",
-            id: "call_6",
-            name: "sessions_spawn",
-            input: {
-              task: "do nested thing",
-              resumeSessionId: { value: nestedResumeSessionId },
-              streamTo: ["parent"],
-            },
-          },
-        ],
-      },
-    ]);
-
-    const out = sanitizeToolCallInputs(input);
-    expect(out).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "toolUse",
-            id: "call_6",
-            name: "sessions_spawn",
-            input: {
-              task: "do nested thing",
-              resumeSessionId: "__OPENCLAW_REDACTED__",
-              streamTo: "__OPENCLAW_REDACTED__",
-            },
-          },
-        ],
-      },
-    ]);
-    expect(JSON.stringify(out)).not.toContain(nestedResumeSessionId);
-  });
+  };
+  const result = toolResult("call_spawn");
+  const input = castAgentMessages([assistant, result]);
+  const before = JSON.stringify(input);
+  const out = sanitize(input, ["sessions_spawn", "read"]);
+  expect(out).toStrictEqual([result]);
+  expect(out[0]).toBe(result);
+  expect(JSON.stringify(input)).toBe(before);
 });

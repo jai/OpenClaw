@@ -1,20 +1,41 @@
-import { stat } from "node:fs/promises";
-import { join } from "node:path";
+import type { OpenKeyedStoreOptions } from "openclaw/plugin-sdk/plugin-state-runtime";
+// Zalo tests cover outbound media plugin behavior.
+import {
+  createPluginStateKeyedStoreForTests,
+  resetPluginStateStoreForTests,
+} from "openclaw/plugin-sdk/plugin-state-test-runtime";
+import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
+import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-const loadOutboundMediaFromUrlMock = vi.fn();
+const loadWebMediaMock = vi.hoisted(() => vi.fn());
 
-vi.mock("openclaw/plugin-sdk/outbound-media", () => ({
-  loadOutboundMediaFromUrl: (...args: unknown[]) => loadOutboundMediaFromUrlMock(...args),
-}));
+vi.mock("openclaw/plugin-sdk/web-media", () => {
+  return {
+    loadWebMedia: (...args: unknown[]) => loadWebMediaMock(...args),
+  };
+});
 
 import {
-  clearHostedZaloMediaForTest,
   prepareHostedZaloMediaUrl,
   resolveHostedZaloMediaRoutePrefix,
   tryHandleHostedZaloMediaRequest,
 } from "./outbound-media.js";
+import { setZaloRuntime } from "./runtime.js";
+
+const testStateDirs = useAutoCleanupTempDirTracker((cleanup) => {
+  afterAll(async () => {
+    await closeOpenClawStateDatabaseAsync();
+    resetPluginStateStoreForTests();
+    cleanup();
+  });
+});
+const testStateEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  OPENCLAW_STATE_DIR: testStateDirs.make("openclaw-zalo-media-", resolvePreferredOpenClawTmpDir()),
+};
 
 function createMockResponse() {
   const headers = new Map<string, string>();
@@ -30,76 +51,46 @@ function createMockResponse() {
   };
 }
 
+function installZaloRuntimeForTest(env = testStateEnv): void {
+  setZaloRuntime({
+    state: {
+      openKeyedStore: <T>(options: OpenKeyedStoreOptions) =>
+        createPluginStateKeyedStoreForTests<T>("zalo", { ...options, env }),
+    },
+  } as unknown as PluginRuntime);
+}
+
+function prepareMedia(overrides: Partial<Parameters<typeof prepareHostedZaloMediaUrl>[0]> = {}) {
+  return prepareHostedZaloMediaUrl({
+    mediaUrl: "https://example.com/photo.png",
+    webhookUrl: "https://gateway.example.com/zalo-webhook",
+    maxBytes: 1024,
+    ...overrides,
+  });
+}
+
 describe("zalo outbound hosted media", () => {
-  beforeEach(() => {
-    clearHostedZaloMediaForTest();
-    loadOutboundMediaFromUrlMock.mockReset();
-    loadOutboundMediaFromUrlMock.mockResolvedValue({
+  beforeEach(async () => {
+    installZaloRuntimeForTest();
+    loadWebMediaMock.mockReset();
+    loadWebMediaMock.mockResolvedValue({
       buffer: Buffer.from("image-bytes"),
+      kind: "image",
       contentType: "image/png",
       fileName: "photo.png",
     });
   });
 
-  it("loads outbound media under OpenClaw control and returns a hosted URL", async () => {
-    const hostedUrl = await prepareHostedZaloMediaUrl({
-      mediaUrl: "https://example.com/photo.png",
-      webhookUrl: "https://gateway.example.com/zalo-webhook",
-      maxBytes: 1024,
-    });
-
-    expect(loadOutboundMediaFromUrlMock).toHaveBeenCalledWith("https://example.com/photo.png", {
-      maxBytes: 1024,
-    });
+  it("passes proxy-aware fetch options into hosted media downloads", async () => {
+    const hostedUrl = await prepareMedia({ proxyUrl: "http://proxy.example:8080" });
     expect(hostedUrl).toMatch(
       /^https:\/\/gateway\.example\.com\/zalo-webhook\/media\/[a-f0-9]+\?token=[a-f0-9]+$/,
     );
-  });
 
-  it("passes proxy-aware fetch options into hosted media downloads", async () => {
-    await prepareHostedZaloMediaUrl({
-      mediaUrl: "https://example.com/photo.png",
-      webhookUrl: "https://gateway.example.com/zalo-webhook",
-      maxBytes: 1024,
-      proxyUrl: "http://proxy.example:8080",
-    });
-
-    expect(loadOutboundMediaFromUrlMock).toHaveBeenCalledWith("https://example.com/photo.png", {
-      maxBytes: 1024,
-      proxyUrl: "http://proxy.example:8080",
-    });
-  });
-
-  it("creates hosted media storage with private filesystem permissions", async () => {
-    const hostedUrl = await prepareHostedZaloMediaUrl({
-      mediaUrl: "https://example.com/photo.png",
-      webhookUrl: "https://gateway.example.com/zalo-webhook",
-      maxBytes: 1024,
-    });
-
-    if (process.platform === "win32") {
-      expect(hostedUrl).toContain("/zalo-webhook/media/");
-      return;
-    }
-
-    const { pathname } = new URL(hostedUrl);
-    const id = pathname.split("/").pop();
-    if (!id) {
-      throw new Error("expected hosted Zalo media id");
-    }
-    expect(id).toHaveLength(24);
-    expect(/^[0-9a-f]+$/.test(id)).toBe(true);
-
-    const storageDir = join(resolvePreferredOpenClawTmpDir(), "openclaw-zalo-outbound-media");
-    const [dirStats, metadataStats, bufferStats] = await Promise.all([
-      stat(storageDir),
-      stat(join(storageDir, `${id}.json`)),
-      stat(join(storageDir, `${id}.bin`)),
-    ]);
-
-    expect(dirStats.mode & 0o777).toBe(0o700);
-    expect(metadataStats.mode & 0o777).toBe(0o600);
-    expect(bufferStats.mode & 0o777).toBe(0o600);
+    expect(loadWebMediaMock).toHaveBeenCalledWith(
+      "https://example.com/photo.png",
+      expect.objectContaining({ maxBytes: 1024, proxyUrl: "http://proxy.example:8080" }),
+    );
   });
 
   it("preserves the root webhook path when deriving the hosted media route", () => {
@@ -110,47 +101,92 @@ describe("zalo outbound hosted media", () => {
     ).toBe("/media");
   });
 
-  it("serves hosted media once when the route token matches", async () => {
-    const hostedUrl = await prepareHostedZaloMediaUrl({
-      mediaUrl: "https://example.com/photo.png",
-      webhookUrl: "https://gateway.example.com/zalo-webhook",
-      maxBytes: 1024,
-    });
+  it("serves HEAD metadata without consuming the hosted media", async () => {
+    const hostedUrl = await prepareMedia();
     const { pathname, search } = new URL(hostedUrl);
-    const response = createMockResponse();
+    const headResponse = createMockResponse();
 
-    const handled = await tryHandleHostedZaloMediaRequest(
+    const handledHead = await tryHandleHostedZaloMediaRequest(
+      {
+        method: "HEAD",
+        url: `${pathname}${search}`,
+      } as never,
+      headResponse.res as never,
+    );
+
+    expect(handledHead).toBe(true);
+    expect(headResponse.res.statusCode).toBe(200);
+    expect(headResponse.headers.get("Content-Length")).toBe(
+      String(Buffer.byteLength("image-bytes")),
+    );
+    expect(headResponse.res.end).toHaveBeenCalledWith(undefined);
+
+    const getResponse = createMockResponse();
+    await tryHandleHostedZaloMediaRequest(
       {
         method: "GET",
         url: `${pathname}${search}`,
       } as never,
-      response.res as never,
+      getResponse.res as never,
     );
+    expect(getResponse.res.statusCode).toBe(200);
+    expect(getResponse.headers.get("Content-Type")).toBe("image/png");
+    expect(getResponse.headers.get("Cache-Control")).toBe("no-store");
+    expect(getResponse.res.end).toHaveBeenCalledWith(Buffer.from("image-bytes"));
 
-    expect(handled).toBe(true);
-    expect(response.res.statusCode).toBe(200);
-    expect(response.headers.get("Content-Type")).toBe("image/png");
-    expect(response.res.end).toHaveBeenCalledWith(Buffer.from("image-bytes"));
-
-    const secondResponse = createMockResponse();
-    const handledAgain = await tryHandleHostedZaloMediaRequest(
-      {
-        method: "GET",
-        url: `${pathname}${search}`,
-      } as never,
-      secondResponse.res as never,
+    const consumedResponse = createMockResponse();
+    await tryHandleHostedZaloMediaRequest(
+      { method: "GET", url: `${pathname}${search}` } as never,
+      consumedResponse.res as never,
     );
+    expect(consumedResponse.res.statusCode).toBe(404);
+  });
 
-    expect(handledAgain).toBe(true);
-    expect(secondResponse.res.statusCode).toBe(404);
+  it("uses the current runtime's state after runtime replacement", async () => {
+    const hostedUrl = new URL(await prepareMedia());
+    const replacementStateDir = testStateDirs.make(
+      "openclaw-zalo-media-replacement-",
+      resolvePreferredOpenClawTmpDir(),
+    );
+    try {
+      installZaloRuntimeForTest({ ...testStateEnv, OPENCLAW_STATE_DIR: replacementStateDir });
+      const response = createMockResponse();
+      await tryHandleHostedZaloMediaRequest(
+        { method: "HEAD", url: `${hostedUrl.pathname}${hostedUrl.search}` } as never,
+        response.res as never,
+      );
+      expect(response.res.statusCode).toBe(404);
+      expect(response.res.end).toHaveBeenCalledWith("Not Found");
+
+      installZaloRuntimeForTest();
+      const original = createMockResponse();
+      await tryHandleHostedZaloMediaRequest(
+        { method: "GET", url: `${hostedUrl.pathname}${hostedUrl.search}` } as never,
+        original.res as never,
+      );
+      expect(original.res.statusCode).toBe(200);
+      expect(original.res.end).toHaveBeenCalledWith(Buffer.from("image-bytes"));
+    } finally {
+      installZaloRuntimeForTest();
+    }
+  });
+
+  it("rejects hosted media preparation when the expiry would exceed a valid Date", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(8_640_000_000_000_000));
+    try {
+      await expect(prepareMedia()).rejects.toThrow(/expiry/);
+
+      expect(loadWebMediaMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects hosted media requests with the wrong token", async () => {
-    const hostedUrl = await prepareHostedZaloMediaUrl({
-      mediaUrl: "https://example.com/photo.png",
+    const hostedUrl = await prepareMedia({
       webhookUrl: "https://gateway.example.com/custom/zalo",
       webhookPath: "/custom/zalo-hook",
-      maxBytes: 1024,
     });
     const pathname = new URL(hostedUrl).pathname;
     const response = createMockResponse();

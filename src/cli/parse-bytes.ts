@@ -1,11 +1,4 @@
-import {
-  normalizeLowercaseStringOrEmpty,
-  normalizeOptionalString,
-} from "../shared/string-coerce.js";
-
-type BytesParseOptions = {
-  defaultUnit?: "b" | "kb" | "mb" | "gb" | "tb";
-};
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 
 const UNIT_MULTIPLIERS: Record<string, number> = {
   b: 1,
@@ -27,8 +20,8 @@ function invalidByteSize(raw: string, reason?: string): Error {
   return new Error(`${prefix} Use values like 512kb, 10mb, 1gb, or 500.`);
 }
 
-export function parseByteSize(raw: string, opts?: BytesParseOptions): number {
-  const trimmed = normalizeLowercaseStringOrEmpty(normalizeOptionalString(raw) ?? "");
+export function parseByteSize(raw: string): number {
+  const trimmed = normalizeLowercaseStringOrEmpty(raw);
   if (!trimmed) {
     throw invalidByteSize(raw, "empty");
   }
@@ -39,18 +32,19 @@ export function parseByteSize(raw: string, opts?: BytesParseOptions): number {
   }
 
   const value = Number(m[1]);
-  if (!Number.isFinite(value) || value < 0) {
+  if (!Number.isFinite(value)) {
     throw invalidByteSize(raw);
   }
 
-  const unit = normalizeLowercaseStringOrEmpty(m[2] ?? opts?.defaultUnit ?? "b");
+  const unit = normalizeLowercaseStringOrEmpty(m[2] ?? "b");
   const multiplier = UNIT_MULTIPLIERS[unit];
   if (!multiplier) {
     throw invalidByteSize(raw, `unknown unit "${unit}"`);
   }
 
   const bytes = Math.round(value * multiplier);
-  if (!Number.isFinite(bytes)) {
+  // Validate the rounded byte count; fractional inputs may safely round back into range.
+  if (!Number.isSafeInteger(bytes)) {
     throw invalidByteSize(raw);
   }
   return bytes;

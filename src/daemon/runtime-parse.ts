@@ -1,4 +1,4 @@
-import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 
 export function parseKeyValueOutput(output: string, separator: string): Record<string, string> {
   const entries: Record<string, string> = {};
@@ -12,9 +12,6 @@ export function parseKeyValueOutput(output: string, separator: string): Record<s
       continue;
     }
     const key = normalizeLowercaseStringOrEmpty(line.slice(0, idx));
-    if (!key) {
-      continue;
-    }
     const value = line.slice(idx + separator.length).trim();
     entries[key] = value;
   }

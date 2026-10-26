@@ -1,5 +1,8 @@
 import type { ClickClackTarget } from "./types.js";
 
+/**
+ * Parses `channel:name`, `thread:msg_id`, `dm:usr_id`, or a bare channel name.
+ */
 export function parseClickClackTarget(raw: string): ClickClackTarget {
   const value = raw.trim();
   if (!value) {
@@ -24,12 +27,4 @@ export function parseClickClackTarget(raw: string): ClickClackTarget {
 
 export function buildClickClackTarget(target: ClickClackTarget): string {
   return `${target.kind}:${target.id}`;
-}
-
-export function normalizeClickClackTarget(raw: string): string {
-  return buildClickClackTarget(parseClickClackTarget(raw));
-}
-
-export function looksLikeClickClackTarget(raw: string): boolean {
-  return /^(channel|thread|dm):/i.test(raw.trim()) || raw.trim().length > 0;
 }

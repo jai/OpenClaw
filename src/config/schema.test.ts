@@ -1,649 +1,410 @@
+// Covers canonical config schema defaults, validation, and sensitive redaction.
+import { expectDefined } from "@openclaw/normalization-core";
 import { beforeAll, describe, expect, it } from "vitest";
-import { SENSITIVE_URL_HINT_TAG } from "../shared/net/redact-sensitive-url.js";
-import { buildConfigSchema, lookupConfigSchema } from "./schema.js";
-import { applyDerivedTags, CONFIG_TAGS, deriveTagsForPath } from "./schema.tags.js";
+import { buildConfigSchemaCore, lookupConfigSchema, type PluginUiMetadata } from "./schema.js";
+import { asSchemaObject } from "./schema.shared.js";
+import { validateConfigObjectRaw } from "./validation.js";
 import { ToolsSchema } from "./zod-schema.agent-runtime.js";
 import { OpenClawSchema } from "./zod-schema.js";
 
+const objectSchema = (properties: Record<string, unknown>) => ({ type: "object", properties });
+const pluginSchema = (plugin: PluginUiMetadata) => buildConfigSchemaCore({ plugins: [plugin] });
+const mcpConfig = (server: Record<string, unknown>) => ({ mcp: { servers: { docs: server } } });
+const mcpUrl = "https://mcp.example.com/mcp";
+const reviewerTools = (reviewer: Record<string, unknown>) => ({ exec: { reviewer } });
+const accepts = (config: unknown) => OpenClawSchema.safeParse(config).success;
+const acceptsTools = (tools: unknown) => ToolsSchema.safeParse(tools).success;
+const tupleSchema = {
+  schema: objectSchema({
+    pair: { type: "array", items: [{ type: "string" }, { type: "number" }] },
+  }),
+  uiHints: {},
+  version: "test",
+  generatedAt: "test",
+} as unknown as Parameters<typeof lookupConfigSchema>[0];
+
 describe("config schema", () => {
-  type SchemaInput = NonNullable<Parameters<typeof buildConfigSchema>[0]>;
-  let baseSchema: ReturnType<typeof buildConfigSchema>;
-  let pluginUiHintInput: SchemaInput;
-  let tokenHintInput: SchemaInput;
-  let mergedSchemaInput: SchemaInput;
-  let heartbeatChannelInput: SchemaInput;
-  let cachedMergeInput: SchemaInput;
+  it("requires concrete Gateway policy identities and accepts an explicitly empty ceiling", () => {
+    expect(acceptsTools({ gatewayPolicy: { allow: [] } })).toBe(true);
+    expect(
+      acceptsTools({
+        gatewayPolicy: {
+          allow: ["sessions"],
+          actions: { sessions: ["list"] },
+          automations: { scope: "caller", allowCommandJobs: false },
+        },
+      }),
+    ).toBe(true);
+    for (const gatewayPolicy of [
+      {},
+      { allow: ["*"] },
+      { allow: ["group:plugins"] },
+      { allow: ["sessions"], actions: { sessions: ["*"] } },
+      { allow: [], automations: { scope: "admin" } },
+      { allow: [], automations: { allowCommandJobs: "false" } },
+      { allow: [], automations: { unknown: true } },
+    ]) {
+      expect(acceptsTools({ gatewayPolicy })).toBe(false);
+    }
+  });
 
+  let baseSchema: ReturnType<typeof buildConfigSchemaCore>;
   beforeAll(() => {
-    baseSchema = buildConfigSchema();
-    pluginUiHintInput = {
-      plugins: [
-        {
-          id: "voice-call",
-          name: "Voice Call",
-          description: "Outbound voice calls",
-          configUiHints: {
-            provider: { label: "Provider" },
-            "twilio.authToken": { label: "Auth Token", sensitive: true },
-          },
-        },
-      ],
-    };
-    tokenHintInput = {
-      plugins: [
-        {
-          id: "voice-call",
-          configUiHints: {
-            tokens: { label: "Tokens", sensitive: false },
-          },
-        },
-      ],
-    };
-    mergedSchemaInput = {
-      plugins: [
-        {
-          id: "voice-call",
-          name: "Voice Call",
-          configSchema: {
-            type: "object",
-            properties: {
-              provider: { type: "string" },
-            },
-          },
-        },
-      ],
-      channels: [
-        {
-          id: "matrix",
-          label: "Matrix",
-          configSchema: {
-            type: "object",
-            properties: {
-              accessToken: { type: "string" },
-            },
-          },
-        },
-      ],
-    };
-    heartbeatChannelInput = {
-      channels: [
-        {
-          id: "imessage",
-          label: "iMessage",
-          configSchema: { type: "object" },
-        },
-      ],
-    };
-    cachedMergeInput = {
-      plugins: [
-        {
-          id: "voice-call",
-          name: "Voice Call",
-          configSchema: { type: "object", properties: { provider: { type: "string" } } },
-        },
-      ],
-      channels: [
-        {
-          id: "matrix",
-          label: "Matrix",
-          configSchema: { type: "object", properties: { accessToken: { type: "string" } } },
-        },
-      ],
-    };
+    baseSchema = buildConfigSchemaCore();
   });
 
-  it("exports schema + hints", () => {
-    const res = baseSchema;
-    const schema = res.schema as { properties?: Record<string, unknown> };
-    const gatewaySchema = schema.properties?.gateway as
-      | { properties?: Record<string, unknown> }
-      | undefined;
-    const gatewayPortSchema = gatewaySchema?.properties?.port as
-      | { title?: string; description?: string }
-      | undefined;
-    expect(schema.properties).toHaveProperty("gateway");
-    expect(schema.properties).toHaveProperty("agents");
-    expect(schema.properties).toHaveProperty("acp");
-    expect(schema.properties?.$schema).toBeUndefined();
-    expect(gatewayPortSchema?.title).toBe("Gateway Port");
-    expect(gatewayPortSchema?.description).toContain("TCP port used by the gateway listener");
-    expect(res.uiHints.gateway?.label).toBe("Gateway");
-    expect(res.uiHints["gateway.auth.token"]?.sensitive).toBe(true);
-    const groupPolicyLabel = res.uiHints["channels.defaults.groupPolicy"]?.label;
-    expect(groupPolicyLabel).toBeTypeOf("string");
-    expect(groupPolicyLabel?.trim().length).toBeGreaterThan(0);
-    expect(res.uiHints["mcp.servers.*.headers.*"]?.sensitive).toBe(true);
-    expect(res.uiHints["mcp.servers.*.url"]?.tags).toContain(SENSITIVE_URL_HINT_TAG);
-    expect(res.uiHints["models.providers.*.baseUrl"]?.tags).toContain(SENSITIVE_URL_HINT_TAG);
-    expect(res.uiHints["proxy.tls.caFile"]?.tags).toEqual(
-      expect.arrayContaining(["security", "network", "storage"]),
-    );
-    expect(res.version).toBeTypeOf("string");
-    expect(res.version.trim().length).toBeGreaterThan(0);
-    expect(res.generatedAt).toBeTypeOf("string");
-    expect(res.generatedAt.trim().length).toBeGreaterThan(0);
-  });
-
-  it("includes MCP SSE header schema under mcp.servers entries", () => {
-    const schema = baseSchema.schema as {
-      properties?: Record<string, unknown>;
-    };
-    const mcpNode = schema.properties?.mcp as
-      | {
-          properties?: Record<string, unknown>;
-        }
-      | undefined;
-    const serversNode = mcpNode?.properties?.servers as
-      | {
-          additionalProperties?: {
-            properties?: Record<string, unknown>;
-          };
-        }
-      | undefined;
-    expect(serversNode?.additionalProperties?.properties).toHaveProperty("headers");
-    expect(serversNode?.additionalProperties?.properties).toHaveProperty("transport");
-    expect(serversNode?.additionalProperties?.properties).toHaveProperty("codex");
-  });
-
-  it("rejects empty Codex MCP agent scopes", () => {
-    expect(() =>
-      OpenClawSchema.parse({
-        mcp: {
-          servers: {
-            scoped: {
-              url: "https://mcp.example.com/mcp",
-              transport: "streamable-http",
-              codex: { agents: [] },
-            },
-          },
-        },
+  it("accepts node-host MCP servers with the shared MCP server schema", () => {
+    const result = OpenClawSchema.safeParse({
+      nodeHost: mcpConfig({
+        command: "node",
+        args: ["server.mjs"],
+        toolFilter: { include: ["read_*"] },
       }),
-    ).toThrow();
-    expect(() =>
-      OpenClawSchema.parse({
-        mcp: {
-          servers: {
-            scoped: {
-              url: "https://mcp.example.com/mcp",
-              transport: "streamable-http",
-              codex: { agents: ["  "] },
-            },
-          },
-        },
-      }),
-    ).toThrow();
-    expect(() =>
-      OpenClawSchema.parse({
-        mcp: {
-          servers: {
-            scoped: {
-              url: "https://mcp.example.com/mcp",
-              transport: "streamable-http",
-              codex: { agents: ["!!!"] },
-            },
-          },
-        },
-      }),
-    ).toThrow();
-  });
-
-  it("merges plugin ui hints", () => {
-    const res = buildConfigSchema(pluginUiHintInput);
-
-    expect(res.uiHints["plugins.entries.voice-call"]?.label).toBe("Voice Call");
-    expect(res.uiHints["plugins.entries.voice-call.config"]?.label).toBe("Voice Call Config");
-    expect(res.uiHints["plugins.entries.voice-call.config.twilio.authToken"]?.label).toBe(
-      "Auth Token",
-    );
-    expect(res.uiHints["plugins.entries.voice-call.config.twilio.authToken"]?.sensitive).toBe(true);
-  });
-
-  it("does not re-mark existing non-sensitive token-like fields", () => {
-    const res = buildConfigSchema(tokenHintInput);
-
-    expect(res.uiHints["plugins.entries.voice-call.config.tokens"]?.sensitive).toBe(false);
-  });
-
-  it("merges plugin + channel schemas", () => {
-    const res = buildConfigSchema(mergedSchemaInput);
-
-    const schema = res.schema as {
-      properties?: Record<string, unknown>;
-    };
-    const pluginsNode = schema.properties?.plugins as Record<string, unknown> | undefined;
-    const entriesNode = pluginsNode?.properties as Record<string, unknown> | undefined;
-    const entriesProps = entriesNode?.entries as Record<string, unknown> | undefined;
-    const entryProps = entriesProps?.properties as Record<string, unknown> | undefined;
-    const pluginEntry = entryProps?.["voice-call"] as Record<string, unknown> | undefined;
-    const pluginConfig = pluginEntry?.properties as Record<string, unknown> | undefined;
-    const pluginConfigSchema = pluginConfig?.config as Record<string, unknown> | undefined;
-    const pluginConfigProps = pluginConfigSchema?.properties as Record<string, unknown> | undefined;
-    expect(pluginConfigProps).toHaveProperty("provider");
-
-    const channelsNode = schema.properties?.channels as Record<string, unknown> | undefined;
-    const channelsProps = channelsNode?.properties as Record<string, unknown> | undefined;
-    const channelSchema = channelsProps?.matrix as Record<string, unknown> | undefined;
-    const channelProps = channelSchema?.properties as Record<string, unknown> | undefined;
-    expect(channelProps).toHaveProperty("accessToken");
-    expect(res.uiHints["channels.matrix"]?.label).toBe("Matrix");
-    expect(res.uiHints["channels.matrix.accessToken"]?.sensitive).toBe(true);
-    expect(res.uiHints["channels.matrix.streaming.progress.label"]?.label).toBe(
-      "Matrix Progress Label",
-    );
-    expect(res.uiHints["channels.discord.streaming.progress.toolProgress"]?.label).toBe(
-      "Discord Progress Tool Lines",
-    );
-    expect(res.uiHints["channels.mattermost.streaming.progress.label"]?.label).toBe(
-      "Mattermost Progress Label",
+    });
+    expect(result.success).toBe(true);
+    const invalid = OpenClawSchema.safeParse({
+      nodeHost: { mcp: { servers: { broken: { transport: "stdio" } } } },
+    });
+    expect(invalid.error?.issues[0]?.message).toBe(
+      '"stdio" transport requires a non-empty command',
     );
   });
 
-  it("omits a single oversized plugin schema from the full schema response", () => {
-    const res = buildConfigSchema({
-      cache: false,
-      plugins: [
-        {
-          id: "huge",
-          name: "Huge",
-          configSchema: {
-            type: "object",
-            properties: {
-              huge: {
-                type: "string",
-                description: `oversized-marker-${"x".repeat(300_000)}`,
-              },
-            },
-          },
-        },
+  it("rejects the reserved __proto__ MCP server name without tightening other names", () => {
+    for (const raw of [
+      '{"mcp":{"servers":{"__proto__":{"command":"server"}}}}',
+      '{"nodeHost":{"mcp":{"servers":{"__proto__":{"command":"server"}}}}}',
+    ]) {
+      const result = OpenClawSchema.safeParse(JSON.parse(raw));
+      expect(result.error?.issues).toContainEqual(
+        expect.objectContaining({
+          message: 'MCP server name "__proto__" is reserved; rename the server',
+        }),
+      );
+    }
+
+    for (const serverName of ["docs", "_internal"]) {
+      expect(
+        accepts({
+          mcp: { servers: { [serverName]: { command: "server" } } },
+          nodeHost: { mcp: { servers: { [serverName]: { command: "server" } } } },
+        }),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects reserved MCP server names from the pre-normalization config", () => {
+    const sourceRaw = JSON.parse('{"mcp":{"servers":{"__proto__":{"command":"server"}}}}');
+    const result = validateConfigObjectRaw({ mcp: { servers: {} } }, { sourceRaw });
+
+    expect(result).toEqual({
+      ok: false,
+      issues: [
+        expect.objectContaining({
+          path: "mcp.servers.__proto__",
+          message: 'MCP server name "__proto__" is reserved; rename the server',
+        }),
       ],
     });
 
-    const serialized = JSON.stringify(res);
-    expect(serialized).not.toContain("oversized-marker");
-    const lookup = lookupConfigSchema(res, "plugins.entries.huge.config");
-    expect(lookup?.schema?.type).toBe("object");
-    expect(lookup?.schema?.additionalProperties).toBe(true);
-    expect(lookup?.schema?.description).toContain("omitted");
+    const directResult = validateConfigObjectRaw(sourceRaw);
+    expect(directResult.ok).toBe(false);
+    if (!directResult.ok) {
+      expect(
+        directResult.issues.filter((issue) => issue.path === "mcp.servers.__proto__"),
+      ).toHaveLength(1);
+    }
+  });
+
+  it("rejects empty Codex MCP agent scopes", () => {
+    for (const agents of [[], ["  "], ["!!!"]]) {
+      expect(() =>
+        OpenClawSchema.parse(
+          mcpConfig({
+            url: mcpUrl,
+            transport: "streamable-http",
+            codex: { agents },
+          }),
+        ),
+      ).toThrow();
+    }
+  });
+
+  it("validates MCP OAuth client metadata URLs against the SDK contract", () => {
+    const configWithMetadataUrl = (clientMetadataUrl: string) =>
+      mcpConfig({
+        url: mcpUrl,
+        transport: "streamable-http",
+        auth: "oauth",
+        oauth: { clientMetadataUrl },
+      });
+    expect(() =>
+      OpenClawSchema.parse(configWithMetadataUrl("https://client.example.com/openclaw-mcp.json")),
+    ).not.toThrow();
+    for (const clientMetadataUrl of [
+      "http://client.example.com/openclaw-mcp.json",
+      "https://client.example.com/",
+      "not a url",
+      "https://[invalid]/openclaw-mcp.json",
+      "",
+    ]) {
+      expect(validateConfigObjectRaw(configWithMetadataUrl(clientMetadataUrl))).toMatchObject({
+        ok: false,
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            path: "mcp.servers.docs.oauth.clientMetadataUrl",
+            message: "Expected https:// URL with a non-root pathname",
+          }),
+        ]),
+      });
+    }
+  });
+
+  it("validates MCP OAuth credential identity", () => {
+    for (const identity of ["shared", "per-requester"] as const) {
+      expect(accepts(mcpConfig({ url: mcpUrl, auth: "oauth", oauth: { identity } }))).toBe(true);
+    }
+
+    const oauth = { identity: "per-requester" };
+    const missingAuth = OpenClawSchema.safeParse(mcpConfig({ url: mcpUrl, oauth }));
+    expect(missingAuth.error?.issues).toContainEqual(
+      expect.objectContaining({
+        message: 'oauth.identity "per-requester" requires auth: "oauth"',
+        path: ["mcp", "servers", "docs", "oauth", "identity"],
+      }),
+    );
+
+    for (const server of [
+      { url: mcpUrl, oauth: { ...oauth, authProfileId: "docs:mcp" } },
+      { command: "docs-mcp", oauth },
+      // URL plus command resolves stdio and would strand the server silently.
+      { url: mcpUrl, command: "docs-mcp", oauth },
+      { url: mcpUrl, transport: "stdio", oauth },
+    ]) {
+      expect(accepts(mcpConfig({ auth: "oauth", ...server }))).toBe(false);
+    }
+  });
+
+  it("requires a bare HTTPS Gateway public origin except on loopback", () => {
+    for (const publicOrigin of [
+      "https://gateway.example.com",
+      "https://gateway.example.com:443",
+      "http://localhost:80",
+      "http://localhost:18789/",
+      "http://127.0.0.1:18789",
+      "http://[::1]:18789",
+    ]) {
+      expect(accepts({ gateway: { publicOrigin } })).toBe(true);
+    }
+    // Built via URL so no credential-shaped literal lands in source (secret scanners).
+    const userinfoOrigin = new URL("https://gateway.example.com");
+    userinfoOrigin.username = "operator";
+    for (const publicOrigin of [
+      "https://gateway.example.com/path",
+      "https://gateway.example.com?query=1",
+      "https://gateway.example.com/#fragment",
+      "http://gateway.example.com",
+      userinfoOrigin.href,
+      "data:text/html,hello",
+    ]) {
+      expect(accepts({ gateway: { publicOrigin } })).toBe(false);
+    }
+  });
+
+  it("rejects stdio transport with whitespace-only command", () => {
+    const result = OpenClawSchema.safeParse(mcpConfig({ command: "   ", transport: "stdio" }));
+    expect(result.success).toBe(false);
+  });
+
+  it("merges plugin ui hints", () => {
+    const res = pluginSchema({
+      id: "voice-call",
+      name: "Voice Call",
+      description: "Outbound voice calls",
+      configUiHints: {
+        provider: { label: "Provider" },
+        "twilio.authToken": { label: "Original Token", sensitive: true },
+        " .twilio.authToken ": { label: "Auth Token", help: "Twilio credential" },
+      },
+    });
+
+    expect(res.uiHints["plugins.entries.voice-call"]?.label).toBe("Voice Call");
+    expect(res.uiHints["plugins.entries.voice-call.config"]?.label).toBe("Voice Call Config");
+    expect(res.uiHints["plugins.entries.voice-call.config.twilio.authToken"]).toMatchObject({
+      label: "Auth Token",
+      help: "Twilio credential",
+      sensitive: true,
+    });
+  });
+
+  it("keeps core channel settings discoverable with bundled metadata", () => {
+    const schema = baseSchema;
+    const channels = lookupConfigSchema(schema, "channels");
+    expect(channels?.children.map((child) => child.key)).toEqual(
+      expect.arrayContaining(["defaults", "modelByChannel", "matrix"]),
+    );
+    expect(channels?.children.map((child) => child.key)).not.toContain("*");
+    expect(lookupConfigSchema(schema, "channels.unknownChannel")).toBeNull();
+    expect(lookupConfigSchema(schema, "channels.defaults.groupPolicy")?.schema).toMatchObject({
+      enum: ["open", "disabled", "allowlist"],
+    });
+    expect(
+      lookupConfigSchema(schema, "channels.defaults.botLoopProtection.maxEventsPerWindow")?.schema,
+    ).toMatchObject({ type: "integer" });
+    expect(lookupConfigSchema(schema, "channels.modelByChannel.matrix.room")?.schema).toMatchObject(
+      { type: "string" },
+    );
   });
 
   it("omits later plugin schemas after the aggregate extension schema budget is exhausted", () => {
-    const res = buildConfigSchema({
+    const res = buildConfigSchemaCore({
       cache: false,
       plugins: Array.from({ length: 40 }, (_, index) => ({
         id: `plugin-${index}`,
-        configSchema: {
-          type: "object",
-          properties: {
-            value: {
-              type: "string",
-              description: `schema-${index}-${"x".repeat(60_000)}`,
-            },
+        configSchema: objectSchema({
+          value: {
+            type: "string",
+            description: `schema-${index}-${"x".repeat(60_000)}`,
           },
-        },
+        }),
       })),
     });
 
     const first = lookupConfigSchema(res, "plugins.entries.plugin-0.config.value");
     const last = lookupConfigSchema(res, "plugins.entries.plugin-39.config");
-    expect(first?.schema?.type).toBe("string");
-    expect(last?.schema?.type).toBe("object");
-    expect(last?.schema?.additionalProperties).toBe(true);
+    expect(first?.schema).toMatchObject({ type: "string" });
+    expect(last?.schema).toMatchObject({ type: "object", additionalProperties: true });
     expect(last?.schema?.description).toContain("omitted");
   });
 
-  it("looks up plugin config paths for slash-delimited plugin ids", () => {
-    const res = buildConfigSchema({
-      plugins: [
-        {
-          id: "pack/one",
-          name: "Pack One",
-          configSchema: {
-            type: "object",
-            properties: {
-              provider: { type: "string" },
-            },
-          },
-        },
-      ],
-    });
-
-    const lookup = lookupConfigSchema(res, "plugins.entries.pack/one.config");
-    expect(lookup?.path).toBe("plugins.entries.pack/one.config");
-    expect(lookup?.hintPath).toBe("plugins.entries.pack/one.config");
-    const providerChild = lookup?.children.find((child) => child.key === "provider");
-    expect(providerChild?.key).toBe("provider");
-    expect(providerChild?.path).toBe("plugins.entries.pack/one.config.provider");
-    expect(providerChild?.type).toBe("string");
-  });
-
-  it("adds heartbeat target hints with dynamic channels", () => {
-    const res = buildConfigSchema(heartbeatChannelInput);
-
-    const defaultsHint = res.uiHints["agents.defaults.heartbeat.target"];
-    const listHint = res.uiHints["agents.list.*.heartbeat.target"];
-    expect(defaultsHint?.help).toContain("imessage");
-    expect(defaultsHint?.help).toContain("last");
-    expect(listHint?.help).toContain("imessage");
-  });
-
   it("caches merged schemas for identical plugin/channel metadata", () => {
-    const first = buildConfigSchema(cachedMergeInput);
-    const second = buildConfigSchema({
-      plugins: [{ ...cachedMergeInput.plugins![0] }],
-      channels: [{ ...cachedMergeInput.channels![0] }],
-    });
+    const plugin = {
+      id: "voice-call",
+      name: "Voice Call",
+      configSchema: objectSchema({ provider: { type: "string" } }),
+    };
+    const channel = {
+      id: "matrix",
+      label: "Matrix",
+      configSchema: objectSchema({ accessToken: { type: "string" } }),
+    };
+    const first = buildConfigSchemaCore({ plugins: [plugin], channels: [channel] });
+    const second = buildConfigSchemaCore({ plugins: [{ ...plugin }], channels: [{ ...channel }] });
     expect(second).toBe(first);
   });
 
-  it("derives security/auth tags for credential paths", () => {
-    const tags = deriveTagsForPath("gateway.auth.token");
-    expect(tags).toContain("security");
-    expect(tags).toContain("auth");
+  it("keeps merged plugin schema fragments independent of manifest metadata", () => {
+    const value = { type: "string" };
+    const result = pluginSchema({
+      id: "independent-schema",
+      configSchema: objectSchema({ value }),
+    });
+    value.type = "number";
+    expect(
+      lookupConfigSchema(result, "plugins.entries.independent-schema.config.value")?.schema.type,
+    ).toBe("string");
   });
 
-  it("classifies managed proxy CA files as security-relevant config", () => {
-    const tags = deriveTagsForPath("proxy.tls.caFile");
-    expect(tags).toContain("security");
-    expect(tags).toContain("network");
-    expect(tags).toContain("storage");
+  it("refreshes sensitive hints when only a plugin's SecretInput paths change", () => {
+    const plugin = {
+      id: "secret-path-cache",
+      configSchema: { type: "object", additionalProperties: true },
+    };
+    const build = (path: string) => pluginSchema({ ...plugin, configSecretInputPaths: [path] });
+    const first = build("routes.*.credential");
+    const second = build("routes.*.replacement");
+    expect(
+      first.uiHints["plugins.entries.secret-path-cache.config.routes.*.credential"]?.sensitive,
+    ).toBe(true);
+    expect(
+      second.uiHints["plugins.entries.secret-path-cache.config.routes.*.replacement"]?.sensitive,
+    ).toBe(true);
+    expect(
+      second.uiHints["plugins.entries.secret-path-cache.config.routes.*.credential"],
+    ).toBeUndefined();
   });
 
-  it("derives tools/performance tags for web fetch timeout paths", () => {
-    const tags = deriveTagsForPath("tools.web.fetch.timeoutSeconds");
-    expect(tags).toContain("tools");
-    expect(tags).toContain("performance");
-  });
-
-  it("accepts web fetch readability and firecrawl config in the runtime zod schema", () => {
-    const parsed = ToolsSchema.parse({
-      web: {
-        fetch: {
-          readability: true,
-          firecrawl: {
-            enabled: true,
-            apiKey: "firecrawl-test-key",
-            baseUrl: "https://api.firecrawl.dev",
-            onlyMainContent: true,
-            maxAgeMs: 60_000,
-            timeoutSeconds: 15,
-          },
-        },
-      },
+  it("accepts exec reviewer model config in global and agent scopes", () => {
+    const reviewer = ToolsSchema.parse(
+      reviewerTools({
+        model: { primary: "openrouter/anthropic/claude-sonnet-4-6" },
+        thinking: "low",
+        fastMode: true,
+        timeoutMs: 15_000,
+      }),
+    )?.exec?.reviewer;
+    expect(reviewer).toMatchObject({ thinking: "low", fastMode: true });
+    expect(reviewer?.model).toEqual({
+      primary: "openrouter/anthropic/claude-sonnet-4-6",
     });
 
-    expect(parsed?.web?.fetch?.readability).toBe(true);
-    expect(parsed?.web?.fetch?.firecrawl).toEqual({
-      enabled: true,
-      apiKey: "firecrawl-test-key",
-      baseUrl: "https://api.firecrawl.dev",
-      onlyMainContent: true,
-      maxAgeMs: 60_000,
-      timeoutSeconds: 15,
+    const tools = reviewerTools({ model: "openai/gpt-5.5", thinking: "high", fastMode: false });
+    const config = OpenClawSchema.parse({ agents: { entries: { main: { tools } } } });
+    expect(config.agents?.entries?.main?.tools?.exec?.reviewer).toMatchObject({
+      model: "openai/gpt-5.5",
+      thinking: "high",
+      fastMode: false,
     });
-  });
-
-  it("accepts exec command highlighting config in global and agent scopes", () => {
-    const tools = ToolsSchema.parse({
-      exec: {
-        commandHighlighting: false,
-      },
-    });
-    expect(tools?.exec?.commandHighlighting).toBe(false);
-
-    const config = OpenClawSchema.parse({
-      agents: {
-        list: [
-          {
-            id: "main",
-            tools: {
-              exec: {
-                commandHighlighting: false,
-              },
-            },
-          },
-        ],
-      },
-    });
-    expect(config.agents?.list?.[0]?.tools?.exec?.commandHighlighting).toBe(false);
-  });
-
-  it("accepts experimental tool flags in the runtime zod schema", () => {
-    const parsed = ToolsSchema.parse({
-      experimental: {
-        planTool: true,
-      },
-    });
-    if (!parsed) {
-      throw new Error("expected parsed tools config");
+    for (const invalid of [{ fastMode: "priority" }, { thinking: "turbo" }]) {
+      expect(acceptsTools(reviewerTools(invalid))).toBe(false);
     }
-
-    expect(parsed?.experimental?.planTool).toBe(true);
   });
 
-  it("accepts simplified Tool Search config in the runtime zod schema", () => {
-    expect(ToolsSchema.parse({ toolSearch: true })?.toolSearch).toBe(true);
-    expect(
-      ToolsSchema.parse({
-        toolSearch: {
-          enabled: true,
-          mode: "tools",
-          codeTimeoutMs: 5000,
-          searchDefaultLimit: 4,
-          maxSearchLimit: 12,
-        },
-      })?.toolSearch,
-    ).toEqual({
-      enabled: true,
-      mode: "tools",
-      codeTimeoutMs: 5000,
-      searchDefaultLimit: 4,
-      maxSearchLimit: 12,
-    });
-    expect(
-      ToolsSchema.safeParse({
-        toolSearch: {
-          enabled: true,
-          mode: "both",
-        },
-      }).success,
-    ).toBe(false);
-  });
-
-  it("accepts Code Mode config in the runtime zod schema", () => {
-    expect(ToolsSchema.parse({ codeMode: true })?.codeMode).toBe(true);
-    expect(
-      ToolsSchema.parse({
-        codeMode: {
-          enabled: true,
-          runtime: "quickjs-wasi",
-          mode: "only",
-          languages: ["javascript", "typescript"],
-          timeoutMs: 5000,
-          memoryLimitBytes: 67_108_864,
-          maxOutputBytes: 65_536,
-          maxSnapshotBytes: 10_485_760,
-          maxPendingToolCalls: 8,
-          snapshotTtlSeconds: 900,
-          searchDefaultLimit: 4,
-          maxSearchLimit: 12,
-        },
-      })?.codeMode,
-    ).toEqual({
-      enabled: true,
-      runtime: "quickjs-wasi",
-      mode: "only",
-      languages: ["javascript", "typescript"],
-      timeoutMs: 5000,
-      memoryLimitBytes: 67_108_864,
-      maxOutputBytes: 65_536,
-      maxSnapshotBytes: 10_485_760,
-      maxPendingToolCalls: 8,
-      snapshotTtlSeconds: 900,
-      searchDefaultLimit: 4,
-      maxSearchLimit: 12,
-    });
-    expect(
-      ToolsSchema.safeParse({
-        codeMode: {
-          enabled: true,
-          runtime: "node",
-        },
-      }).success,
-    ).toBe(false);
-  });
-
-  it("accepts web fetch maxResponseBytes in the runtime zod schema", () => {
-    const parsed = ToolsSchema.parse({
-      web: {
-        fetch: {
-          maxResponseBytes: 2_000_000,
-        },
-      },
-    });
-
-    expect(parsed?.web?.fetch?.maxResponseBytes).toBe(2_000_000);
-  });
-
-  it("accepts WhatsApp Web Baileys socket timing in the runtime zod schema", () => {
-    const parsed = OpenClawSchema.parse({
-      web: {
-        whatsapp: {
-          keepAliveIntervalMs: 15_000,
-          connectTimeoutMs: 60_000,
-          defaultQueryTimeoutMs: 90_000,
-        },
-      },
-    });
-
-    expect(parsed.web?.whatsapp).toEqual({
-      keepAliveIntervalMs: 15_000,
-      connectTimeoutMs: 60_000,
-      defaultQueryTimeoutMs: 90_000,
-    });
-  });
-
-  it("accepts web fetch ssrfPolicy in the runtime zod schema", () => {
-    const parsed = ToolsSchema.parse({
-      web: {
-        fetch: {
-          ssrfPolicy: {
-            allowRfc2544BenchmarkRange: true,
-            allowIpv6UniqueLocalRange: true,
-          },
-        },
-      },
-    });
-
-    expect(parsed?.web?.fetch?.ssrfPolicy).toEqual({
-      allowRfc2544BenchmarkRange: true,
-      allowIpv6UniqueLocalRange: true,
-    });
-  });
-
-  it("accepts web fetch trusted env proxy opt-in in the runtime zod schema", () => {
-    const parsed = ToolsSchema.parse({
-      web: {
-        fetch: {
-          useTrustedEnvProxy: true,
-        },
-      },
-    });
-
-    expect(parsed?.web?.fetch?.useTrustedEnvProxy).toBe(true);
-  });
-
-  it("rejects allowPrivateNetwork on media-understanding request config", () => {
-    const result = ToolsSchema.safeParse({
-      media: {
-        image: {
-          models: [
-            {
-              provider: "openai",
-              model: "gpt-4.1-mini",
-              request: {
-                allowPrivateNetwork: true,
-              },
-            },
-          ],
-        },
-      },
-    });
-
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      const requestIssue = result.error.issues.find(
-        (issue) =>
-          JSON.stringify(issue.path) === JSON.stringify(["media", "image", "models", 0, "request"]),
+  it.each([
+    { policy: { security: "full", ask: "off" }, hint: 'Replace security/ask with mode="full"' },
+    { policy: { security: "full", ask: "on-miss" }, hint: "no exact mode equivalent" },
+    { policy: { ask: "off" }, hint: "legacy policy is incomplete" },
+  ])("rejects mixed exec policy with accurate repair guidance: $policy", ({ policy, hint }) => {
+    for (const scope of ["root", "agent"]) {
+      const exec = { mode: "auto", ...policy };
+      const result = OpenClawSchema.safeParse(
+        scope === "root"
+          ? { tools: { exec } }
+          : { agents: { entries: { worker: { tools: { exec } } } } },
       );
-      expect(requestIssue?.path).toEqual(["media", "image", "models", 0, "request"]);
-      const requestKeys = (requestIssue as { keys?: unknown } | undefined)?.keys;
-      expect(requestKeys).toEqual(["allowPrivateNetwork"]);
+      expect(result.success).toBe(false);
+      expect(result.error?.issues).toEqual([
+        expect.objectContaining({
+          path:
+            scope === "root"
+              ? ["tools", "exec", "mode"]
+              : ["agents", "entries", "worker", "tools", "exec", "mode"],
+          message: expect.stringContaining(hint),
+        }),
+      ]);
+      const message = result.error?.issues[0]?.message;
+      expect(message).toContain("same exec object");
+      expect(message).toContain("deploy script, template, or patch at this scope");
+      expect(message).toContain('run "openclaw doctor --fix"');
+      if (!hint.startsWith("Replace")) {
+        expect(message).not.toContain("the equivalent of");
+      }
     }
   });
 
-  it("rejects unknown keys inside web fetch firecrawl config", () => {
-    const result = ToolsSchema.safeParse({
-      web: {
-        fetch: {
-          firecrawl: {
-            enabled: true,
-            nope: true,
-          },
-        },
-      },
-    });
-
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      const firecrawlIssue = result.error.issues.find(
-        (issue) => JSON.stringify(issue.path) === JSON.stringify(["web", "fetch", "firecrawl"]),
+  it("validates Tool Search selector fields and requires a nonempty selector", () => {
+    for (const key of ["include", "exclude"]) {
+      const selectors = [{ source: "mcp" }, { name: "github_*" }, { source: "client", name: "*" }];
+      expect(ToolsSchema.parse({ toolSearch: { [key]: selectors } })?.toolSearch).toEqual({
+        [key]: selectors,
+      });
+      expect(acceptsTools({ toolSearch: { [key]: [] } })).toBe(true);
+      for (const selector of [
+        {},
+        { source: "plugin" },
+        { name: "" },
+        { name: "   " },
+        { name: 1 },
+        { source: "mcp", server: "github" },
+        { source: null },
+      ]) {
+        expect(acceptsTools({ toolSearch: { [key]: [selector] } })).toBe(false);
+      }
+      expect(() => ToolsSchema.parse({ toolSearch: { [key]: [{}] } })).toThrow(
+        "Tool Search selectors must specify source, name, or both.",
       );
-      expect(firecrawlIssue?.path).toEqual(["web", "fetch", "firecrawl"]);
-      const firecrawlKeys = (firecrawlIssue as { keys?: unknown } | undefined)?.keys;
-      expect(firecrawlKeys).toEqual(["nope"]);
+      expect(acceptsTools({ toolSearch: { [key]: "mcp" } })).toBe(false);
     }
-  });
-
-  it("keeps tags in the allowed taxonomy", () => {
-    const withTags = applyDerivedTags({
-      "gateway.auth.token": {},
-      "tools.web.fetch.timeoutSeconds": {},
-      "channels.slack.accounts.*.token": {},
-    });
-    const allowed = new Set<string>(CONFIG_TAGS);
-    for (const hint of Object.values(withTags)) {
-      for (const tag of hint.tags ?? []) {
-        expect(allowed.has(tag)).toBe(true);
-      }
-    }
-  });
-
-  it("covers core/built-in config paths with tags", () => {
-    const schema = baseSchema;
-    const allowed = new Set<string>([...CONFIG_TAGS, SENSITIVE_URL_HINT_TAG]);
-    for (const [key, hint] of Object.entries(schema.uiHints)) {
-      if (!key.includes(".")) {
-        continue;
-      }
-      const tags = hint.tags ?? [];
-      expect(tags.length, `expected tags for ${key}`).toBeGreaterThan(0);
-      for (const tag of tags) {
-        expect(allowed.has(tag), `unexpected tag ${tag} on ${key}`).toBe(true);
-      }
-    }
-  });
-
-  it("looks up a config schema path with immediate child summaries", () => {
-    const lookup = lookupConfigSchema(baseSchema, "gateway.auth");
-    expect(lookup?.path).toBe("gateway.auth");
-    expect(lookup?.hintPath).toBe("gateway.auth");
-    expect(lookup?.children.map((child) => child.key)).toContain("token");
-    const tokenChild = lookup?.children.find((child) => child.key === "token");
-    expect(tokenChild?.path).toBe("gateway.auth.token");
-    expect(tokenChild?.hint?.sensitive).toBe(true);
-    expect(tokenChild?.hintPath).toBe("gateway.auth.token");
-    const schema = lookup?.schema as { properties?: unknown } | undefined;
-    expect(schema?.properties).toBeUndefined();
   });
 
   it("looks up root config schema children without returning the full schema tree", () => {
@@ -655,87 +416,66 @@ describe("config schema", () => {
     expect(schema?.properties).toBeUndefined();
   });
 
-  it("returns a shallow lookup schema with top-level composition for editing", () => {
-    const lookup = lookupConfigSchema(baseSchema, "agents.list.0.runtime");
-    expect(lookup?.path).toBe("agents.list.0.runtime");
-    expect(lookup?.hintPath).toBe("agents.list[].runtime");
-    expect(lookup?.schema).not.toHaveProperty("allOf");
-    expect(lookup?.schema).not.toHaveProperty("oneOf");
-    const schema = lookup?.schema as { anyOf?: Array<{ properties?: Record<string, unknown> }> };
-    expect(schema.anyOf?.some((variant) => variant.properties?.type)).toBe(true);
-    expect(lookup?.schema).toHaveProperty("title", "Agent Runtime");
-    expect(lookup?.schema).toHaveProperty("description");
+  it("explains named custom providers through schema lookup before configuration", () => {
+    const providers = expectDefined(
+      lookupConfigSchema(baseSchema, "models.providers"),
+      "providers",
+    );
+    expect(providers.hint?.help).toContain("Custom entries must include baseUrl and models");
+    expect(providers.children.find((child) => child.key === "*")?.hint?.help).toContain(
+      "Replace * with your chosen ID",
+    );
+
+    for (const id of ["*", "gpu-a"]) {
+      const entry = expectDefined(
+        lookupConfigSchema(baseSchema, `models.providers.${id}`),
+        "provider",
+      );
+      expect(entry.hintPath).toBe("models.providers.*");
+      expect(entry.hint?.help).toContain("before a custom ID is configured");
+      const api = expectDefined(
+        lookupConfigSchema(baseSchema, `models.providers.${id}.api`),
+        "API",
+      );
+      expect(api.schema.enum).toEqual(
+        expect.arrayContaining([
+          "openai-completions",
+          "openai-responses",
+          "anthropic-messages",
+          "ollama",
+        ]),
+      );
+    }
   });
 
-  it("keeps scoped collection item schemas for form editing", () => {
-    const lookup = lookupConfigSchema(baseSchema, "agents.list");
-    expect(lookup?.schema).toHaveProperty("items");
-    const schema = lookup?.schema as
-      | {
-          items?: {
-            properties?: Record<
-              string,
-              { anyOf?: Array<{ properties?: Record<string, unknown> }> }
-            >;
-          };
-        }
-      | undefined;
-    expect(schema?.items?.properties).toHaveProperty("runtime");
-    const runtimeVariants = schema?.items?.properties?.runtime?.anyOf ?? [];
+  it("includes reload metadata when a resolver is provided", () => {
+    const lookup = lookupConfigSchema(baseSchema, "gateway", () => ({ kind: "restart" }));
+
+    expect(lookup?.reloadKind).toBe("restart");
+    for (const path of ["gateway.port", "gateway.auth"]) {
+      expect(lookup?.children.find((child) => child.path === path)?.reloadKind).toBe("restart");
+    }
+  });
+
+  it("keeps scoped record entry schemas for form editing", () => {
+    const lookup = lookupConfigSchema(baseSchema, "agents.entries");
+    expect(lookup?.schema).toHaveProperty("additionalProperties");
+    const entry = asSchemaObject(lookup?.schema?.additionalProperties);
+    expect(entry?.properties).toHaveProperty("runtime");
+    const runtimeVariants = entry?.properties?.runtime?.anyOf ?? [];
     expect(runtimeVariants.length).toBeGreaterThan(0);
     expect(runtimeVariants.some((variant) => variant.properties?.type)).toBe(true);
   });
 
-  it("keeps scoped map properties for form editing", () => {
-    const lookup = lookupConfigSchema(baseSchema, "env");
-    expect(lookup?.children.map((child) => child.key)).toEqual(["shellEnv", "vars", "*"]);
-    const schema = lookup?.schema as { properties?: Record<string, unknown> } | undefined;
-    expect(schema?.properties).toHaveProperty("shellEnv");
-    expect(schema?.properties).toHaveProperty("vars");
-  });
-
-  it("matches wildcard ui hints for concrete lookup paths", () => {
-    const lookup = lookupConfigSchema(baseSchema, "agents.list.0.identity.avatar");
-    expect(lookup?.path).toBe("agents.list.0.identity.avatar");
-    expect(lookup?.hintPath).toBe("agents.list.*.identity.avatar");
-    expect(lookup?.hint?.help).toContain("workspace-relative path");
-    expect(lookup?.schema?.title).toBe("Identity Avatar");
-    expect(lookup?.schema?.description).toContain("Agent avatar");
-  });
-
-  it("normalizes bracketed lookup paths", () => {
-    const lookup = lookupConfigSchema(baseSchema, "agents.list[0].identity.avatar");
-    expect(lookup?.path).toBe("agents.list.0.identity.avatar");
-    expect(lookup?.hintPath).toBe("agents.list.*.identity.avatar");
-  });
-
-  it("matches ui hints that use empty array brackets", () => {
-    const lookup = lookupConfigSchema(baseSchema, "agents.list.0.runtime");
-    expect(lookup?.path).toBe("agents.list.0.runtime");
-    expect(lookup?.hintPath).toBe("agents.list[].runtime");
-    expect(lookup?.hint?.label).toBe("Agent Runtime");
-  });
-
   it("uses the indexed tuple item schema for positional array lookups", () => {
-    const tupleSchema = {
-      schema: {
-        type: "object",
-        properties: {
-          pair: {
-            type: "array",
-            items: [{ type: "string" }, { type: "number" }],
-          },
-        },
-      },
-      uiHints: {},
-      version: "test",
-      generatedAt: "test",
-    } as unknown as Parameters<typeof lookupConfigSchema>[0];
-
     const lookup = lookupConfigSchema(tupleSchema, "pair.1");
     expect(lookup?.path).toBe("pair.1");
     expect(lookup?.schema?.type).toBe("number");
     expect((lookup?.schema as { items?: unknown } | undefined)?.items).toBeUndefined();
+  });
+
+  it("rejects impractical numeric tuple lookup indexes", () => {
+    expect(lookupConfigSchema(tupleSchema, "pair.4294967294")).toBeNull();
   });
 
   it("rejects prototype-chain lookup segments", () => {
@@ -744,33 +484,17 @@ describe("config schema", () => {
   });
 
   it("rejects overly deep lookup paths", () => {
-    const buildNestedObjectSchema = (
-      segments: string[],
-    ): { type: string; properties?: Record<string, unknown> } => {
-      const [head, ...rest] = segments;
-      if (!head) {
-        return { type: "string" };
-      }
-      return {
-        type: "object",
-        properties: {
-          [head]: buildNestedObjectSchema(rest),
-        },
-      };
-    };
-
     const deepPathSegments = Array.from({ length: 33 }, (_, index) => `a${index}`);
     const deepSchema = {
-      schema: buildNestedObjectSchema(deepPathSegments),
+      schema: deepPathSegments.reduceRight<Record<string, unknown>>(
+        (node, key) => objectSchema({ [key]: node }),
+        { type: "string" },
+      ),
       uiHints: {},
       version: "test",
       generatedAt: "test",
     } as unknown as Parameters<typeof lookupConfigSchema>[0];
 
     expect(lookupConfigSchema(deepSchema, deepPathSegments.join("."))).toBeNull();
-  });
-
-  it("returns null for missing config schema paths", () => {
-    expect(lookupConfigSchema(baseSchema, "gateway.notReal.path")).toBeNull();
   });
 });

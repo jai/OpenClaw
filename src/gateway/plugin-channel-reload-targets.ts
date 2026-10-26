@@ -1,31 +1,25 @@
+// Kept for v2026.9.1 Gateways that import this entry after an in-place update.
+// The current Gateway reload owner no longer calls it.
+// Maps channel/plugin ids and aliases to config path prefixes for hot reload.
+import { normalizeTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
 import type { ChannelId } from "../channels/plugins/index.js";
-import { normalizeOptionalString } from "../shared/string-coerce.js";
 
-export type ChannelPluginReloadTarget = {
+type ChannelPluginReloadTarget = {
   channelId: ChannelId;
   pluginId?: string | null;
   aliases?: readonly string[] | null;
 };
 
-function addNormalizedTarget(targets: Set<string>, value: string | null | undefined): void {
-  const normalized = normalizeOptionalString(value);
-  if (normalized) {
-    targets.add(normalized);
-  }
-}
-
+/** Lists all config ids that should trigger reload for a channel plugin target. */
 export function listChannelPluginConfigTargetIds(
   target: ChannelPluginReloadTarget,
 ): ReadonlySet<string> {
-  const targets = new Set<string>();
-  addNormalizedTarget(targets, target.channelId);
-  addNormalizedTarget(targets, target.pluginId);
-  for (const alias of target.aliases ?? []) {
-    addNormalizedTarget(targets, alias);
-  }
-  return targets;
+  return new Set(
+    normalizeTrimmedStringList([target.channelId, target.pluginId, ...(target.aliases ?? [])]),
+  );
 }
 
+/** Returns true when changed config paths affect any target plugin/channel id. */
 export function pluginConfigTargetsChanged(
   targetIds: Iterable<string>,
   changedPaths: readonly string[],

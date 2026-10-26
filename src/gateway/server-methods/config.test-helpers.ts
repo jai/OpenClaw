@@ -1,4 +1,8 @@
+/**
+ * Shared harness builders for gateway config method tests.
+ */
 import { vi, type Mock } from "vitest";
+import { createTestConfigSnapshot } from "../../commands/test-runtime-config-helpers.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { GatewayRequestHandlerOptions } from "./types.js";
 
@@ -25,27 +29,20 @@ function createGatewayLog(): GatewayLogMocks {
   };
 }
 
+/** Creates a complete config snapshot shape for tests that exercise config writes. */
 export function createConfigWriteSnapshot(config: OpenClawConfig) {
   return {
     snapshot: {
-      path: "/tmp/openclaw.json",
-      exists: true,
+      ...createTestConfigSnapshot(config),
       raw: JSON.stringify(config, null, 2),
       parsed: config,
-      sourceConfig: config,
-      resolved: config,
-      valid: true,
-      runtimeConfig: config,
-      config,
       hash: "base-hash",
-      issues: [],
-      warnings: [],
-      legacyIssues: [],
     },
     writeOptions: {} as Record<string, never>,
   };
 }
 
+/** Builds request-handler options with captured response and gateway log mocks. */
 export function createConfigHandlerHarness(args?: {
   method?: string;
   params?: unknown;
@@ -62,6 +59,11 @@ export function createConfigHandlerHarness(args?: {
     isWebchatConnect: () => false,
     respond,
     context: {
+      configRevisionProjector: {
+        projectRawHash: (hash: string) => hash,
+        projectResolvedHash: (hash: string) => hash,
+        hashResponseSessionBearer: () => "unused-test-scope",
+      },
       logGateway,
       disconnectClientsUsingSharedGatewayAuth,
       ...args?.contextOverrides,
@@ -76,6 +78,9 @@ export function createConfigHandlerHarness(args?: {
   };
 }
 
+/** Allows fire-and-forget config handler microtasks to settle before assertions. */
 export async function flushConfigHandlerMicrotasks() {
-  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  await new Promise<void>((resolve) => {
+    queueMicrotask(resolve);
+  });
 }

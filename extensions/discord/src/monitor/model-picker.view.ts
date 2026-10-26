@@ -1,102 +1,66 @@
-import type { APISelectMenuOption } from "discord-api-types/v10";
-import { ButtonStyle } from "discord-api-types/v10";
-import type {
-  ModelsProviderData,
-  ModelsRuntimeChoice,
+import {
+  ButtonStyle,
+  ComponentType,
+  type APISelectMenuOption,
+  type APIActionRowComponent,
+  type APIButtonComponent,
+  type APIStringSelectComponent,
+  type APIContainerComponent,
+} from "discord-api-types/v10";
+import {
+  getModelsRuntimeChoices,
+  type ModelsProviderData,
 } from "openclaw/plugin-sdk/models-provider-runtime";
 import { normalizeProviderId } from "openclaw/plugin-sdk/provider-model-shared";
-import {
-  Button,
-  Container,
-  Row,
-  Separator,
-  StringSelectMenu,
-  TextDisplay,
-  type MessagePayloadObject,
-  type TopLevelComponents,
-} from "../internal/discord.js";
+import { sliceUtf16Safe, truncateCodePoints } from "openclaw/plugin-sdk/text-utility-runtime";
+import { asSerializableComponent, type TopLevelComponents } from "../internal/payload.js";
+import { stripUndefinedFields } from "../internal/undefined-fields.js";
 import {
   buildDiscordModelPickerCustomId,
-  DISCORD_COMPONENT_MAX_BUTTONS_PER_ROW,
+  createDiscordModelPickerModelToken,
+  createDiscordModelPickerRuntimeToken,
   getDiscordModelPickerModelPage,
   getDiscordModelPickerProviderPage,
+  getDiscordModelPickerRecentModelRefs,
   normalizeModelPickerPage,
+  type DiscordModelPickerBucket,
   type DiscordModelPickerCommandContext,
-  type DiscordModelPickerLayout,
-  type DiscordModelPickerModelPage,
   type DiscordModelPickerPage,
   type DiscordModelPickerProviderItem,
 } from "./model-picker.state.js";
 
-const DISCORD_PROVIDER_BUTTON_LABEL_MAX_CHARS = 18;
+const DISCORD_MODEL_PICKER_PAGE_INDICATOR_CUSTOM_ID = "mdlpk:nav-indicator";
 
-type DiscordModelPickerButtonOptions = {
-  label: string;
-  customId: string;
-  style?: ButtonStyle;
-  disabled?: boolean;
-};
+type DiscordModelPickerCustomIdState = Parameters<typeof buildDiscordModelPickerCustomId>[0];
 
-type DiscordModelPickerCurrentModelRef = {
-  provider: string;
-  model: string;
-};
+type DiscordModelPickerRow = APIActionRowComponent<APIButtonComponent | APIStringSelectComponent>;
 
-type DiscordModelPickerRow = Row<Button> | Row<StringSelectMenu>;
-
-type DiscordModelPickerRenderShellParams = {
-  layout: DiscordModelPickerLayout;
-  title: string;
-  detailLines: string[];
-  rows: DiscordModelPickerRow[];
-  footer?: string;
-  /** Text shown after the divider but before the interactive rows. */
-  preRowText?: string;
-  /** Extra rows appended after the main rows, preceded by a divider. */
-  trailingRows?: DiscordModelPickerRow[];
-};
-
-export type DiscordModelPickerRenderedView = {
-  layout: DiscordModelPickerLayout;
-  content?: string;
+type DiscordModelPickerRenderedView = {
   components: TopLevelComponents[];
 };
 
-export type DiscordModelPickerProviderViewParams = {
+type DiscordModelPickerProviderViewParams = {
   command: DiscordModelPickerCommandContext;
   userId: string;
   data: ModelsProviderData;
   page?: number;
+  providerBucket?: string;
   currentModel?: string;
-  layout?: DiscordModelPickerLayout;
 };
 
-export type DiscordModelPickerModelViewParams = {
-  command: DiscordModelPickerCommandContext;
-  userId: string;
-  data: ModelsProviderData;
+function parseCurrentModelRef(raw?: string): {
   provider: string;
-  page?: number;
-  providerPage?: number;
-  currentModel?: string;
-  currentRuntime?: string;
-  pendingModel?: string;
-  pendingModelIndex?: number;
-  pendingRuntime?: string;
-  quickModels?: string[];
-  layout?: DiscordModelPickerLayout;
-};
-
-function parseCurrentModelRef(raw?: string): DiscordModelPickerCurrentModelRef | null {
-  const trimmed = raw?.trim();
-  const match = trimmed?.match(/^([^/]+)\/(.+)$/u);
+  model: string;
+} | null {
+  const match = raw?.trim().match(/^([^/]+)\/(.+)$/u);
   if (!match) {
     return null;
   }
-  const provider = normalizeProviderId(match[1]);
+  const providerText = match[1];
+  const model = match[2];
+  const provider = providerText ? normalizeProviderId(providerText) : "";
   // Preserve the model suffix exactly as entered after "/" so select defaults
   // continue to mirror the stored ref for Discord interactions.
-  const model = match[2];
   if (!provider || !model) {
     return null;
   }
@@ -111,449 +75,310 @@ function formatCurrentModelLine(currentModel?: string): string {
   return `Current model: ${parsed.provider}/${parsed.model}`;
 }
 
-function formatProviderButtonLabel(provider: string): string {
-  if (provider.length <= DISCORD_PROVIDER_BUTTON_LABEL_MAX_CHARS) {
-    return provider;
-  }
-  return `${provider.slice(0, DISCORD_PROVIDER_BUTTON_LABEL_MAX_CHARS - 1)}…`;
+function createModelPickerButton(
+  label: string,
+  state: DiscordModelPickerCustomIdState | string,
+  options: { style?: ButtonStyle.Primary | ButtonStyle.Secondary; disabled?: boolean } = {},
+): APIButtonComponent {
+  const customId = typeof state === "string" ? state : buildDiscordModelPickerCustomId(state);
+  return stripUndefinedFields({
+    type: ComponentType.Button,
+    label,
+    custom_id: customId,
+    style: options.style ?? ButtonStyle.Secondary,
+    disabled: options.disabled || undefined,
+  });
 }
 
-function chunkProvidersForRows(
-  items: DiscordModelPickerProviderItem[],
-): DiscordModelPickerProviderItem[][] {
-  if (items.length === 0) {
-    return [];
-  }
-
-  const rowCount = Math.max(1, Math.ceil(items.length / DISCORD_COMPONENT_MAX_BUTTONS_PER_ROW));
-  const minPerRow = Math.floor(items.length / rowCount);
-  const rowsWithExtraItem = items.length % rowCount;
-
-  const counts = Array.from({ length: rowCount }, (_, index) =>
-    index < rowCount - rowsWithExtraItem ? minPerRow : minPerRow + 1,
-  );
-
-  const rows: DiscordModelPickerProviderItem[][] = [];
-  let cursor = 0;
-  for (const count of counts) {
-    rows.push(items.slice(cursor, cursor + count));
-    cursor += count;
-  }
-  return rows;
-}
-
-function createModelPickerButton(params: DiscordModelPickerButtonOptions): Button {
-  class DiscordModelPickerButton extends Button {
-    label = params.label;
-    customId = params.customId;
-    override style = params.style ?? ButtonStyle.Secondary;
-    override disabled = params.disabled ?? false;
-  }
-  return new DiscordModelPickerButton();
-}
-
-function createModelSelect(params: {
-  customId: string;
-  options: APISelectMenuOption[];
-  placeholder?: string;
-  disabled?: boolean;
-}): StringSelectMenu {
-  class DiscordModelPickerSelect extends StringSelectMenu {
-    customId = params.customId;
-    override options = params.options;
-    override minValues = 1;
-    override maxValues = 1;
-    override placeholder = params.placeholder;
-    override disabled = params.disabled ?? false;
-  }
-  return new DiscordModelPickerSelect();
-}
-
-function getRuntimeChoices(params: {
-  data: ModelsProviderData;
-  provider: string;
-}): ModelsRuntimeChoice[] {
-  const choices = params.data.runtimeChoicesByProvider?.get(normalizeProviderId(params.provider));
-  if (choices?.length) {
-    return choices;
-  }
-  return [
-    {
-      id: "pi",
-      label: "OpenClaw Pi Default",
-      description: "Use the built-in OpenClaw Pi runtime.",
-    },
-  ];
-}
-
-function resolveSelectedRuntime(params: {
-  data: ModelsProviderData;
-  provider: string;
-  currentRuntime?: string;
-  pendingRuntime?: string;
-}): string {
-  const choices = getRuntimeChoices({ data: params.data, provider: params.provider });
-  const allowed = new Set(choices.map((choice) => choice.id));
-  const pending = params.pendingRuntime?.trim();
-  if (pending && allowed.has(pending)) {
-    return pending;
-  }
-  const current = params.currentRuntime?.trim();
-  if (current && allowed.has(current)) {
-    return current;
-  }
-  return choices[0]?.id ?? "pi";
-}
-
-function resolveExplicitRuntimeState(params: {
-  choices: ModelsRuntimeChoice[];
-  currentRuntime?: string;
-  pendingRuntime?: string;
-}): string | undefined {
-  const allowed = new Set(params.choices.map((choice) => choice.id));
-  const pending = params.pendingRuntime?.trim();
-  if (pending && allowed.has(pending)) {
-    return pending;
-  }
-  const current = params.currentRuntime?.trim();
-  if (current && current !== "auto" && current !== "default" && allowed.has(current)) {
-    return current;
-  }
-  return undefined;
-}
-
-function buildRenderedShell(
-  params: DiscordModelPickerRenderShellParams,
-): DiscordModelPickerRenderedView {
-  if (params.layout === "classic") {
-    const lines = [params.title, ...params.detailLines, "", params.footer].filter(Boolean);
-    return {
-      layout: "classic",
-      content: lines.join("\n"),
-      components: params.rows,
-    };
-  }
-
-  const containerComponents: Array<TextDisplay | Separator | DiscordModelPickerRow> = [
-    new TextDisplay(`## ${params.title}`),
-  ];
-  if (params.detailLines.length > 0) {
-    containerComponents.push(new TextDisplay(params.detailLines.join("\n")));
-  }
-  containerComponents.push(new Separator({ divider: true, spacing: "small" }));
-  if (params.preRowText) {
-    containerComponents.push(new TextDisplay(params.preRowText));
-  }
-  containerComponents.push(...params.rows);
-  if (params.trailingRows && params.trailingRows.length > 0) {
-    containerComponents.push(new Separator({ divider: true, spacing: "small" }));
-    containerComponents.push(...params.trailingRows);
-  }
-  if (params.footer) {
-    containerComponents.push(new Separator({ divider: false, spacing: "small" }));
-    containerComponents.push(new TextDisplay(`-# ${params.footer}`));
-  }
-
-  const container = new Container(containerComponents);
+function createModelSelectRow(
+  state: DiscordModelPickerCustomIdState,
+  options: APISelectMenuOption[],
+  placeholder: string,
+): DiscordModelPickerRow {
+  const customId = buildDiscordModelPickerCustomId(state);
   return {
-    layout: "v2",
-    components: [container],
+    type: ComponentType.ActionRow,
+    components: [
+      {
+        type: ComponentType.StringSelect,
+        custom_id: customId,
+        options,
+        min_values: 1,
+        max_values: 1,
+        placeholder,
+      },
+    ],
   };
 }
 
-function buildProviderRows(params: {
+function buildBucketSelectRow(params: {
+  command: DiscordModelPickerCommandContext;
+  userId: string;
+  view: "providers" | "models";
+  buckets: DiscordModelPickerBucket[];
+  currentBucketId: string | undefined;
+  provider?: string;
+  runtimeToken?: string;
+  providerPage?: number;
+}): DiscordModelPickerRow | null {
+  const { buckets, currentBucketId, ...state } = params;
+  if (buckets.length <= 1) {
+    return null;
+  }
+  const options: APISelectMenuOption[] = buckets.map((bucket) => ({
+    label: bucket.label,
+    value: bucket.id,
+    default: bucket.id === currentBucketId,
+  }));
+  // The select value carries the bucket; derive the provider bucket on interaction
+  // to keep long provider and user IDs within Discord's 100-character custom-id cap.
+  return createModelSelectRow(
+    {
+      ...state,
+      action: "bucket",
+      page: 1,
+    },
+    options,
+    params.view === "providers"
+      ? "Filter providers by letter range"
+      : "Filter models by letter range",
+  );
+}
+
+function getActiveBucketId(
+  bucket: DiscordModelPickerBucket | null | undefined,
+): string | undefined {
+  return bucket && bucket.id !== "all" ? bucket.id : undefined;
+}
+
+function buildRenderedShell(params: {
+  title: string;
+  refreshWarning?: string;
+  detailLines: string[];
+  rows: DiscordModelPickerRow[];
+  footer?: string;
+  /** Text shown after the divider but before the interactive rows. */
+  preRowText?: string;
+  /** Extra rows appended after the main rows, preceded by a divider. */
+  trailingRows?: DiscordModelPickerRow[];
+}): DiscordModelPickerRenderedView {
+  const containerComponents: APIContainerComponent["components"] = [
+    { type: ComponentType.TextDisplay, content: `## ${params.title}` },
+  ];
+  if (params.refreshWarning) {
+    containerComponents.push({ type: ComponentType.TextDisplay, content: params.refreshWarning });
+  }
+  containerComponents.push({
+    type: ComponentType.TextDisplay,
+    content: params.detailLines.join("\n"),
+  });
+  containerComponents.push({ type: ComponentType.Separator, divider: true, spacing: 1 });
+  if (params.preRowText) {
+    containerComponents.push({ type: ComponentType.TextDisplay, content: params.preRowText });
+  }
+  containerComponents.push(...params.rows);
+  if (params.trailingRows && params.trailingRows.length > 0) {
+    containerComponents.push({ type: ComponentType.Separator, divider: true, spacing: 1 });
+    containerComponents.push(...params.trailingRows);
+  }
+  if (params.footer) {
+    containerComponents.push({ type: ComponentType.Separator, divider: false, spacing: 1 });
+    containerComponents.push({ type: ComponentType.TextDisplay, content: `-# ${params.footer}` });
+  }
+
+  return {
+    components: [
+      asSerializableComponent({ type: ComponentType.Container, components: containerComponents }),
+    ],
+  };
+}
+
+function buildProviderSelectRow(params: {
   command: DiscordModelPickerCommandContext;
   userId: string;
   page: DiscordModelPickerPage<DiscordModelPickerProviderItem>;
   currentProvider?: string;
-}): Row<Button>[] {
-  const rows = chunkProvidersForRows(params.page.items).map(
-    (providers) =>
-      new Row(
-        providers.map((provider) => {
-          const style =
-            provider.id === params.currentProvider ? ButtonStyle.Primary : ButtonStyle.Secondary;
-          return createModelPickerButton({
-            label: formatProviderButtonLabel(provider.id),
-            style,
-            customId: buildDiscordModelPickerCustomId({
-              command: params.command,
-              action: "provider",
-              view: "models",
-              provider: provider.id,
-              page: params.page.page,
-              userId: params.userId,
-            }),
-          });
-        }),
-      ),
-  );
-
-  return rows;
-}
-
-function buildModelRows(params: {
-  command: DiscordModelPickerCommandContext;
-  userId: string;
-  data: ModelsProviderData;
-  providerPage: number;
-  modelPage: DiscordModelPickerModelPage;
-  currentModel?: string;
-  currentRuntime?: string;
-  pendingModel?: string;
-  pendingModelIndex?: number;
-  pendingRuntime?: string;
-  quickModels?: string[];
-}): { rows: DiscordModelPickerRow[]; buttonRow: Row<Button> } {
-  const parsedCurrentModel = parseCurrentModelRef(params.currentModel);
-  const parsedPendingModel = parseCurrentModelRef(params.pendingModel);
-  const rows: DiscordModelPickerRow[] = [];
-
-  const hasQuickModels = (params.quickModels ?? []).length > 0;
-
-  const providerPage = getDiscordModelPickerProviderPage({
-    data: params.data,
-    page: params.providerPage,
-  });
-  const providerOptions: APISelectMenuOption[] = providerPage.items.map((provider) => ({
+  provider?: string;
+  providerBucket?: string;
+  showModelCounts?: boolean;
+}): DiscordModelPickerRow {
+  const { page, currentProvider, showModelCounts, ...state } = params;
+  const options: APISelectMenuOption[] = page.items.map((provider) => ({
     label: provider.id,
     value: provider.id,
-    default: provider.id === params.modelPage.provider,
+    default: provider.id === currentProvider,
+    ...(showModelCounts
+      ? { description: `${provider.count} ${provider.count === 1 ? "model" : "models"}` }
+      : {}),
   }));
-
-  rows.push(
-    new Row([
-      createModelSelect({
-        customId: buildDiscordModelPickerCustomId({
-          command: params.command,
-          action: "provider",
-          view: "models",
-          provider: params.modelPage.provider,
-          page: providerPage.page,
-          providerPage: providerPage.page,
-          userId: params.userId,
-        }),
-        options: providerOptions,
-        placeholder: "Select provider",
-      }),
-    ]),
+  return createModelSelectRow(
+    {
+      ...state,
+      action: "provider",
+      view: "models",
+      page: page.page,
+      providerPage: page.page,
+    },
+    options,
+    "Select provider",
   );
+}
 
-  const runtimeChoices = getRuntimeChoices({
-    data: params.data,
-    provider: params.modelPage.provider,
-  });
-  const selectedRuntime = resolveSelectedRuntime({
-    data: params.data,
-    provider: params.modelPage.provider,
-    currentRuntime: params.currentRuntime,
-    pendingRuntime: params.pendingRuntime,
-  });
-  const stateRuntime = resolveExplicitRuntimeState({
-    choices: runtimeChoices,
-    currentRuntime: params.currentRuntime,
-    pendingRuntime: params.pendingRuntime,
-  });
-
-  if (runtimeChoices.length > 1) {
-    rows.push(
-      new Row([
-        createModelSelect({
-          customId: buildDiscordModelPickerCustomId({
-            command: params.command,
-            action: "runtime",
-            view: "models",
-            provider: params.modelPage.provider,
-            runtime: selectedRuntime,
-            page: params.modelPage.page,
-            providerPage: providerPage.page,
-            modelIndex: params.pendingModelIndex,
-            userId: params.userId,
-          }),
-          options: runtimeChoices.map((choice) => {
-            const option: APISelectMenuOption = {
-              label: choice.label,
-              value: choice.id,
-              default: choice.id === selectedRuntime,
-            };
-            if (choice.description) {
-              option.description = choice.description;
-            }
-            return option;
-          }),
-          placeholder: "Select runtime",
-        }),
-      ]),
-    );
+function buildPaginationRow(params: {
+  command: DiscordModelPickerCommandContext;
+  userId: string;
+  view: "providers" | "models";
+  page: number;
+  totalPages: number;
+  hasPrev: boolean;
+  hasNext: boolean;
+  provider?: string;
+  runtime?: string;
+  runtimeToken?: string;
+  providerPage?: number;
+  modelIndex?: number;
+  modelToken?: string;
+  providerBucket?: string;
+  modelBucket?: string;
+}): DiscordModelPickerRow | null {
+  if (params.totalPages <= 1) {
+    return null;
   }
-
-  const selectedModelRef = parsedPendingModel ?? parsedCurrentModel;
-  const modelOptions: APISelectMenuOption[] = params.modelPage.items.map((model) => ({
-    label: model,
-    value: model,
-    default: selectedModelRef
-      ? selectedModelRef.provider === params.modelPage.provider && selectedModelRef.model === model
-      : false,
-  }));
-
-  rows.push(
-    new Row([
-      createModelSelect({
-        customId: buildDiscordModelPickerCustomId({
-          command: params.command,
-          action: "model",
-          view: "models",
-          provider: params.modelPage.provider,
-          runtime: stateRuntime,
-          page: params.modelPage.page,
-          providerPage: providerPage.page,
-          userId: params.userId,
-        }),
-        options: modelOptions,
-        placeholder: `Select ${params.modelPage.provider} model`,
-      }),
-    ]),
-  );
-
-  const resolvedDefault = params.data.resolvedDefault;
-  const shouldDisableReset =
-    Boolean(parsedCurrentModel) &&
-    parsedCurrentModel?.provider === resolvedDefault.provider &&
-    parsedCurrentModel?.model === resolvedDefault.model;
-
-  const hasPendingSelection =
-    Boolean(parsedPendingModel) &&
-    parsedPendingModel?.provider === params.modelPage.provider &&
-    typeof params.pendingModelIndex === "number" &&
-    params.pendingModelIndex > 0;
-
-  const buttonRowItems: Button[] = [
-    createModelPickerButton({
-      label: "Cancel",
-      style: ButtonStyle.Secondary,
-      customId: buildDiscordModelPickerCustomId({
-        command: params.command,
-        action: "cancel",
-        view: "models",
-        provider: params.modelPage.provider,
-        runtime: stateRuntime,
-        page: params.modelPage.page,
-        providerPage: providerPage.page,
-        userId: params.userId,
-      }),
-    }),
-    createModelPickerButton({
-      label: "Reset to default",
-      style: ButtonStyle.Secondary,
-      disabled: shouldDisableReset,
-      customId: buildDiscordModelPickerCustomId({
-        command: params.command,
-        action: "reset",
-        view: "models",
-        provider: params.modelPage.provider,
-        runtime: stateRuntime,
-        page: params.modelPage.page,
-        providerPage: providerPage.page,
-        userId: params.userId,
-      }),
-    }),
-  ];
-
-  if (hasQuickModels) {
-    buttonRowItems.push(
-      createModelPickerButton({
-        label: "Recents",
-        style: ButtonStyle.Secondary,
-        customId: buildDiscordModelPickerCustomId({
-          command: params.command,
-          action: "recents",
-          view: "recents",
-          provider: params.modelPage.provider,
-          runtime: stateRuntime,
-          page: params.modelPage.page,
-          providerPage: providerPage.page,
-          userId: params.userId,
-        }),
-      }),
+  const { page, totalPages, hasPrev, hasNext, ...navigationState } = params;
+  const createNavigationButton = (label: string, targetPage: number, enabled: boolean) =>
+    createModelPickerButton(
+      label,
+      {
+        ...navigationState,
+        action: "nav",
+        page: targetPage,
+      },
+      { disabled: !enabled },
     );
-  }
-
-  buttonRowItems.push(
-    createModelPickerButton({
-      label: "Submit",
-      style: ButtonStyle.Primary,
-      disabled: !hasPendingSelection,
-      customId: buildDiscordModelPickerCustomId({
-        command: params.command,
-        action: "submit",
-        view: "models",
-        provider: params.modelPage.provider,
-        runtime: stateRuntime,
-        page: params.modelPage.page,
-        providerPage: providerPage.page,
-        modelIndex: params.pendingModelIndex,
-        userId: params.userId,
-      }),
-    }),
+  const indicatorButton = createModelPickerButton(
+    `Page ${page}/${totalPages}`,
+    DISCORD_MODEL_PICKER_PAGE_INDICATOR_CUSTOM_ID,
+    { disabled: true },
   );
-
-  return { rows, buttonRow: new Row(buttonRowItems) };
+  return {
+    type: ComponentType.ActionRow,
+    components: [
+      createNavigationButton("◀ Prev", Math.max(1, page - 1), hasPrev),
+      indicatorButton,
+      createNavigationButton("Next ▶", Math.min(totalPages, page + 1), hasNext),
+    ],
+  };
 }
 
 export function renderDiscordModelPickerProvidersView(
   params: DiscordModelPickerProviderViewParams,
 ): DiscordModelPickerRenderedView {
-  const page = getDiscordModelPickerProviderPage({ data: params.data, page: params.page });
+  const page = getDiscordModelPickerProviderPage({
+    data: params.data,
+    page: params.page,
+    bucket: params.providerBucket,
+  });
   const parsedCurrent = parseCurrentModelRef(params.currentModel);
-  const rows = buildProviderRows({
+  const rows: DiscordModelPickerRow[] = [];
+
+  const bucketRow = buildBucketSelectRow({
     command: params.command,
     userId: params.userId,
-    page,
-    currentProvider: parsedCurrent?.provider,
+    view: "providers",
+    buckets: page.buckets,
+    currentBucketId: page.bucket?.id,
   });
+  if (bucketRow) {
+    rows.push(bucketRow);
+  }
 
+  const activeProviderBucket = getActiveBucketId(page.bucket);
+  if (page.items.length > 0) {
+    rows.push(
+      buildProviderSelectRow({
+        command: params.command,
+        userId: params.userId,
+        page,
+        currentProvider: parsedCurrent?.provider,
+        providerBucket: activeProviderBucket,
+        showModelCounts: true,
+      }),
+    );
+  }
+
+  const navRow = buildPaginationRow({
+    command: params.command,
+    userId: params.userId,
+    view: "providers",
+    page: page.page,
+    totalPages: page.totalPages,
+    hasPrev: page.hasPrev,
+    hasNext: page.hasNext,
+    providerBucket: activeProviderBucket,
+  });
+  if (navRow) {
+    rows.push(navRow);
+  }
+
+  const totalProviders = params.data.providers.length;
   const detailLines = [
     formatCurrentModelLine(params.currentModel),
-    `Select a provider (${page.totalItems} available).`,
+    page.bucket && page.bucket.id !== "all"
+      ? `Select a provider (${page.totalItems} in ${page.bucket.label}, ${totalProviders} total).`
+      : `Select a provider (${page.totalItems} available).`,
   ];
+  const footer =
+    page.totalPages > 1
+      ? `Showing page ${page.page}/${page.totalPages} · ${page.totalItems} providers total`
+      : `All ${page.totalItems} providers shown`;
   return buildRenderedShell({
-    layout: params.layout ?? "v2",
     title: "Model Picker",
+    refreshWarning: params.data.refreshWarning,
     detailLines,
     rows,
-    footer: `All ${page.totalItems} providers shown`,
+    footer,
   });
 }
 
 export function renderDiscordModelPickerModelsView(
-  params: DiscordModelPickerModelViewParams,
+  params: DiscordModelPickerProviderViewParams & {
+    provider: string;
+    providerPage?: number;
+    modelBucket?: string;
+    currentRuntime?: string;
+    pendingModel?: string;
+    pendingModelIndex?: number;
+    pendingRuntime?: string;
+    quickModels?: string[];
+  },
 ): DiscordModelPickerRenderedView {
-  const providerPage = normalizeModelPickerPage(params.providerPage);
+  const requestedProviderPage = normalizeModelPickerPage(params.providerPage);
   const modelPage = getDiscordModelPickerModelPage({
     data: params.data,
     provider: params.provider,
     page: params.page,
+    bucket: params.modelBucket,
   });
 
   if (!modelPage) {
-    const rows: Row<Button>[] = [
-      new Row([
-        createModelPickerButton({
-          label: "Back",
-          customId: buildDiscordModelPickerCustomId({
+    const rows: DiscordModelPickerRow[] = [
+      {
+        type: ComponentType.ActionRow,
+        components: [
+          createModelPickerButton("Back", {
             command: params.command,
             action: "back",
             view: "providers",
-            page: providerPage,
+            page: requestedProviderPage,
             userId: params.userId,
           }),
-        }),
-      ]),
+        ],
+      },
     ];
 
     return buildRenderedShell({
-      layout: params.layout ?? "v2",
       title: "Model Picker",
+      refreshWarning: params.data.refreshWarning,
       detailLines: [
         formatCurrentModelLine(params.currentModel),
         `Provider not found: ${normalizeProviderId(params.provider)}`,
@@ -563,160 +388,300 @@ export function renderDiscordModelPickerModelsView(
     });
   }
 
-  const { rows, buttonRow } = buildModelRows({
+  const parsedCurrentModel = parseCurrentModelRef(params.currentModel);
+  const parsedPendingModel = parseCurrentModelRef(params.pendingModel);
+  const pendingModelToken = parsedPendingModel
+    ? createDiscordModelPickerModelToken(parsedPendingModel.provider, parsedPendingModel.model)
+    : undefined;
+  const modelRows: DiscordModelPickerRow[] = [];
+
+  // Keep the provider switcher in the letter range used to enter this model view.
+  const providerPage = getDiscordModelPickerProviderPage({
+    data: params.data,
+    page: requestedProviderPage,
+    bucket: params.providerBucket,
+  });
+  const activeProviderBucket = getActiveBucketId(providerPage.bucket);
+  const activeModelBucket = getActiveBucketId(modelPage.bucket);
+  // Discord caps messages at 5 action rows. Model bucketing adds its own row,
+  // so the in-view provider switcher has to yield to the Providers button.
+  const modelBucketingActive = modelPage.buckets.length > 1;
+  if (!modelBucketingActive) {
+    modelRows.push(
+      buildProviderSelectRow({
+        command: params.command,
+        userId: params.userId,
+        page: providerPage,
+        provider: modelPage.provider,
+        currentProvider: modelPage.provider,
+        providerBucket: activeProviderBucket,
+      }),
+    );
+  }
+
+  const runtimeModel = parseCurrentModelRef(params.pendingModel ?? params.currentModel);
+  const runtimeChoices = getModelsRuntimeChoices(
+    params.data,
+    modelPage.provider,
+    runtimeModel?.provider === normalizeProviderId(modelPage.provider)
+      ? runtimeModel.model
+      : undefined,
+  );
+  const currentRuntime =
+    parsedCurrentModel?.provider === modelPage.provider ? params.currentRuntime : undefined;
+  // Keep an unavailable explicit choice visible until the user confirms an eligible runtime.
+  const runtime = params.pendingRuntime?.trim() || currentRuntime?.trim();
+  const explicitRuntime =
+    runtime && runtime !== "auto" && runtime !== "default" ? runtime : undefined;
+  const selectedRuntime = explicitRuntime
+    ? runtimeChoices?.find((choice) => choice.id === explicitRuntime)?.id
+    : runtimeChoices?.[0]?.id;
+  const compactRuntime = explicitRuntime
+    ? { runtimeToken: createDiscordModelPickerRuntimeToken(explicitRuntime) }
+    : {};
+  const modelViewState = {
     command: params.command,
     userId: params.userId,
-    data: params.data,
-    providerPage,
-    modelPage,
-    currentModel: params.currentModel,
-    currentRuntime: params.currentRuntime,
-    pendingModel: params.pendingModel,
-    pendingModelIndex: params.pendingModelIndex,
-    pendingRuntime: params.pendingRuntime,
-    quickModels: params.quickModels,
+    view: "models" as const,
+    provider: modelPage.provider,
+    page: modelPage.page,
+    providerPage: providerPage.page,
+  };
+  const modelActionState = { ...modelViewState, ...compactRuntime };
+
+  if (
+    runtimeChoices &&
+    (runtimeChoices.length > 1 || (runtimeChoices.length === 1 && selectedRuntime === undefined))
+  ) {
+    // The selected runtime travels in the select interaction value; omitting
+    // it here leaves enough customId budget to preserve the browse bucket.
+    modelRows.push(
+      createModelSelectRow(
+        {
+          ...modelViewState,
+          action: "runtime",
+          modelIndex: params.pendingModelIndex,
+          modelToken: pendingModelToken,
+          ...(params.pendingModelIndex === undefined && activeModelBucket
+            ? { modelBucket: activeModelBucket }
+            : {}),
+        },
+        runtimeChoices.map((choice) => ({
+          label: choice.label,
+          value: choice.id,
+          default: choice.id === selectedRuntime,
+          ...(choice.description ? { description: choice.description } : {}),
+        })),
+        "Choose how to run this model",
+      ),
+    );
+  }
+
+  const selectedModelRef = parsedPendingModel ?? parsedCurrentModel;
+  const modelOptions: APISelectMenuOption[] = modelPage.items.map((model) => ({
+    label: truncateCodePoints(model, 100),
+    value: createDiscordModelPickerModelToken(modelPage.provider, model),
+    default: selectedModelRef
+      ? selectedModelRef.provider === modelPage.provider && selectedModelRef.model === model
+      : false,
+  }));
+
+  // Derive both buckets from the selected provider/model to preserve custom-id budget.
+  modelRows.push(
+    createModelSelectRow(
+      {
+        ...modelActionState,
+        action: "pick",
+      },
+      modelOptions,
+      `Select ${modelPage.provider} model`,
+    ),
+  );
+
+  const modelNavRow = buildPaginationRow({
+    ...modelActionState,
+    totalPages: modelPage.totalPages,
+    hasPrev: modelPage.hasPrev,
+    hasNext: modelPage.hasNext,
+    modelIndex: params.pendingModelIndex,
+    modelToken: pendingModelToken,
+    // Model navigation derives providerBucket from provider on interaction;
+    // carrying it here can exceed Discord's 100-char customId limit.
+    modelBucket: activeModelBucket,
+  });
+  if (modelNavRow) {
+    modelRows.push(modelNavRow);
+  }
+
+  const resolvedDefault = params.data.resolvedDefault;
+  const shouldDisableReset =
+    parsedCurrentModel?.provider === resolvedDefault.provider &&
+    parsedCurrentModel?.model === resolvedDefault.model;
+
+  const hasPendingSelection =
+    parsedPendingModel?.provider === modelPage.provider &&
+    typeof params.pendingModelIndex === "number" &&
+    params.pendingModelIndex > 0;
+
+  const buttonRowItems: APIButtonComponent[] = [
+    createModelPickerButton("Providers", {
+      command: params.command,
+      action: "back",
+      view: "providers",
+      page: providerPage.page,
+      providerBucket: activeProviderBucket,
+      userId: params.userId,
+    }),
+    createModelPickerButton("Cancel", { ...modelActionState, action: "cancel" }),
+    createModelPickerButton(
+      "Reset to default",
+      {
+        ...modelActionState,
+        action: "reset",
+      },
+      { disabled: shouldDisableReset },
+    ),
+  ];
+
+  if (params.quickModels?.length) {
+    buttonRowItems.push(
+      createModelPickerButton("Recents", {
+        ...modelActionState,
+        action: "recents",
+        view: "recents",
+        modelBucket: activeModelBucket,
+      }),
+    );
+  }
+
+  buttonRowItems.push(
+    createModelPickerButton(
+      "Submit",
+      {
+        ...modelActionState,
+        action: "submit",
+        modelIndex: params.pendingModelIndex,
+        modelToken: pendingModelToken,
+      },
+      {
+        style: ButtonStyle.Primary,
+        disabled: !hasPendingSelection || selectedRuntime === undefined,
+      },
+    ),
+  );
+
+  const buttonRow: DiscordModelPickerRow = {
+    type: ComponentType.ActionRow,
+    components: buttonRowItems,
+  };
+  const pendingRuntime = params.pendingRuntime?.trim();
+
+  const bucketRow = buildBucketSelectRow({
+    command: params.command,
+    userId: params.userId,
+    view: "models",
+    buckets: modelPage.buckets,
+    currentBucketId: modelPage.bucket?.id,
+    provider: modelPage.provider,
+    // Keep the runtime identity stable when the current choice list changes.
+    runtimeToken: pendingRuntime ? createDiscordModelPickerRuntimeToken(pendingRuntime) : undefined,
+    providerPage: requestedProviderPage,
   });
 
   const defaultModel = `${params.data.resolvedDefault.provider}/${params.data.resolvedDefault.model}`;
-  const pendingLine = params.pendingModel
-    ? `Selected: ${params.pendingModel} · runtime ${resolveSelectedRuntime({
-        data: params.data,
-        provider: modelPage.provider,
-        currentRuntime: params.currentRuntime,
-        pendingRuntime: params.pendingRuntime,
-      })} (press Submit)`
-    : "Select a model, then press Submit.";
+  const selectedRuntimeLabel = runtimeChoices?.find(
+    (choice) => choice.id === selectedRuntime,
+  )?.label;
+  const pendingLine = !params.pendingModel
+    ? "Select a model, then press Submit."
+    : runtimeChoices === undefined
+      ? "Could not confirm how to run this model. Open /models to try again."
+      : runtimeChoices.length === 0
+        ? "This model cannot run with your current connections. Choose another model."
+        : selectedRuntimeLabel
+          ? `Selected: ${params.pendingModel} · ${selectedRuntimeLabel} (press Submit)`
+          : "Choose how to run this model, then press Submit.";
+
+  const detailLines = [formatCurrentModelLine(params.currentModel), `Default: ${defaultModel}`];
+  if (modelPage.totalPages > 1) {
+    detailLines.push(
+      `${modelPage.provider}: page ${modelPage.page}/${modelPage.totalPages} · ${modelPage.totalItems} models`,
+    );
+  }
 
   return buildRenderedShell({
-    layout: params.layout ?? "v2",
     title: "Model Picker",
-    detailLines: [formatCurrentModelLine(params.currentModel), `Default: ${defaultModel}`],
+    refreshWarning: params.data.refreshWarning,
+    detailLines,
     preRowText: pendingLine,
-    rows,
+    rows: bucketRow ? [bucketRow, ...modelRows] : modelRows,
     trailingRows: [buttonRow],
   });
 }
 
-export type DiscordModelPickerRecentsViewParams = {
+export function renderDiscordModelPickerRecentsView(params: {
   command: DiscordModelPickerCommandContext;
   userId: string;
   data: ModelsProviderData;
   quickModels: string[];
   currentModel?: string;
   runtime?: string;
+  runtimeToken?: string;
   provider?: string;
   page?: number;
   providerPage?: number;
-  layout?: DiscordModelPickerLayout;
-};
-
-function formatRecentsButtonLabel(modelRef: string, suffix?: string): string {
-  const maxLen = 80;
-  const label = suffix ? `${modelRef} ${suffix}` : modelRef;
-  if (label.length <= maxLen) {
-    return label;
-  }
-  const trimmed = suffix
-    ? `${modelRef.slice(0, maxLen - suffix.length - 2)}… ${suffix}`
-    : `${modelRef.slice(0, maxLen - 1)}…`;
-  return trimmed;
-}
-
-export function renderDiscordModelPickerRecentsView(
-  params: DiscordModelPickerRecentsViewParams,
-): DiscordModelPickerRenderedView {
-  const defaultModelRef = `${params.data.resolvedDefault.provider}/${params.data.resolvedDefault.model}`;
-  const rows: DiscordModelPickerRow[] = [];
-
-  // Dedupe: filter recents that match the default model.
-  const dedupedQuickModels = params.quickModels.filter((modelRef) => modelRef !== defaultModelRef);
-
-  // Default model button — slot 1.
-  rows.push(
-    new Row([
-      createModelPickerButton({
-        label: formatRecentsButtonLabel(defaultModelRef, "(default)"),
-        style: ButtonStyle.Secondary,
-        customId: buildDiscordModelPickerCustomId({
-          command: params.command,
+  modelBucket?: string;
+}): DiscordModelPickerRenderedView {
+  const { data, quickModels, currentModel, modelBucket, ...navigationState } = params;
+  const recentModels = getDiscordModelPickerRecentModelRefs(data, quickModels);
+  const rows = recentModels.map((modelRef, index) => {
+    const suffix = index === 0 ? "(default)" : undefined;
+    const maxLen = 80;
+    const label = suffix ? `${modelRef} ${suffix}` : modelRef;
+    const buttonLabel =
+      label.length <= maxLen
+        ? label
+        : suffix
+          ? `${sliceUtf16Safe(modelRef, 0, maxLen - suffix.length - 2)}… ${suffix}`
+          : `${sliceUtf16Safe(modelRef, 0, maxLen - 1)}…`;
+    const parsed = parseCurrentModelRef(modelRef);
+    return {
+      type: ComponentType.ActionRow as const,
+      components: [
+        createModelPickerButton(buttonLabel, {
+          ...navigationState,
           action: "submit",
           view: "recents",
-          recentSlot: 1,
-          provider: params.provider,
-          runtime: params.runtime,
-          page: params.page,
-          providerPage: params.providerPage,
-          userId: params.userId,
+          recentSlot: index + 1,
+          modelToken: parsed
+            ? createDiscordModelPickerModelToken(parsed.provider, parsed.model)
+            : undefined,
         }),
-      }),
-    ]),
-  );
+      ],
+    };
+  });
 
-  // Recent model buttons — slot 2+.
-  for (let i = 0; i < dedupedQuickModels.length; i++) {
-    const modelRef = dedupedQuickModels[i];
-    rows.push(
-      new Row([
-        createModelPickerButton({
-          label: formatRecentsButtonLabel(modelRef),
-          style: ButtonStyle.Secondary,
-          customId: buildDiscordModelPickerCustomId({
-            command: params.command,
-            action: "submit",
-            view: "recents",
-            recentSlot: i + 2,
-            provider: params.provider,
-            runtime: params.runtime,
-            page: params.page,
-            providerPage: params.providerPage,
-            userId: params.userId,
-          }),
-        }),
-      ]),
-    );
-  }
-
-  // Back button after a divider (via trailingRows).
-  const backRow: Row<Button> = new Row([
-    createModelPickerButton({
-      label: "Back",
-      style: ButtonStyle.Secondary,
-      customId: buildDiscordModelPickerCustomId({
-        command: params.command,
+  const backRow: DiscordModelPickerRow = {
+    type: ComponentType.ActionRow,
+    components: [
+      createModelPickerButton("Back", {
+        ...navigationState,
         action: "back",
         view: "models",
-        provider: params.provider,
-        runtime: params.runtime,
-        page: params.page,
-        providerPage: params.providerPage,
-        userId: params.userId,
+        modelBucket,
       }),
-    }),
-  ]);
+    ],
+  };
 
   return buildRenderedShell({
-    layout: params.layout ?? "v2",
     title: "Recents",
+    refreshWarning: data.refreshWarning,
     detailLines: [
       "Models you've previously selected appear here.",
-      formatCurrentModelLine(params.currentModel),
+      formatCurrentModelLine(currentModel),
     ],
     preRowText: "Tap a model to switch.",
     rows,
     trailingRows: [backRow],
   });
-}
-
-export function toDiscordModelPickerMessagePayload(
-  view: DiscordModelPickerRenderedView,
-): MessagePayloadObject {
-  if (view.layout === "classic") {
-    return {
-      content: view.content,
-      components: view.components,
-    };
-  }
-  return {
-    components: view.components,
-  };
 }

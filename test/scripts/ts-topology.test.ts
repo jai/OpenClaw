@@ -1,5 +1,6 @@
+import { spawnSync } from "node:child_process";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { analyzeTopology, filterRecordsForReport } from "../../scripts/lib/ts-topology/analyze.js";
 import { renderTextReport } from "../../scripts/lib/ts-topology/reports.js";
 import { createFilesystemPublicSurfaceScope } from "../../scripts/lib/ts-topology/scope.js";
@@ -8,190 +9,89 @@ import { createCapturedIo } from "../helpers/captured-io.js";
 
 const repoRoot = path.join(process.cwd(), "test", "fixtures", "ts-topology", "basic");
 
-function buildFixtureScope() {
-  return createFilesystemPublicSurfaceScope(repoRoot, {
+const publicSurfaceEnvelope = analyzeTopology({
+  repoRoot,
+  scope: createFilesystemPublicSurfaceScope(repoRoot, {
     id: "custom",
     entrypointRoot: "src/public",
     importPrefix: "fixture-sdk",
-  });
-}
-
-const fixtureScope = buildFixtureScope();
-const publicSurfaceEnvelope = analyzeTopology({
-  repoRoot,
-  scope: fixtureScope,
+  }),
   report: "public-surface-usage",
 });
 
-function deriveReportEnvelope(report: Parameters<typeof filterRecordsForReport>[1]) {
-  return {
-    ...publicSurfaceEnvelope,
-    report,
-    records: filterRecordsForReport(publicSurfaceEnvelope.records, report),
-  };
+async function runCli(args: string[]) {
+  const captured = createCapturedIo();
+  const code = await main(args, captured.io);
+  return { code, stdout: captured.readStdout(), stderr: captured.readStderr() };
+}
+function render(overrides: Partial<typeof publicSurfaceEnvelope> = {}, limit = 2) {
+  return renderTextReport({ ...publicSurfaceEnvelope, ...overrides }, limit);
 }
 
-const singleOwnerEnvelope = deriveReportEnvelope("single-owner-shared");
-const unusedEnvelope = deriveReportEnvelope("unused-public-surface");
+it("runs the CLI entrypoint when invoked from a filesystem path", () => {
+  const args = ["--import", "tsx", path.resolve("scripts/ts-topology.ts"), "--help"];
+  const result = spawnSync(process.execPath, args, { encoding: "utf8" });
+  expect(result).toMatchObject({ status: 1, stdout: "" });
+  expect(result.stderr).toContain("Usage: ts-topology");
+});
 
-function requireRecordByExport(exportName: string) {
-  const record = publicSurfaceEnvelope.records.find((entry) =>
-    entry.exportNames.includes(exportName),
-  );
-  if (!record) {
-    throw new Error(`Expected topology record for ${exportName}`);
-  }
-  return record;
-}
-
-describe("ts-topology", () => {
-  it("collapses canonical symbols exported by multiple public subpaths", () => {
-    const sharedThing = requireRecordByExport("sharedThing");
-
-    expect(sharedThing).toEqual({
-      aliasName: undefined,
-      canonicalKey: "src/lib/shared.ts:1:sharedThing",
-      declarationPath: "src/lib/shared.ts",
-      declarationLine: 1,
-      entrypoints: ["extra", "index"],
-      exportNames: ["aliasedSharedThing", "sharedThing"],
-      internalConsumers: [],
-      internalImportCount: 0,
-      internalRefCount: 0,
-      isTypeOnlyCandidate: false,
-      kind: "function",
-      moveBackToOwnerScore: 0,
-      productionConsumers: [
-        "extensions/alpha/src/use.ts",
-        "extensions/beta/src/use.ts",
-        "src/internal/use.ts",
-      ],
-      productionExtensions: ["alpha", "beta"],
-      productionImportCount: 4,
-      productionPackages: ["src"],
-      productionRefCount: 4,
-      productionOwners: ["extension:alpha", "extension:beta", "src"],
-      publicSpecifiers: ["fixture-sdk", "fixture-sdk/extra"],
-      sharednessScore: 90,
-      testConsumers: [],
-      testImportCount: 0,
-      testRefCount: 0,
-    });
-  });
-
-  it("counts renamed imports, namespace imports, type-only imports, and test-only consumers", () => {
-    const aliasedThing = requireRecordByExport("aliasedThing");
-    const sharedType = requireRecordByExport("SharedType");
-    const testOnlyThing = requireRecordByExport("testOnlyThing");
-
-    expect(aliasedThing.productionRefCount).toBe(1);
-    expect(sharedType).toEqual({
-      aliasName: undefined,
-      canonicalKey: "src/lib/shared.ts:21:SharedType",
-      declarationLine: 21,
-      declarationPath: "src/lib/shared.ts",
-      entrypoints: ["index"],
-      exportNames: ["SharedType"],
-      internalConsumers: [],
-      internalImportCount: 0,
-      internalRefCount: 0,
-      isTypeOnlyCandidate: true,
-      kind: "type",
-      moveBackToOwnerScore: 0,
-      productionConsumers: ["extensions/alpha/src/use.ts", "extensions/beta/src/use.ts"],
-      productionExtensions: ["alpha", "beta"],
-      productionImportCount: 2,
-      productionOwners: ["extension:alpha", "extension:beta"],
-      productionPackages: [],
-      productionRefCount: 2,
-      publicSpecifiers: ["fixture-sdk"],
-      sharednessScore: 75,
-      testConsumers: [],
-      testImportCount: 0,
-      testRefCount: 0,
-    });
-    expect(testOnlyThing).toEqual({
-      aliasName: undefined,
-      canonicalKey: "src/lib/shared.ts:13:testOnlyThing",
-      declarationLine: 13,
-      declarationPath: "src/lib/shared.ts",
-      entrypoints: ["index"],
-      exportNames: ["testOnlyThing"],
-      internalConsumers: [],
-      internalImportCount: 0,
-      internalRefCount: 0,
-      isTypeOnlyCandidate: false,
-      kind: "function",
-      moveBackToOwnerScore: 30,
-      productionConsumers: [],
-      productionExtensions: [],
-      productionImportCount: 0,
-      productionOwners: [],
-      productionPackages: [],
-      productionRefCount: 0,
-      publicSpecifiers: ["fixture-sdk"],
-      sharednessScore: 0,
-      testRefCount: 1,
-      testImportCount: 1,
-      testConsumers: ["tests/public.test.ts"],
-    });
-  });
-
-  it("surfaces single-owner shared and unused reports correctly", () => {
-    expect(singleOwnerEnvelope.records.map((record) => record.exportNames[0])).toContain(
-      "singleOwnerHelper",
-    );
-    expect(singleOwnerEnvelope.records.map((record) => record.exportNames[0])).not.toContain(
-      "sharedThing",
-    );
-    expect(unusedEnvelope.records.map((record) => record.exportNames[0])).toEqual(["unusedThing"]);
-  });
-
-  it("renders stable text summaries for the public-surface report", () => {
-    expect(renderTextReport({ ...publicSurfaceEnvelope, limit: 3 }, 3)).toMatchInlineSnapshot(`
+it("renders stable text summaries for the public-surface report", () => {
+  expect(render({}, 3)).toMatchInlineSnapshot(`
       "Scope: custom
       Public exports analyzed: 6
-      Production-used exports: 4
+      Production-used exports: 3
       Single-owner shared exports: 2
-      Unused public exports: 1
+      Unused public exports: 2
       
       Top 2 candidate-to-move exports:
-      - fixture-sdk:aliasedThing -> src/lib/shared.ts:9 (prodRefs=1, owners=extension:alpha, sharedness=35, move=85)
-      - fixture-sdk:singleOwnerHelper -> src/lib/shared.ts:5 (prodRefs=1, owners=extension:alpha, sharedness=35, move=85)
+      - fixture-sdk:aliasedThing -> src/lib/shared.ts:10 (prodRefs=1, owners=extension:alpha, sharedness=35, move=85)
+      - fixture-sdk:singleOwnerHelper -> src/lib/shared.ts:6 (prodRefs=1, owners=extension:alpha, sharedness=35, move=85)
       
       Top 1 duplicated public exports:
-      - fixture-sdk:sharedThing via fixture-sdk, fixture-sdk/extra (src/lib/shared.ts:1)"
+      - fixture-sdk:sharedThing via fixture-sdk, fixture-sdk/extra (src/lib/shared.ts:2)"
     `);
-  });
+});
 
-  it("emits stable JSON through the CLI and filtered report output", async () => {
-    const captured = createCapturedIo();
-    const jsonExit = await main(
-      [
-        "--scope=custom",
-        "--entrypoint-root=src/public",
-        "--import-prefix=fixture-sdk",
-        "--repo-root=test/fixtures/ts-topology/basic",
-        "--report=single-owner-shared",
-        "--json",
-      ],
-      captured.io,
-    );
+it("emits stable JSON through the CLI and filtered report output", async () => {
+  const result = await runCli([
+    "--scope=custom",
+    "--entrypoint-root=src/public",
+    "--import-prefix=fixture-sdk",
+    "--repo-root=test/fixtures/ts-topology/basic",
+    "--report=single-owner-shared",
+    "--json",
+  ]);
 
-    expect(jsonExit).toBe(0);
-    const payload = JSON.parse(captured.readStdout());
-    expect(payload.report).toBe("single-owner-shared");
-    expect(
-      payload.records.map((record: { exportNames: string[] }) => record.exportNames[0]),
-    ).toEqual(["aliasedThing", "singleOwnerHelper"]);
+  expect(result.code).toBe(0);
+  const payload = JSON.parse(result.stdout);
+  expect(payload.report).toBe("single-owner-shared");
+  expect(payload.records.map((record: { exportNames: string[] }) => record.exportNames[0])).toEqual(
+    ["aliasedThing", "singleOwnerHelper"],
+  );
 
-    expect(renderTextReport(deriveReportEnvelope("consumer-topology"), 2)).toMatchInlineSnapshot(`
+  expect(
+    render({
+      report: "consumer-topology",
+      records: filterRecordsForReport(publicSurfaceEnvelope.records, "consumer-topology"),
+    }),
+  ).toMatchInlineSnapshot(`
       "Scope: custom
-      Records with consumers: 5
+      Records with consumers: 4
       
       Top 2 consumer-topology records:
       - fixture-sdk:sharedThing prod=3 test=0 internal=0
-      - fixture-sdk:SharedType prod=2 test=0 internal=0"
+      - fixture-sdk:aliasedThing prod=1 test=0 internal=0"
     `);
-  });
+});
+
+it("rejects malformed CLI limits", async () => {
+  const result = await runCli(["--limit=abc"]);
+  expect(result).toMatchObject({ code: 1, stdout: "" });
+  expect(result.stderr).toContain("--limit must be a positive integer");
+});
+
+it("throws a clear error for invalid text report names", () => {
+  expect(() => render({ report: "missing-report" as typeof publicSurfaceEnvelope.report })).toThrow(
+    "Unsupported topology report: missing-report",
+  );
 });

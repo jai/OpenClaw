@@ -1,46 +1,24 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { ModelThinkingLevel } from "@openclaw/llm-core/types";
 import type { TSchema } from "typebox";
+import type {
+  ModelApi,
+  ProviderModelRouteRuntimePolicy,
+  ProviderRouteOverridePresence,
+} from "../../plugin-sdk/provider-model-types.js";
+import type { ReplyPayload as AgentRuntimeReplyPayload } from "../../shared/reply-payload.types.js";
+import type { AuthProfileStore } from "../auth-profiles/types.js";
+import type { ModelFallbackResultClassification } from "../model-fallback-attempt.js";
+import type { EmbeddedRunTrigger } from "../run-trigger.js";
+import type { AgentTool } from "../runtime/index.js";
+import type { ProviderSystemPromptContribution } from "../system-prompt-contribution.js";
+import type { TranscriptPolicy } from "../transcript-policy.types.js";
+import type { AgentRuntimeCredentialSource } from "./credential-source.types.js";
 
-export type AgentRuntimeTransport = "sse" | "websocket" | "auto";
+export type AgentRuntimeTransport = "sse" | "websocket" | "websocket-cached" | "auto";
 
-export type AgentRuntimeThinkLevel =
-  | "off"
-  | "minimal"
-  | "low"
-  | "medium"
-  | "high"
-  | "xhigh"
-  | "adaptive"
-  | "max";
+type AgentRuntimeThinkLevel = ModelThinkingLevel | "adaptive";
 
-export type AgentRuntimePromptMode = "full" | "minimal" | "none";
-export type AgentRuntimePromptTrigger =
-  | "cron"
-  | "heartbeat"
-  | "manual"
-  | "memory"
-  | "overflow"
-  | "user";
-
-export type AgentRuntimeFailoverReason =
-  | "auth"
-  | "auth_permanent"
-  | "format"
-  | "rate_limit"
-  | "overloaded"
-  | "billing"
-  | "server_error"
-  | "timeout"
-  | "model_not_found"
-  | "session_expired"
-  | "empty_response"
-  | "no_error_details"
-  | "unclassified"
-  | "unknown";
-
-export type AgentRuntimeConfig = unknown;
-
-export type AgentRuntimeModel = {
+type AgentRuntimeModel = {
   id?: string;
   name?: string;
   api?: string;
@@ -60,206 +38,37 @@ export type AgentRuntimeModel = {
   compat?: unknown;
 };
 
-export type AgentRuntimeTextReplacement = {
+type AgentRuntimeTextReplacement = {
   from: string | RegExp;
   to: string;
 };
 
-export type AgentRuntimeTextTransforms = {
-  input?: AgentRuntimeTextReplacement[];
-  output?: AgentRuntimeTextReplacement[];
-};
-
-export type AgentRuntimeProviderHandle = {
+type PreparedAgentRuntimeProviderHandle = {
   provider: string;
-  config?: AgentRuntimeConfig;
+  modelId?: string | null;
+  config?: unknown;
   workspaceDir?: string;
   env?: NodeJS.ProcessEnv;
   applyAutoEnable?: boolean;
-  bundledProviderAllowlistCompat?: boolean;
-  bundledProviderVitestCompat?: boolean;
+} & {
+  modelId: string | null;
+  prepared: true;
 };
 
-export type AgentRuntimeInteractiveButtonStyle = "primary" | "secondary" | "success" | "danger";
-
-export type AgentRuntimeInteractiveReplyButton = {
-  label: string;
-  value?: string;
-  url?: string;
-  style?: AgentRuntimeInteractiveButtonStyle;
-};
-
-export type AgentRuntimeInteractiveReplyOption = {
-  label: string;
-  value: string;
-};
-
-export type AgentRuntimeInteractiveReplyBlock =
-  | {
-      type: "text";
-      text: string;
-    }
-  | {
-      type: "buttons";
-      buttons: AgentRuntimeInteractiveReplyButton[];
-    }
-  | {
-      type: "select";
-      placeholder?: string;
-      options: AgentRuntimeInteractiveReplyOption[];
-    };
-
-export type AgentRuntimeInteractiveReply = {
-  blocks: AgentRuntimeInteractiveReplyBlock[];
-};
-
-export type AgentRuntimeMessagePresentationTone =
-  | "info"
-  | "success"
-  | "warning"
-  | "danger"
-  | "neutral";
-
-export type AgentRuntimeMessagePresentationBlock =
-  | {
-      type: "text";
-      text: string;
-    }
-  | {
-      type: "context";
-      text: string;
-    }
-  | {
-      type: "divider";
-    }
-  | {
-      type: "buttons";
-      buttons: AgentRuntimeInteractiveReplyButton[];
-    }
-  | {
-      type: "select";
-      placeholder?: string;
-      options: AgentRuntimeInteractiveReplyOption[];
-    };
-
-export type AgentRuntimeMessagePresentation = {
-  title?: string;
-  tone?: AgentRuntimeMessagePresentationTone;
-  blocks: AgentRuntimeMessagePresentationBlock[];
-};
-
-export type AgentRuntimeReplyPayloadDeliveryPin = {
-  enabled: boolean;
-  notify?: boolean;
-  required?: boolean;
-};
-
-export type AgentRuntimeReplyPayloadDelivery = {
-  pin?: boolean | AgentRuntimeReplyPayloadDeliveryPin;
-};
-
-export type AgentRuntimeReplyPayload = {
-  text?: string;
-  mediaUrl?: string;
-  mediaUrls?: string[];
-  trustedLocalMedia?: boolean;
-  sensitiveMedia?: boolean;
-  presentation?: AgentRuntimeMessagePresentation;
-  delivery?: AgentRuntimeReplyPayloadDelivery;
-  interactive?: AgentRuntimeInteractiveReply;
-  btw?: {
-    question: string;
-  };
-  replyToId?: string;
-  replyToTag?: boolean;
-  replyToCurrent?: boolean;
-  audioAsVoice?: boolean;
-  spokenText?: string;
-  ttsSupplement?: {
-    spokenText: string;
-    visibleTextAlreadyDelivered?: boolean;
-  };
-  isError?: boolean;
-  isReasoning?: boolean;
-  isCompactionNotice?: boolean;
-  isFallbackNotice?: boolean;
-  channelData?: Record<string, unknown>;
-};
-
-export type AgentRuntimeSystemPromptSectionId =
-  | "interaction_style"
-  | "tool_call_style"
-  | "execution_bias";
-
-export type AgentRuntimeSystemPromptContribution = {
-  stablePrefix?: string;
-  dynamicSuffix?: string;
-  sectionOverrides?: Partial<Record<AgentRuntimeSystemPromptSectionId, string>>;
-};
-
-export type AgentRuntimeSystemPromptContributionContext = {
-  config?: AgentRuntimeConfig;
+type AgentRuntimeSystemPromptContributionContext = {
+  config?: unknown;
   agentDir?: string;
   workspaceDir?: string;
   provider: string;
   modelId: string;
-  promptMode: AgentRuntimePromptMode;
+  promptMode: "full" | "minimal" | "none";
   runtimeChannel?: string;
   runtimeCapabilities?: string[];
   agentId?: string;
-  trigger?: AgentRuntimePromptTrigger;
+  trigger?: EmbeddedRunTrigger;
 };
 
-export type AgentRuntimeFollowupFallbackRouteResult = {
-  route?: "origin" | "dispatcher" | "drop";
-  reason?: string;
-};
-
-export type AgentRuntimeToolCallIdMode = "strict" | "strict9";
-
-export type AgentRuntimeTranscriptPolicy = {
-  sanitizeMode: "full" | "images-only";
-  sanitizeToolCallIds: boolean;
-  toolCallIdMode?: AgentRuntimeToolCallIdMode;
-  preserveNativeAnthropicToolUseIds: boolean;
-  repairToolUseResultPairing: boolean;
-  preserveSignatures: boolean;
-  sanitizeThoughtSignatures?: {
-    allowBase64Only?: boolean;
-    includeCamelCase?: boolean;
-  };
-  sanitizeThinkingSignatures: boolean;
-  dropThinkingBlocks: boolean;
-  dropReasoningFromHistory?: boolean;
-  applyGoogleTurnOrdering: boolean;
-  validateGeminiTurns: boolean;
-  validateAnthropicTurns: boolean;
-  allowSyntheticToolResults: boolean;
-};
-
-export type AgentRuntimeOutcomeClassification =
-  | {
-      message: string;
-      reason?: AgentRuntimeFailoverReason;
-      status?: number;
-      code?: string;
-      rawError?: string;
-    }
-  | {
-      error: unknown;
-    }
-  | null
-  | undefined;
-
-export type AgentRuntimeOutcomeClassifier = (params: {
-  provider: string;
-  model: string;
-  result: unknown;
-  hasDirectlySentBlockReply?: boolean;
-  hasBlockReplyPipelineOutput?: boolean;
-}) => AgentRuntimeOutcomeClassification;
-
-export type AgentRuntimeResolvedRef = {
+type AgentRuntimeResolvedRef = {
   provider: string;
   modelId: string;
   modelApi?: string;
@@ -267,143 +76,171 @@ export type AgentRuntimeResolvedRef = {
   transport?: AgentRuntimeTransport;
 };
 
-export type AgentRuntimeAuthPlan = {
-  providerForAuth: string;
-  authProfileProviderForAuth: string;
-  harnessAuthProvider?: string;
-  forwardedAuthProfileId?: string;
-  forwardedAuthProfileCandidateIds?: string[];
-};
-
-export type AgentRuntimePromptPlan = {
+type AgentRuntimeAuthModelRoute = {
   provider: string;
   modelId: string;
-  textTransforms?: AgentRuntimeTextTransforms;
-  resolveSystemPromptContribution(
-    context: AgentRuntimeSystemPromptContributionContext,
-  ): AgentRuntimeSystemPromptContribution | undefined;
-  transformSystemPrompt(
-    context: AgentRuntimeSystemPromptContributionContext & {
-      systemPrompt: string;
-    },
-  ): string;
+  api: ModelApi;
+  baseUrl: string;
+  authRequirement: "api-key" | "subscription";
+  /** Secret-free request behavior that the selected runtime must reproduce. */
+  requestTransportOverrides: ProviderRouteOverridePresence;
+  /** Provider-owned native-runtime compatibility for this concrete route. */
+  runtimePolicy?: ProviderModelRouteRuntimePolicy;
 };
 
-// Keep the leaf runtime-plan contract decoupled from plugin metadata internals.
-export type AgentRuntimePreparedMetadataSnapshot = object;
-
-export type PreparedOpenClawToolPlanning = {
-  metadataSnapshot?: AgentRuntimePreparedMetadataSnapshot;
-  loadMetadataSnapshot?: () => AgentRuntimePreparedMetadataSnapshot;
+/** Actual provider/model/source tuple owned by one physical model attempt. */
+export type AgentRuntimeModelAttempt = {
+  provider: string;
+  model: string;
+  credentialSource: AgentRuntimeCredentialSource;
 };
 
-export type AgentRuntimeToolPlan = {
-  preparedPlanning?: PreparedOpenClawToolPlanning;
-  normalize<TSchemaType extends TSchema = TSchema, TResult = unknown>(
-    tools: AgentTool<TSchemaType, TResult>[],
-    params?: {
-      workspaceDir?: string;
-      modelApi?: string;
-      model?: AgentRuntimeModel;
-    },
-  ): AgentTool<TSchemaType, TResult>[];
-  logDiagnostics(
-    tools: AgentTool[],
-    params?: {
-      workspaceDir?: string;
-      modelApi?: string;
-      model?: AgentRuntimeModel;
-    },
-  ): void;
+export type AgentRuntimeAuthPlan = {
+  providerForAuth: string;
+  /** Model whose order, cooldown, and route facts produced this plan. */
+  modelId?: string;
+  authProfileProviderForAuth: string;
+  harnessAuthProvider?: string;
+  /** Preferred or user-locked profile; automatic selection may not have resolved its secret yet. */
+  forwardedAuthProfileId?: string;
+  forwardedAuthProfileSource?: "auto" | "user";
+  /** Ordered exhaustive candidates for the selected route; a singleton is terminal. */
+  forwardedAuthProfileCandidateIds?: string[];
+  /** Exact selected credential/config mode; secret-free route materialization input. */
+  selectedAuthMode?: string;
+  selectedAuthFlow?: string;
+  /** Concrete provider-owned route selected before runtime dispatch. */
+  modelRoute?: AgentRuntimeAuthModelRoute;
+  /** Secret-free support shared by every route deferred to harness-owned auth. */
+  /** Common native-runtime support proven across every route left to the harness. */
+  deferredRouteSupport?: {
+    requestTransportOverrides: ProviderRouteOverridePresence;
+    runtimePolicy: ProviderModelRouteRuntimePolicy;
+  };
+  /** Redacted source selected for this concrete physical attempt. */
+  credentialSource?: AgentRuntimeCredentialSource;
+};
+
+/** Prepared plugin metadata snapshot kept opaque to runtime-plan consumers. */
+type AgentRuntimePreparedMetadataSnapshot = object;
+
+type AgentRuntimeModelOverrides = {
+  workspaceDir?: string;
+  modelApi?: string;
+  model?: AgentRuntimeModel;
 };
 
 export type AgentRuntimeDeliveryPlan = {
-  isSilentPayload(
-    payload: Pick<
-      AgentRuntimeReplyPayload,
-      "text" | "mediaUrl" | "mediaUrls" | "presentation" | "interactive" | "channelData"
-    >,
-  ): boolean;
   resolveFollowupRoute(params: {
     payload: AgentRuntimeReplyPayload;
     originatingChannel?: string;
     originatingTo?: string;
     originRoutable: boolean;
     dispatcherAvailable: boolean;
-  }): AgentRuntimeFollowupFallbackRouteResult | undefined;
-};
-
-export type AgentRuntimeOutcomePlan = {
-  classifyRunResult: AgentRuntimeOutcomeClassifier;
-};
-
-export type AgentRuntimeTransportPlan = {
-  extraParams: Record<string, unknown>;
-  resolveExtraParams(params?: {
-    extraParamsOverride?: Record<string, unknown>;
-    thinkingLevel?: AgentRuntimeThinkLevel;
-    agentId?: string;
-    workspaceDir?: string;
-    model?: AgentRuntimeModel;
-    resolvedTransport?: AgentRuntimeTransport;
-  }): Record<string, unknown>;
+  }):
+    | {
+        route?: "origin" | "dispatcher" | "drop";
+        reason?: string;
+      }
+    | undefined;
 };
 
 export type AgentRuntimePlan = {
   resolvedRef: AgentRuntimeResolvedRef;
-  providerRuntimeHandle?: AgentRuntimeProviderHandle;
+  providerRuntimeHandle?: PreparedAgentRuntimeProviderHandle;
   auth: AgentRuntimeAuthPlan;
-  prompt: AgentRuntimePromptPlan;
-  tools: AgentRuntimeToolPlan;
-  transcript: {
-    policy: AgentRuntimeTranscriptPolicy;
-    resolvePolicy(params?: {
-      workspaceDir?: string;
-      modelApi?: string;
-      model?: AgentRuntimeModel;
-    }): AgentRuntimeTranscriptPolicy;
-  };
-  delivery: AgentRuntimeDeliveryPlan;
-  outcome: AgentRuntimeOutcomePlan;
-  transport: AgentRuntimeTransportPlan;
-  observability: {
-    resolvedRef: string;
+  prompt: {
     provider: string;
     modelId: string;
-    modelApi?: string;
-    harnessId?: string;
+    textTransforms?: {
+      input?: AgentRuntimeTextReplacement[];
+      output?: AgentRuntimeTextReplacement[];
+    };
+    resolveSystemPromptContribution(
+      context: AgentRuntimeSystemPromptContributionContext,
+    ): ProviderSystemPromptContribution | undefined;
+    transformSystemPrompt(
+      context: AgentRuntimeSystemPromptContributionContext & {
+        systemPrompt: string;
+      },
+    ): string;
+  };
+  tools: {
+    /** Prepared metadata loader used by tool planning without eager manifest reads. */
+    preparedPlanning?: {
+      metadataSnapshot?: AgentRuntimePreparedMetadataSnapshot;
+    };
+    normalize<TSchemaType extends TSchema = TSchema, TResult = unknown>(
+      tools: AgentTool<TSchemaType, TResult>[],
+      params?: AgentRuntimeModelOverrides,
+    ): AgentTool<TSchemaType, TResult>[];
+    logDiagnostics(tools: AgentTool[], params?: AgentRuntimeModelOverrides): void;
+  };
+  transcript: {
+    policy: TranscriptPolicy;
+    resolvePolicy(
+      params?: AgentRuntimeModelOverrides & { directApiKey?: boolean },
+    ): TranscriptPolicy;
+  };
+  delivery: AgentRuntimeDeliveryPlan;
+  outcome: {
+    classifyRunResult: (params: {
+      provider: string;
+      model: string;
+      result: unknown;
+      hasDirectlySentBlockReply?: boolean;
+      hasBlockReplyPipelineOutput?: boolean;
+    }) => ModelFallbackResultClassification;
+  };
+  transport: {
+    extraParams: Record<string, unknown>;
+    resolveExtraParams(params?: {
+      extraParamsOverride?: Record<string, unknown>;
+      thinkingLevel?: AgentRuntimeThinkLevel;
+      agentId?: string;
+      workspaceDir?: string;
+      model?: AgentRuntimeModel;
+      resolvedTransport?: AgentRuntimeTransport;
+    }): Record<string, unknown>;
+  };
+  observability: AgentRuntimeResolvedRef & {
+    resolvedRef: string;
     authProfileId?: string;
-    transport?: AgentRuntimeTransport;
   };
 };
 
 export type BuildAgentRuntimeDeliveryPlanParams = {
-  config?: AgentRuntimeConfig;
+  config?: unknown;
   workspaceDir?: string;
   agentDir?: string;
   provider: string;
   modelId: string;
-  providerRuntimeHandle?: AgentRuntimeProviderHandle;
+  providerRuntimeHandle?: PreparedAgentRuntimeProviderHandle;
 };
 
-export type BuildAgentRuntimePlanParams = {
-  config?: AgentRuntimeConfig;
-  workspaceDir?: string;
-  agentDir?: string;
-  provider: string;
-  modelId: string;
+export type BuildAgentRuntimePlanParams = BuildAgentRuntimeDeliveryPlanParams & {
+  /** Current transport/auth config; prompt and tool policy retain the admitted config. */
+  transportConfig?: unknown;
   model?: AgentRuntimeModel;
   modelApi?: string | null;
   harnessId?: string;
   harnessRuntime?: string;
   allowHarnessAuthProfileForwarding?: boolean;
+  /** Canonical route/auth decision prepared before attempt orchestration. */
+  preparedAuthPlan?: AgentRuntimeAuthPlan;
   authProfileProvider?: string;
   authProfileMode?: string;
   sessionAuthProfileId?: string;
+  sessionAuthProfileSource?: "auto" | "user" | "user-link";
   sessionAuthProfileCandidateIds?: string[];
+  authProfileStore?: AuthProfileStore;
+  modelRoute?: AgentRuntimeAuthModelRoute;
   agentId?: string;
   thinkingLevel?: AgentRuntimeThinkLevel;
   extraParamsOverride?: Record<string, unknown>;
   resolvedTransport?: AgentRuntimeTransport;
-  providerRuntimeHandle?: AgentRuntimeProviderHandle;
+  /** Omit only when a standalone caller intentionally resolves provider hooks lazily. */
+  providerRuntimeHandle?: PreparedAgentRuntimeProviderHandle;
+  /** Lifecycle-owned plugin metadata prepared before the attempt starts. */
+  metadataSnapshot?: AgentRuntimePreparedMetadataSnapshot;
 };

@@ -1,948 +1,1140 @@
+// Legacy config migration tests cover generic doctor repair of old config layouts.
+
+import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it } from "vitest";
-import type { OpenClawConfig } from "../../../config/types.js";
-import { LEGACY_CONFIG_MIGRATIONS } from "./legacy-config-migrations.js";
+import { setConfigValueAtPath } from "../../../config/config-paths.js";
+import { findLegacyConfigIssues } from "../../../config/legacy.js";
+import { legacyCodexProviderIdentityKey } from "./codex-route-model-ref.js";
+import { pruneBindingsForMissingAgents } from "./legacy-config-binding-repair.js";
+import { migrateLegacyConfigForTest as migrate } from "./legacy-config-migrate.apply.test-support.js";
+import { collectBlockedLegacyOpenAICodexProviderPlan } from "./legacy-config-migrations.runtime.models.js";
 
-function migrateLegacyConfigForTest(raw: unknown): {
-  config: OpenClawConfig | null;
-  changes: string[];
-} {
-  if (!raw || typeof raw !== "object") {
-    return { config: null, changes: [] };
-  }
-  const next = structuredClone(raw) as Record<string, unknown>;
+function repairBindingsForTest<T extends object>(config: T) {
   const changes: string[] = [];
-  for (const migration of LEGACY_CONFIG_MIGRATIONS) {
-    migration.apply(next, changes);
+  return { config: pruneBindingsForMissingAgents(config, changes), changes };
+}
+
+function binding(agentId: string) {
+  return { agentId, match: { channel: "discord" } };
+}
+
+function issuePaths(raw: unknown) {
+  return findLegacyConfigIssues(raw).map((issue) => issue.path);
+}
+
+function migratePaths(paths: Record<string, unknown>) {
+  return migrate(configAt(paths));
+}
+
+function configAt(paths: Record<string, unknown>) {
+  const raw: Record<string, unknown> = {};
+  for (const [path, value] of Object.entries(paths)) {
+    setConfigValueAtPath(raw, path.split("."), value);
   }
-  return changes.length === 0
-    ? { config: null, changes }
-    : { config: next as OpenClawConfig, changes };
+  return raw;
 }
 
-function expectMigrationChangesToIncludeFragments(changes: string[], fragments: string[]): void {
-  const unmatchedFragments = fragments.filter((fragment) =>
-    changes.every((change) => !change.includes(fragment)),
+it("preserves session typing precedence over an existing agent default", () => {
+  const res = migratePaths({
+    "agents.defaults.typingMode": "message",
+    "session.typingMode": "thinking",
+  });
+  expect(res.config?.agents?.defaults?.typingMode).toBe("thinking");
+  expect(res.config?.session).toEqual({});
+});
+
+it("removes deprecated session.maintenance.rotateBytes", () => {
+  const maintenance = { mode: "enforce", pruneAfter: "30d", maxEntries: 500 };
+  const res = migratePaths({ "session.maintenance": { ...maintenance, rotateBytes: "10mb" } });
+  expect(res.config?.session?.maintenance).toEqual(maintenance);
+});
+
+it("removes cron.runLog while preserving current cron config", () => {
+  const raw = { cron: { enabled: true, runLog: { maxBytes: "2mb", keepLines: 100 } } };
+  expect(issuePaths(raw)).toContain("cron.runLog");
+  expect(migrate(raw).config?.cron).toEqual({ enabled: true });
+});
+
+it("collapses split spawn flags per scope and resolves conflicts conservatively", () => {
+  const bindings = { spawnSubagentSessions: true, spawnAcpSessions: true };
+  const res = migratePaths({
+    "channels.discord.threadBindings": { enabled: true, ...bindings },
+    "channels.discord.accounts.work.threadBindings": { ...bindings, spawnAcpSessions: false },
+  });
+  expect(res.config).toHaveProperty("channels.discord.threadBindings", {
+    enabled: true,
+    spawnSessions: true,
+  });
+  expect(res.config).toHaveProperty("channels.discord.accounts.work.threadBindings", {
+    spawnSessions: false,
+  });
+});
+
+it("strips explicit bundled discovery mode after machine-state capture", () => {
+  expect(
+    migrate({ plugins: { allow: ["telegram"], bundledDiscovery: "allowlist" } }).config,
+  ).toEqual({ plugins: { allow: ["telegram"] } });
+});
+
+it("removes a zero port and its empty gateway section", () => {
+  expect(migrate({ gateway: { port: 0 } }).config).toEqual({});
+});
+
+it("preserves Qwen params when their destination cannot be written", () => {
+  const models = { "vllm/Qwen/model": { params: { qwenThinkingFormat: "chat-template" } } };
+  const res = migratePaths({
+    "agents.defaults.models": models,
+    "models.providers.vllm": "malformed",
+  });
+  expect(res.config?.models?.providers?.vllm).toBe("malformed");
+  expect(res.config?.agents?.defaults?.models).toEqual(models);
+});
+
+it("removes only invalid thinking formats across provider catalogs", () => {
+  const valid = { id: "valid", compat: { thinkingFormat: "qwen-chat-template" } };
+  const res = migrateProviderConfig({
+    bailian: {
+      models: [
+        valid,
+        { id: "legacy", compat: { thinkingFormat: "old-bailian", supportsTools: true } },
+      ],
+    },
+  });
+  expect(res.config?.models?.providers?.bailian?.models).toEqual([
+    valid,
+    { id: "legacy", compat: { supportsTools: true } },
+  ]);
+  expect(migrate(res.config)).toEqual({ config: null, changes: [] });
+});
+
+it.each([
+  {
+    name: "implicit main exists but uppercase MAIN and missing agents are pruned",
+    list: [{ id: "ALPHA" }],
+    bindings: ["main", "alpha", "MAIN", "ghost"].map(binding),
+    expected: ["main", "alpha"].map(binding),
+    changes: ["Removed 2 bindings that referenced missing agents.list ids."],
+  },
+  {
+    name: "malformed roster leaves bindings untouched",
+    list: [null, { id: 1 }, { id: "alpha" }],
+    bindings: ["ghost", "alpha"].map(binding),
+    expected: ["ghost", "alpha"].map(binding),
+    changes: [],
+  },
+])("repairs bindings: $name", ({ list, bindings, expected, changes }) => {
+  const res = repairBindingsForTest({ agents: { list }, bindings });
+  expect(res.config.bindings).toEqual(expected);
+  expect(res.changes).toEqual(changes);
+});
+
+function migrateProviderConfig(providers: Record<string, unknown>) {
+  return migrate({ models: { providers } });
+}
+
+function codexProvider(overrides: Record<string, unknown> = {}) {
+  return {
+    api: "openai-chatgpt-responses",
+    baseUrl: "https://chatgpt.com/backend-api",
+    ...overrides,
+  };
+}
+
+function browserSandbox(browser: Record<string, unknown>) {
+  return { sandbox: { browser } };
+}
+
+function modelMapConfig(models: Record<string, unknown>) {
+  return configAt({ "agents.defaults.models": models });
+}
+
+const supervision = {
+  endpoints: [{ id: "local", transport: "stdio-proxy", command: "codex" }],
+  allowRawTranscripts: true,
+  allowWriteControls: true,
+};
+
+function qwenModel(id: string, thinkingFormat: string, extra: Record<string, unknown> = {}) {
+  return { id, reasoning: true, compat: { thinkingFormat }, ...extra };
+}
+
+function selection(primary: string, ...fallbacks: string[]) {
+  return { primary, fallbacks };
+}
+
+describe("legacy Codex provider config migrate", () => {
+  it("moves legacy OpenAI Codex provider config to canonical OpenAI provider config", () => {
+    const provider = {
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+      api: "openai-chatgpt-responses",
+      models: [{ id: "gpt-5.5", name: "GPT-5.5", api: "openai-chatgpt-responses" }],
+    };
+    const res = migrateProviderConfig({ "openai-codex": provider });
+    expect(res.config?.models?.providers?.openai).toEqual(provider);
+    expect(res.config?.models?.providers).not.toHaveProperty("openai-codex");
+  });
+
+  it("normalizes moved shipped codex model auto runtime and preserves explicit overrides", () => {
+    const res = migrateProviderConfig({
+      codex: {
+        models: [
+          { id: "gpt-missing" },
+          { id: "gpt-auto", agentRuntime: { id: "auto" } },
+          { id: "gpt-openclaw", agentRuntime: { id: "openclaw" } },
+        ],
+      },
+    });
+
+    expect(res.config?.models?.providers?.openai?.models).toEqual([
+      { id: "gpt-missing", agentRuntime: { id: "codex" } },
+      { id: "gpt-auto", agentRuntime: { id: "codex" } },
+      { id: "gpt-openclaw", agentRuntime: { id: "openclaw" } },
+    ]);
+    expect(res.config?.models?.providers).not.toHaveProperty("codex");
+  });
+
+  it.each([
+    {
+      name: "provider-scoped auth cannot be moved",
+      openai: {
+        models: [{ id: "text-embedding-3-small" }],
+      },
+      codex: {
+        auth: "oauth",
+        headers: { Authorization: "Bearer synthetic" },
+        api: "openai-chatgpt-responses",
+        models: [{ id: "gpt-5.6-sol", api: "openai-chatgpt-responses" }],
+      },
+      warning: "models.providers.codex cannot be merged automatically",
+    },
+    {
+      name: "same-id models are not equivalent",
+      openai: {
+        apiKey: "placeholder",
+        models: [
+          {
+            id: "gpt-5.6-sol",
+            api: "openai-responses",
+            baseUrl: "https://api.openai.com/v1",
+          },
+        ],
+      },
+      codex: {
+        api: "openai-chatgpt-responses",
+        baseUrl: "https://chatgpt.com/backend-api",
+        models: [{ id: "gpt-5.6-sol" }, { id: "gpt-5.4-mini" }],
+      },
+      warning: "colliding model definitions differ for: gpt-5.6-sol",
+    },
+  ])(
+    "keeps conflicting shipped codex config for manual review: $name",
+    ({ openai, codex, warning }) => {
+      const res = migrateProviderConfig({ openai, codex });
+      expect(res.config?.models?.providers).toEqual({ openai, codex });
+      const plan = collectBlockedLegacyOpenAICodexProviderPlan(res.config);
+      expect(plan.warning).toEqual(expect.stringContaining(warning));
+      expect(plan.blockedModelIdentities).toEqual([
+        expectDefined(
+          legacyCodexProviderIdentityKey("codex"),
+          "blocked provider namespace test invariant",
+        ),
+      ]);
+    },
   );
-  expect(unmatchedFragments).toStrictEqual([]);
-}
 
-describe("legacy silent reply config migrate", () => {
-  it("removes silent reply rewrite and direct-chat silent reply config", () => {
-    const res = migrateLegacyConfigForTest({
-      agents: {
-        defaults: {
-          silentReply: {
-            direct: "allow",
-            group: "allow",
-            internal: "allow",
-          },
-          silentReplyRewrite: {
-            direct: true,
-            group: false,
-          },
-        },
-      },
-      surfaces: {
-        telegram: {
-          silentReply: {
-            direct: "disallow",
-            group: "allow",
-          },
-          silentReplyRewrite: {
-            direct: true,
-          },
-        },
-      },
+  it("removes equivalent same-id shipped codex models", () => {
+    const model = {
+      id: "gpt-5.6-sol",
+      ...codexProvider(),
+      agentRuntime: { id: "codex" },
+    };
+    const res = migrateProviderConfig({
+      openai: { models: [model] },
+      codex: codexProvider({ models: [{ id: "gpt-5.6-sol" }] }),
     });
 
-    expect(res.config?.agents?.defaults?.silentReply).toEqual({
-      group: "allow",
-      internal: "allow",
-    });
-    expect(res.config?.agents?.defaults).not.toHaveProperty("silentReplyRewrite");
-    expect(res.config?.surfaces?.telegram?.silentReply).toEqual({ group: "allow" });
-    expect(res.config?.surfaces?.telegram).not.toHaveProperty("silentReplyRewrite");
-    expectMigrationChangesToIncludeFragments(res.changes, [
-      "Removed agents.defaults.silentReply.direct",
-      "Removed agents.defaults.silentReplyRewrite",
-      "Removed surfaces.telegram.silentReply.direct",
-      "Removed surfaces.telegram.silentReplyRewrite",
-    ]);
+    expect(res.config?.models?.providers).not.toHaveProperty("codex");
+    expect(res.config?.models?.providers?.openai?.models).toEqual([model]);
   });
 
-  it("removes malformed silent reply rewrite keys by presence", () => {
-    const res = migrateLegacyConfigForTest({
-      agents: {
-        defaults: {
-          silentReplyRewrite: true,
-        },
+  it("preserves model-scoped defaults and overrides when merging legacy providers", () => {
+    const defaults = codexProvider({
+      contextWindow: 200000,
+      contextTokens: 180000,
+      maxTokens: 8192,
+      params: { store: false, reasoning: { effort: "medium" } },
+      agentRuntime: { id: "codex" },
+    });
+    const embedding = {
+      id: "text-embedding-3-small",
+      name: "Chat",
+      api: "openai-chatgpt-responses",
+    };
+    const res = migrateProviderConfig({
+      "openai-codex": {
+        ...defaults,
+        models: [
+          {
+            id: "gpt-5.5",
+            name: "Chat",
+            params: { reasoning: { effort: "high" }, verbosity: "low" },
+          },
+          { id: "gpt-5.4" },
+        ],
       },
-      surfaces: {
-        telegram: {
-          silentReplyRewrite: false,
-        },
+      openai: {
+        api: "openai-chatgpt-responses",
+        baseUrl: "https://api.openai.com/v1",
+        models: [embedding],
       },
     });
+    expect(res.config?.models?.providers).not.toHaveProperty("openai-codex");
+    expect(res.config?.models?.providers?.openai).toEqual({
+      api: "openai-chatgpt-responses",
+      baseUrl: "https://api.openai.com/v1",
+      models: [
+        embedding,
+        {
+          ...defaults,
+          id: "gpt-5.5",
+          name: "Chat",
+          params: { store: false, reasoning: { effort: "high" }, verbosity: "low" },
+        },
+        { ...defaults, id: "gpt-5.4" },
+      ],
+    });
+  });
 
-    expect(res.config?.agents?.defaults).not.toHaveProperty("silentReplyRewrite");
-    expect(res.config?.surfaces?.telegram).not.toHaveProperty("silentReplyRewrite");
-    expectMigrationChangesToIncludeFragments(res.changes, [
-      "Removed agents.defaults.silentReplyRewrite",
-      "Removed surfaces.telegram.silentReplyRewrite",
+  it("preserves legacy models-add metadata marker when merging codex models", () => {
+    const model = {
+      id: "gpt-5.5",
+      api: "openai-chatgpt-responses",
+      reasoning: true,
+      input: ["text", "image"],
+      cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+      contextWindow: 400_000,
+      contextTokens: 272_000,
+      maxTokens: 128_000,
+    };
+    const res = migrateProviderConfig({
+      openai: {
+        api: "openai-chatgpt-responses",
+        baseUrl: "https://api.openai.com/v1",
+        models: [{ id: "text-embedding-3-small" }],
+      },
+      "openai-codex": codexProvider({ models: [model] }),
+    });
+
+    const openai = res.config?.models?.providers?.openai as Record<string, unknown> | undefined;
+    expect(openai?.models).toEqual([
+      { id: "text-embedding-3-small" },
+      {
+        ...model,
+        baseUrl: "https://chatgpt.com/backend-api",
+        metadataSource: "models-add",
+      },
     ]);
+    expect(res.config?.models?.providers).not.toHaveProperty("openai-codex");
+  });
+
+  it("does not report a fixable legacy issue after blocked codex merge normalization already ran", () => {
+    const raw = configAt({
+      "models.providers.openai.api": "openai-chatgpt-responses",
+      "models.providers.openai.baseUrl": "https://api.openai.com/v1",
+      "models.providers.openai.apiKey": "placeholder",
+      "models.providers.openai.params.store": true,
+      "models.providers.openai.request.retry.maxAttempts": 1,
+      "models.providers.openai.models": [{ id: "text-embedding-3-small" }],
+      "models.providers.openai-codex.api": "openai-chatgpt-responses",
+      "models.providers.openai-codex.baseUrl": "https://chatgpt.com/backend-api",
+      "models.providers.openai-codex.models": [{ id: "gpt-5.5", api: "openai-chatgpt-responses" }],
+    });
+    const res = migrate(raw);
+
+    expect(res.config?.models).toEqual(raw.models);
+    expect(res.config?.agents?.defaults?.model).toEqual({
+      primary: "openai/text-embedding-3-small",
+    });
+    expect(collectBlockedLegacyOpenAICodexProviderPlan(res.config).blockedModelIdentities).toEqual([
+      expectDefined(legacyCodexProviderIdentityKey("openai-codex"), "blocked legacy namespace"),
+    ]);
+    expect(migrate(res.config)).toEqual({ config: null, changes: [] });
+    expect(issuePaths(raw)).not.toContain("models.providers");
   });
 });
 
-describe("legacy session maintenance migrate", () => {
-  it("removes deprecated session.maintenance.rotateBytes", () => {
-    const res = migrateLegacyConfigForTest({
-      session: {
-        maintenance: {
-          mode: "enforce",
-          pruneAfter: "30d",
-          maxEntries: 500,
-          rotateBytes: "10mb",
-        },
-      },
-    });
-
-    expect(res.config?.session?.maintenance).toEqual({
-      mode: "enforce",
-      pruneAfter: "30d",
-      maxEntries: 500,
-    });
-    expect(res.changes).toStrictEqual(["Removed deprecated session.maintenance.rotateBytes."]);
+it("removes retired silent reply config and preserves channel group policy", () => {
+  const res = migratePaths({
+    "agents.defaults.silentReply": { group: "allow", internal: "allow" },
+    "surfaces.telegram": { silentReply: { group: "disallow", internal: "disallow" } },
   });
+  expect(res.config?.agents?.defaults).toEqual({ silentReply: { group: "allow" } });
+  expect(res.config?.surfaces?.telegram).toEqual({ silentReply: { group: "disallow" } });
+  expect(findLegacyConfigIssues(res.config)).toEqual([]);
+  expect(migrate(res.config)).toEqual({ config: null, changes: [] });
 });
 
-describe("legacy session parent fork migrate", () => {
-  it("removes legacy session.parentForkMaxTokens", () => {
-    const res = migrateLegacyConfigForTest({
-      session: {
-        store: "sessions.json",
-        parentForkMaxTokens: 200_000,
+describe("profile configured tool section migrate", () => {
+  it.each([
+    {
+      name: "configured sections alone",
+      tools: {
+        profile: "messaging",
+        alsoAllow: ["read", "write"],
+        exec: { security: "allowlist" },
+        fs: { workspaceOnly: true },
+        byProvider: { openai: { profile: "messaging" } },
       },
-    });
-
-    expect(res.config?.session).toEqual({
-      store: "sessions.json",
-    });
-    expect(res.changes).toStrictEqual([
-      "Removed session.parentForkMaxTokens; parent fork sizing is automatic.",
-    ]);
-  });
-});
-
-describe("legacy diagnostics memory pressure snapshot migrate", () => {
-  it("renames the boolean toggle", () => {
-    const res = migrateLegacyConfigForTest({
-      diagnostics: {
-        enabled: true,
-        memoryPressureBundle: false,
+      agents: { list: [{ id: "sage", tools: { exec: { security: "allowlist" } } }] },
+    },
+    {
+      name: "unrelated allowlists and top-level provider profiles",
+      tools: {
+        profile: "messaging",
+        allow: ["message", "sessions_*", "gmail_search"],
+        exec: { security: "allowlist" },
+        byProvider: { openai: { allow: ["message", "exec", "process"] } },
       },
-    });
-
-    expect(res.config?.diagnostics).toEqual({
-      enabled: true,
-      memoryPressureSnapshot: false,
-    });
-    expect(res.changes).toStrictEqual([
-      "Moved diagnostics.memoryPressureBundle → memoryPressureSnapshot.",
-    ]);
+    },
+  ])("does not infer configured-section grants from $name", ({ tools, agents }) => {
+    const raw = { tools, ...(agents ? { agents } : {}) };
+    expect(migrate(raw)).toEqual({ config: null, changes: [] });
+    expect(issuePaths(raw)).not.toContain("tools");
+    if (agents) {
+      expect(issuePaths(raw)).toContain("agents.list");
+    }
   });
 
-  it("preserves the renamed toggle when both keys are present", () => {
-    const res = migrateLegacyConfigForTest({
-      diagnostics: {
-        memoryPressureBundle: false,
-        memoryPressureSnapshot: true,
+  it("repairs explicit grants per scope without broadening wildcard or alsoAllow intent", () => {
+    const res = migratePaths({
+      "tools.profile": "messaging",
+      "tools.allow": ["message", "exec", "process"],
+      "tools.alsoAllow": ["browser"],
+      "tools.exec": { security: "allowlist" },
+      "tools.byProvider": {
+        openai: { profile: "messaging", allow: ["message", "exec", "process"] },
       },
-    });
-
-    expect(res.config?.diagnostics).toEqual({
-      memoryPressureSnapshot: true,
-    });
-    expect(res.changes).toStrictEqual([
-      "Removed diagnostics.memoryPressureBundle (memoryPressureSnapshot already set).",
-    ]);
-  });
-
-  it("moves nested enabled to the renamed boolean", () => {
-    const res = migrateLegacyConfigForTest({
-      diagnostics: {
-        enabled: true,
-        memoryPressureBundle: {
-          enabled: false,
+      "agents.list": [
+        {
+          id: "direct",
+          tools: { allow: ["message", "exec", "process"], exec: { security: "allowlist" } },
         },
-      },
-    });
-
-    expect(res.config?.diagnostics).toEqual({
-      enabled: true,
-      memoryPressureSnapshot: false,
-    });
-    expect(res.changes).toStrictEqual([
-      "Moved diagnostics.memoryPressureBundle → memoryPressureSnapshot.",
-    ]);
-  });
-
-  it("moves empty object form to the renamed default boolean", () => {
-    const res = migrateLegacyConfigForTest({
-      diagnostics: {
-        memoryPressureBundle: {},
-      },
-    });
-
-    expect(res.config?.diagnostics).toEqual({
-      memoryPressureSnapshot: true,
-    });
-    expect(res.changes).toStrictEqual([
-      "Moved diagnostics.memoryPressureBundle → memoryPressureSnapshot.",
-    ]);
-  });
-});
-
-describe("legacy thread binding spawn migrate", () => {
-  it("moves matching split spawn flags to unified spawnSessions", () => {
-    const res = migrateLegacyConfigForTest({
-      channels: {
-        discord: {
-          threadBindings: {
-            enabled: true,
-            spawnSubagentSessions: true,
-            spawnAcpSessions: true,
-          },
+        {
+          id: "also",
+          tools: { allow: ["message"], alsoAllow: ["exec"], exec: { security: "allowlist" } },
         },
-      },
+        {
+          id: "broad",
+          tools: { profile: "messaging", allow: ["*"], exec: { security: "allowlist" } },
+        },
+      ],
     });
-
-    expect(res.config?.channels?.discord?.threadBindings).toEqual({
-      enabled: true,
-      spawnSessions: true,
+    expect(res.config?.tools).toEqual({
+      profile: "full",
+      allow: ["message", "browser", "exec", "process"],
+      exec: { security: "allowlist" },
+      byProvider: { openai: { profile: "full", allow: ["message", "exec", "process"] } },
     });
-    expect(res.changes).toStrictEqual([
-      "Moved channels.discord.threadBindings.spawnSubagentSessions/spawnAcpSessions → channels.discord.threadBindings.spawnSessions (true).",
-    ]);
+    expect(res.config?.agents?.entries?.direct?.tools).toEqual({
+      profile: "full",
+      allow: ["message", "exec", "process"],
+      exec: { security: "allowlist" },
+    });
+    expect(res.config?.agents?.entries?.also?.tools).toEqual({
+      profile: "full",
+      allow: ["message", "exec"],
+      exec: { security: "allowlist" },
+    });
+    const broad = res.config?.agents?.entries?.broad?.tools;
+    expect(broad?.profile).toBe("full");
+    expect(broad?.allow).toEqual(expect.arrayContaining(["message", "exec", "process"]));
+    expect(broad?.allow).not.toContain("*");
+    expect(broad?.allow).not.toContain("read");
   });
 
-  it("collapses conflicting split spawn flags conservatively", () => {
-    const res = migrateLegacyConfigForTest({
-      channels: {
-        discord: {
-          accounts: {
-            work: {
-              threadBindings: {
-                spawnSubagentSessions: true,
-                spawnAcpSessions: false,
-              },
-            },
-          },
-        },
-      },
-    });
-
-    expect(
-      res.config?.channels?.discord?.accounts?.work?.threadBindings as Record<string, unknown>,
-    ).toEqual({
-      spawnSessions: false,
-    });
-    expect(res.changes).toStrictEqual([
-      "Collapsed conflicting channels.discord.accounts.work.threadBindings.spawnSubagentSessions/spawnAcpSessions → channels.discord.accounts.work.threadBindings.spawnSessions (false).",
-    ]);
-  });
-});
-
-describe("legacy message queue mode migrate", () => {
-  it("moves retired queue steering modes to followup mode", () => {
-    const res = migrateLegacyConfigForTest({
-      messages: {
-        queue: {
-          mode: "queue",
-          byChannel: {
-            discord: "steer-backlog",
-            telegram: "collect",
-            slack: "steer",
-          },
-        },
-      },
-    });
-
-    expect(res.config?.messages?.queue).toEqual({
-      mode: "steer",
-      byChannel: {
-        discord: "followup",
-        telegram: "collect",
-        slack: "steer",
-      },
-    });
-    expect(res.changes).toContain(
-      'Moved deprecated messages.queue.mode "queue" → "steer"; use "steer" for default active-run steering.',
+  it("ignores blocked inherited provider keys while resolving provider repairs", () => {
+    const raw = JSON.parse(
+      '{"tools":{"byProvider":{"__proto__":{"profile":"messaging"},"qwen":{"profile":"messaging"}}},"agents":{"list":[{"id":"sage","tools":{"exec":{"security":"allowlist"},"byProvider":{"qwen/qwen-plus":{"allow":["message","exec","process"]}}}}]}}',
     );
-    expect(res.changes).toContain(
-      'Moved deprecated messages.queue.byChannel.discord "steer-backlog" → "followup"; use "steer" for default active-run steering.',
+    const res = migrate(raw);
+
+    expect(Object.prototype).not.toHaveProperty("profile");
+    expect(res.config?.agents?.entries?.sage?.tools?.byProvider?.["qwen/qwen-plus"]?.allow).toEqual(
+      ["message", "exec", "process"],
+    );
+    expect(res.config?.agents?.entries?.sage?.tools?.byProvider?.["qwen/qwen-plus"]?.profile).toBe(
+      "full",
     );
   });
+});
+
+it.each([
+  {
+    name: "OTLP logs",
+    protocol: "grpc",
+    logsExporter: "otlp",
+    enabled: false,
+  },
+  {
+    name: "config-interpolated grpc with working stdout logs",
+    protocol: "${OTEL_PROTOCOL}",
+    logsExporter: "stdout",
+    enabled: true,
+  },
+])(
+  "removes unsupported grpc without disabling working signals: $name",
+  ({ logsExporter, protocol, enabled }) => {
+    const otel = { enabled: true, traces: false, metrics: false, logs: true, logsExporter };
+    const authored = { diagnostics: { otel: { ...otel, protocol } } };
+    const resolved = { diagnostics: { otel: { ...otel, protocol: "grpc" } } };
+    const res = migrate(
+      authored,
+      protocol === "grpc"
+        ? undefined
+        : {
+            authoredRaw: authored,
+            resolvedRaw: resolved,
+          },
+    );
+    expect(res.config?.diagnostics?.otel).toEqual({ ...otel, enabled });
+  },
+);
+
+it.each([
+  {
+    name: "automatic route cleanup preserves siblings",
+    tailscale: { mode: "serve", resetOnExit: true, preserveFunnel: true },
+    retiredKey: "resetOnExit",
+    expected: { mode: "serve", preserveFunnel: true },
+    message: expect.stringContaining("managed Tailscale routes now end automatically"),
+  },
+  {
+    name: "managed Service disables ingress until the operator chooses a device route",
+    tailscale: { mode: "serve", serviceName: "svc:openclaw" },
+    retiredKey: "serviceName",
+    expected: { mode: "off" },
+    message: expect.stringMatching(/serviceName.*mode=off.*tailscale serve clear/s),
+  },
+  {
+    name: "ignored Service preserves Funnel",
+    tailscale: { mode: "funnel", serviceName: "svc:ignored" },
+    retiredKey: "serviceName",
+    expected: { mode: "funnel" },
+    message: expect.stringContaining("current Tailscale mode is unchanged"),
+  },
+])("removes retired Tailscale settings: $name", ({ tailscale, retiredKey, expected, message }) => {
+  const raw = { gateway: { bind: "loopback", tailscale } };
+  expect(issuePaths(raw)).toContain(`gateway.tailscale.${retiredKey}`);
+  const res = migrate(raw);
+  expect(res.config?.gateway?.tailscale).toEqual(expected);
+  expect(res.changes).toEqual([message]);
+  expect(migrate(res.config)).toEqual({ config: null, changes: [] });
 });
 
 describe("legacy migrate audio transcription", () => {
-  it("does not rewrite removed routing.transcribeAudio migrations", () => {
-    const res = migrateLegacyConfigForTest({
-      routing: {
-        transcribeAudio: {
-          command: ["whisper", "--model", "base"],
-          timeoutSeconds: 2,
-        },
-      },
-    });
-
-    expect(res.changes).toStrictEqual([]);
-    expect(res.config).toBeNull();
-  });
-
-  it("does not rewrite removed routing.transcribeAudio migrations when new config exists", () => {
-    const res = migrateLegacyConfigForTest({
-      routing: {
-        transcribeAudio: {
-          command: ["whisper", "--model", "tiny"],
-        },
-      },
-      tools: {
-        media: {
-          audio: {
-            models: [{ command: "existing", type: "cli" }],
-          },
-        },
-      },
-    });
-
-    expect(res.changes).toStrictEqual([]);
-    expect(res.config).toBeNull();
-  });
-
   it("drops invalid audio.transcription payloads", () => {
-    const res = migrateLegacyConfigForTest({
-      audio: {
-        transcription: {
-          command: [{}],
-        },
-      },
+    const raw = configAt({
+      "audio.transcription.command": [{}],
     });
 
-    expect(res.changes).toStrictEqual(["Removed audio.transcription (invalid or empty command)."]);
-    expect(res.config?.audio).toBeUndefined();
-    expect(res.config?.tools?.media?.audio).toBeUndefined();
+    expect(findLegacyConfigIssues(raw)).toEqual([
+      {
+        path: "audio.transcription",
+        message: "Use a capability-tagged tools.media.models entry instead.",
+      },
+    ]);
+    const res = migrate(raw);
+    expect(res.config).toEqual({});
   });
 
   it("rewrites legacy audio {input} placeholders to media templates", () => {
-    const res = migrateLegacyConfigForTest({
-      audio: {
-        transcription: {
-          command: ["whisper-cli", "--model", "small", "{input}", "--input={input}"],
-          timeoutSeconds: 30,
-        },
-      },
+    const raw = configAt({
+      "tools.media.models": [{ provider: "openai", model: "vision", capabilities: ["image"] }],
+      "tools.media.audio.models": [
+        { provider: "openai", model: "vision", capabilities: ["image"] },
+      ],
+      "audio.transcription.command": [
+        "whisper-cli",
+        "--model",
+        "small",
+        "{input}",
+        "--input={input}",
+      ],
+      "audio.transcription.timeoutSeconds": 30,
     });
 
-    expect(res.changes).toStrictEqual(["Moved audio.transcription → tools.media.audio.models."]);
-    expect(res.config?.audio).toBeUndefined();
-    expect(res.config?.tools?.media?.audio?.models).toEqual([
+    expect(issuePaths(raw)).toContain("audio.transcription");
+    const res = migrate(raw);
+    expect(res.config).not.toHaveProperty("audio");
+    expect(res.config?.tools?.media?.models).toEqual([
+      { provider: "openai", model: "vision", capabilities: ["image"] },
       {
         type: "cli",
         command: "whisper-cli",
-        args: ["--model", "small", "{{MediaPath}}", "--input={{MediaPath}}"],
+        args: ["--model", "small", "{{AttachmentPath}}", "--input={{AttachmentPath}}"],
         timeoutSeconds: 30,
+        capabilities: ["audio"],
       },
     ]);
+    expect(res.config?.tools?.media?.audio).toEqual({
+      enabled: true,
+      preferredModel: "cli:whisper-cli",
+    });
   });
 });
 
-describe("legacy migrate mention routing", () => {
-  it("moves legacy routing group chat settings into current channel and message config", () => {
-    const res = migrateLegacyConfigForTest({
-      routing: {
-        allowFrom: ["+15550001111"],
-        groupChat: {
-          requireMention: false,
-          historyLimit: 12,
-          mentionPatterns: ["@openclaw"],
-        },
-      },
-      channels: {
-        whatsapp: {},
-        telegram: {
-          groups: {
-            "*": { requireMention: true },
-          },
-        },
-        imessage: {},
-      },
+describe("legacy sandbox config migrate", () => {
+  it("disables the default sandbox browser network without granting inherited egress", () => {
+    const disabled = { enabled: false, network: "openclaw-sandbox-browser" };
+    const raw = configAt({
+      "agents.ownership": "explicit",
+      "agents.defaults": browserSandbox({ enabled: true, network: " NONE ", autoStart: false }),
+      "agents.entries.main": browserSandbox({ enabled: true, network: "none", headless: true }),
+      "agents.entries.inherited": browserSandbox({ enabled: true, headless: true }),
+      "agents.entries.isolated": browserSandbox({ network: "isolated-browser-net" }),
+      "agents.entries.blankEnabled": browserSandbox({ enabled: true, network: "   " }),
+      "agents.entries.blankInherited": browserSandbox({ network: "" }),
     });
 
-    const migratedConfig = res.config as Record<string, unknown> | null;
-    expect(migratedConfig?.routing).toBeUndefined();
-    expect(res.config?.channels?.whatsapp?.allowFrom).toEqual(["+15550001111"]);
-    expect(res.config?.channels?.whatsapp?.groups).toEqual({
-      "*": { requireMention: false },
+    expect(issuePaths(raw)).toEqual(["agents.defaults.sandbox.browser.network", "agents"]);
+    const res = migrate(raw);
+
+    expect(res.config?.agents?.defaults?.sandbox?.browser).toEqual({
+      ...disabled,
+      autoStart: false,
     });
-    expect(res.config?.channels?.telegram?.groups).toEqual({
-      "*": { requireMention: true },
-    });
-    expect(res.config?.channels?.imessage?.groups).toEqual({
-      "*": { requireMention: false },
-    });
-    expect(res.config?.messages?.groupChat).toEqual({
-      historyLimit: 12,
-      mentionPatterns: ["@openclaw"],
-    });
-    expect(res.changes).toStrictEqual([
-      "Moved routing.allowFrom → channels.whatsapp.allowFrom.",
-      'Moved routing.groupChat.requireMention → channels.whatsapp.groups."*".requireMention.',
-      'Removed routing.groupChat.requireMention (channels.telegram.groups."*" already set).',
-      'Moved routing.groupChat.requireMention → channels.imessage.groups."*".requireMention.',
-      "Moved routing.groupChat.historyLimit → messages.groupChat.historyLimit.",
-      "Moved routing.groupChat.mentionPatterns → messages.groupChat.mentionPatterns.",
-    ]);
+    for (const [id, expected] of Object.entries({
+      main: { ...disabled, headless: true },
+      inherited: { enabled: false, headless: true },
+      isolated: { enabled: true, network: "isolated-browser-net" },
+      blankEnabled: { enabled: true, network: "   " },
+      blankInherited: { enabled: true, network: "" },
+    })) {
+      expect(res.config?.agents?.entries?.[id]?.sandbox?.browser).toEqual(expected);
+    }
+    expect(migrate(res.config)).toEqual({ config: null, changes: [] });
   });
 
-  it("removes legacy routing requireMention when no compatible channel exists", () => {
-    const res = migrateLegacyConfigForTest({
-      routing: {
-        groupChat: {
-          requireMention: true,
-        },
-      },
-    });
-
-    const migratedConfig = res.config as Record<string, unknown> | null;
-    expect(migratedConfig?.routing).toBeUndefined();
-    expect(res.changes).toEqual([
-      "Removed routing.groupChat.requireMention (no configured WhatsApp, Telegram, or iMessage channel found).",
-    ]);
-  });
-
-  it("moves channels.telegram.requireMention into the wildcard group default", () => {
-    const res = migrateLegacyConfigForTest({
-      channels: {
-        telegram: {
-          requireMention: false,
-        },
-      },
-    });
-
-    expect(res.config?.channels?.telegram).toEqual({
-      groups: {
-        "*": { requireMention: false },
-      },
-    });
-    expect(res.changes).toStrictEqual([
-      'Moved channels.telegram.requireMention → channels.telegram.groups."*".requireMention.',
-    ]);
-  });
-});
-
-describe("legacy bundled provider discovery migrate", () => {
-  it("sets compat mode for existing restrictive plugin allowlists", () => {
-    const res = migrateLegacyConfigForTest({
-      plugins: {
-        allow: ["telegram"],
-      },
-    });
-
-    expect(res.config?.plugins?.bundledDiscovery).toBe("compat");
-    expect(res.changes).toStrictEqual([
-      'Set plugins.bundledDiscovery="compat" to preserve legacy bundled provider discovery for this restrictive plugins.allow config.',
-    ]);
-  });
-
-  it("does not override explicit bundled discovery mode", () => {
-    const res = migrateLegacyConfigForTest({
-      plugins: {
-        allow: ["telegram"],
-        bundledDiscovery: "allowlist",
-      },
-    });
-
-    expect(res.config).toBeNull();
-    expect(res.changes).toStrictEqual([]);
-  });
-});
-
-describe("legacy migrate sandbox scope aliases", () => {
-  it("removes legacy agents.defaults.llm timeout config", () => {
-    const res = migrateLegacyConfigForTest({
-      agents: {
-        defaults: {
-          model: { primary: "openai/gpt-5.4" },
-          llm: {
-            idleTimeoutSeconds: 120,
-          },
-        },
-      },
-    });
-
-    expect(res.changes).toStrictEqual([
-      "Removed agents.defaults.llm; model idle timeout now follows models.providers.<id>.timeoutSeconds within the agent/run timeout ceiling.",
-    ]);
-    expect(res.config?.agents?.defaults).toEqual({
-      model: { primary: "openai/gpt-5.4" },
-    });
-  });
-
-  it("removes ignored agent-wide runtime policy", () => {
-    const res = migrateLegacyConfigForTest({
-      agents: {
-        defaults: {
-          embeddedHarness: {
-            runtime: "claude-cli",
-            fallback: "none",
-          },
-        },
-        list: [
-          {
-            id: "reviewer",
-            agentRuntime: { fallback: "pi" },
-            embeddedHarness: {
-              runtime: "codex",
-              fallback: "none",
-            },
-          },
-        ],
-      },
-    });
-
-    expect(res.changes).toStrictEqual([
-      "Removed agents.defaults.embeddedHarness; runtime is now provider/model scoped.",
-      "Removed agents.list.0.embeddedHarness; runtime is now provider/model scoped.",
-      "Removed agents.list.0.agentRuntime; runtime is now provider/model scoped.",
-    ]);
-    expect(res.config?.agents?.defaults).toStrictEqual({});
-    expect(res.config?.agents?.list?.[0]).toEqual({
-      id: "reviewer",
-    });
-  });
-
-  it("moves agents.defaults.sandbox.perSession into scope", () => {
-    const res = migrateLegacyConfigForTest({
-      agents: {
-        defaults: {
-          sandbox: {
-            perSession: true,
-          },
-        },
-      },
-    });
-
-    expect(res.changes).toStrictEqual([
-      "Moved agents.defaults.sandbox.perSession → agents.defaults.sandbox.scope (session).",
-    ]);
-    expect(res.config?.agents?.defaults?.sandbox).toEqual({
-      scope: "session",
-    });
-  });
-
-  it("moves agents.list[].sandbox.perSession into scope", () => {
-    const res = migrateLegacyConfigForTest({
-      agents: {
-        list: [
-          {
-            id: "pi",
-            sandbox: {
-              perSession: false,
-            },
-          },
-        ],
-      },
-    });
-
-    expect(res.changes).toStrictEqual([
-      "Moved agents.list.0.sandbox.perSession → agents.list.0.sandbox.scope (shared).",
-    ]);
-    expect(res.config?.agents?.list?.[0]?.sandbox).toEqual({
-      scope: "shared",
-    });
-  });
-
-  it("drops legacy sandbox perSession when scope is already set", () => {
-    const res = migrateLegacyConfigForTest({
-      agents: {
-        defaults: {
-          sandbox: {
-            scope: "agent",
-            perSession: true,
-          },
-        },
-      },
-    });
-
-    expect(res.changes).toStrictEqual([
-      "Removed agents.defaults.sandbox.perSession (agents.defaults.sandbox.scope already set).",
-    ]);
-    expect(res.config?.agents?.defaults?.sandbox).toEqual({
-      scope: "agent",
-    });
-  });
-
-  it("does not migrate invalid sandbox perSession values", () => {
+  it("disables explicit per-agent network none in legacy list rosters", () => {
     const raw = {
       agents: {
-        defaults: {
-          sandbox: {
-            perSession: "yes",
+        list: [
+          {
+            id: "legacy",
+            default: true,
+            ...browserSandbox({ network: "NONE", autoStart: false }),
           },
-        },
+        ],
       },
     };
 
-    const res = migrateLegacyConfigForTest(raw);
+    expect(findLegacyConfigIssues(raw)).toContainEqual({
+      path: "agents",
+      message: expect.stringContaining('sandbox.browser.network = "none"'),
+    });
+    const res = migrate(raw);
 
-    expect(res.changes).toStrictEqual([]);
-    expect(res.config).toBeNull();
+    expect(res.config?.agents?.entries?.legacy?.sandbox?.browser).toEqual({
+      enabled: false,
+      network: "openclaw-sandbox-browser",
+      autoStart: false,
+    });
+    expect(migrate(res.config)).toEqual({ config: null, changes: [] });
   });
 });
 
-describe("legacy migrate MCP server type aliases", () => {
-  it("moves CLI-native http type to OpenClaw streamable HTTP transport", () => {
-    const res = migrateLegacyConfigForTest({
-      mcp: {
-        servers: {
-          silo: {
-            type: "http",
-            url: "https://example.com/mcp",
-          },
-          legacySse: {
-            type: "sse",
-            url: "https://example.com/sse",
-          },
-        },
-      },
-    });
-
-    expect(res.changes).toStrictEqual([
-      'Moved mcp.servers.silo.type "http" → transport "streamable-http".',
-      'Moved mcp.servers.legacySse.type "sse" → transport "sse".',
-    ]);
-    expect(res.config?.mcp?.servers?.silo).toEqual({
-      url: "https://example.com/mcp",
-      transport: "streamable-http",
-    });
-    expect(res.config?.mcp?.servers?.legacySse).toEqual({
-      url: "https://example.com/sse",
-      transport: "sse",
-    });
-  });
-
-  it("removes CLI-native type when canonical transport is already set", () => {
-    const res = migrateLegacyConfigForTest({
-      mcp: {
-        servers: {
-          mixed: {
-            type: "http",
-            transport: "sse",
-            url: "https://example.com/mcp",
-          },
-        },
-      },
-    });
-
-    expect(res.changes).toStrictEqual([
-      'Removed mcp.servers.mixed.type (transport "sse" already set).',
-    ]);
-    expect(res.config?.mcp?.servers?.mixed).toEqual({
-      url: "https://example.com/mcp",
-      transport: "sse",
-    });
-  });
+it.each([
+  {
+    name: "moves only legacy x_search auth",
+    paths: {
+      "tools.web.x_search": { apiKey: "xai-legacy-key", enabled: true, model: "grok-4-1-fast" },
+    },
+    xSearch: { enabled: true, model: "grok-4-1-fast" },
+    webSearch: { apiKey: "xai-legacy-key" },
+  },
+  {
+    name: "moves legacy xAI search config without replacing model selections",
+    paths: {
+      "tools.web.search": { grok: { model: "grok-4-1-fast" } },
+      "tools.web.x_search": { model: "grok-4-1-fast-non-reasoning" },
+    },
+    xSearch: { model: "grok-4-1-fast-non-reasoning" },
+    webSearch: { model: "grok-4-1-fast" },
+  },
+])("$name into plugin-owned config", ({ paths, xSearch, webSearch }) => {
+  const res = migratePaths(paths);
+  expect((res.config?.tools?.web as Record<string, unknown> | undefined)?.x_search).toEqual(
+    xSearch,
+  );
+  expect(res.config?.plugins?.entries?.xai).toEqual({ enabled: true, config: { webSearch } });
 });
 
-describe("legacy migrate x_search auth", () => {
-  it("moves only legacy x_search auth into plugin-owned xai config", () => {
-    const res = migrateLegacyConfigForTest({
-      tools: {
-        web: {
-          x_search: {
-            apiKey: "xai-legacy-key",
-            enabled: true,
-            model: "grok-4-1-fast",
-          },
-        },
+it.each([
+  {
+    name: "active supervision rewrites the allowlist",
+    plugins: configAt({
+      allow: ["telegram", "codex-supervisor", "codex"],
+      "entries.codex-supervisor.enabled": true,
+      "entries.codex-supervisor.config": supervision,
+      "entries.codex-supervisor.hooks.enabled": true,
+    }),
+    expected: configAt({
+      allow: ["telegram", "codex"],
+      "entries.codex.enabled": true,
+      "entries.codex.config.supervision": { enabled: true, ...supervision },
+    }),
+  },
+  {
+    name: "disabled supervision preserves the implicit harness",
+    agents: { defaults: { model: "openai/gpt-5.5" } },
+    plugins: configAt({
+      "entries.codex.config.appServer": { transport: "stdio" },
+      "entries.codex-supervisor.enabled": false,
+    }),
+    expected: configAt({
+      "entries.codex.config": {
+        appServer: { transport: "stdio" },
+        supervision: { enabled: false },
       },
-    });
-
-    expect((res.config?.tools?.web as Record<string, unknown> | undefined)?.x_search).toEqual({
-      enabled: true,
-      model: "grok-4-1-fast",
-    });
-    expect(res.config?.plugins?.entries?.xai).toEqual({
-      enabled: true,
-      config: {
-        webSearch: {
-          apiKey: "xai-legacy-key",
-        },
+    }),
+  },
+  {
+    name: "canonical values win while missing supervision fields are filled",
+    plugins: configAt({
+      deny: [" CODEX-SUPERVISOR ", "telegram"],
+      "entries. CODEX .enabled": false,
+      "entries. CODEX .config.appServer.transport": "stdio",
+      "entries. CODEX .config.supervision.enabled": true,
+      "entries. CODEX .config.supervision.endpoints": [
+        { id: "canonical", transport: "stdio-proxy" },
+      ],
+      "entries. CODEX .config.supervision.allowWriteControls": false,
+      "entries. CODEX-SUPERVISOR .enabled": true,
+      "entries. CODEX-SUPERVISOR .config.endpoints": [{ id: "legacy", transport: "stdio-proxy" }],
+      "entries. CODEX-SUPERVISOR .config.allowRawTranscripts": true,
+      "entries. CODEX-SUPERVISOR .config.allowWriteControls": true,
+    }),
+    expected: configAt({
+      deny: ["telegram"],
+      "entries. CODEX .enabled": false,
+      "entries. CODEX .config.appServer.transport": "stdio",
+      "entries. CODEX .config.supervision.enabled": true,
+      "entries. CODEX .config.supervision.endpoints": [
+        { id: "canonical", transport: "stdio-proxy" },
+      ],
+      "entries. CODEX .config.supervision.allowRawTranscripts": true,
+      "entries. CODEX .config.supervision.allowWriteControls": false,
+    }),
+  },
+  {
+    name: "denied legacy plugin leaves supervision dormant",
+    plugins: {
+      deny: ["codex-supervisor"],
+      entries: { "codex-supervisor": { enabled: true, config: { allowWriteControls: true } } },
+    },
+    expected: {
+      deny: [],
+      entries: {
+        codex: { config: { supervision: { enabled: false, allowWriteControls: true } } },
       },
-    });
-    expect(res.changes).toEqual([
-      "Moved tools.web.x_search.apiKey → plugins.entries.xai.config.webSearch.apiKey.",
-    ]);
-  });
+    },
+  },
+  {
+    name: "malformed legacy entry does not create Codex config",
+    plugins: {
+      entries: { "codex-supervisor": "invalid" },
+    },
+    expected: { entries: {} },
+  },
+])("migrates supervision: $name", ({ plugins, agents, expected }) => {
+  const raw = { plugins, ...(agents ? { agents } : {}) };
+  expect(issuePaths(raw)).toContain("plugins");
+  const res = migrate(raw);
+  expect(res.config?.plugins).toEqual(expected);
+  if (agents) {
+    expect(res.config?.agents).toEqual(agents);
+  }
+  expect(migrate(res.config)).toEqual({ config: null, changes: [] });
 });
 
-describe("legacy migrate heartbeat config", () => {
-  it("moves top-level heartbeat into agents.defaults.heartbeat", () => {
-    const res = migrateLegacyConfigForTest({
-      heartbeat: {
-        model: "anthropic/claude-3-5-haiku-20241022",
-        every: "30m",
-      },
+describe("legacy bundled provider discovery migrate", () => {
+  it("rewrites legacy OpenAI Codex plugin policy ids", () => {
+    const res = migratePaths({
+      "plugins.allow": ["telegram", "openai-codex", "openai"],
+      "plugins.deny": ["openai-codex"],
+      "plugins.entries.openai-codex.enabled": false,
+      "plugins.slots.memory": "openai-codex",
     });
 
-    expect(res.changes).toStrictEqual(["Moved heartbeat → agents.defaults.heartbeat."]);
-    expect(res.config?.agents?.defaults?.heartbeat).toEqual({
-      model: "anthropic/claude-3-5-haiku-20241022",
-      every: "30m",
-    });
-    expect((res.config as { heartbeat?: unknown } | null)?.heartbeat).toBeUndefined();
-  });
-
-  it("moves top-level heartbeat visibility into channels.defaults.heartbeat", () => {
-    const res = migrateLegacyConfigForTest({
-      heartbeat: {
-        showOk: true,
-        showAlerts: false,
-        useIndicator: false,
-      },
-    });
-
-    expect(res.changes).toStrictEqual([
-      "Moved heartbeat visibility → channels.defaults.heartbeat.",
-    ]);
-    expect(res.config?.channels?.defaults?.heartbeat).toEqual({
-      showOk: true,
-      showAlerts: false,
-      useIndicator: false,
-    });
-    expect((res.config as { heartbeat?: unknown } | null)?.heartbeat).toBeUndefined();
-  });
-
-  it("keeps explicit agents.defaults.heartbeat values when merging top-level heartbeat", () => {
-    const res = migrateLegacyConfigForTest({
-      heartbeat: {
-        model: "anthropic/claude-3-5-haiku-20241022",
-        every: "30m",
-      },
-      agents: {
-        defaults: {
-          heartbeat: {
-            every: "1h",
-            target: "telegram",
-          },
-        },
-      },
-    });
-
-    expect(res.changes).toStrictEqual([
-      "Merged heartbeat → agents.defaults.heartbeat (filled missing fields from legacy; kept explicit agents.defaults values).",
-    ]);
-    expect(res.config?.agents?.defaults?.heartbeat).toEqual({
-      every: "1h",
-      target: "telegram",
-      model: "anthropic/claude-3-5-haiku-20241022",
-    });
-    expect((res.config as { heartbeat?: unknown } | null)?.heartbeat).toBeUndefined();
-  });
-
-  it("keeps explicit channels.defaults.heartbeat values when merging top-level heartbeat visibility", () => {
-    const res = migrateLegacyConfigForTest({
-      heartbeat: {
-        showOk: true,
-        showAlerts: true,
-      },
-      channels: {
-        defaults: {
-          heartbeat: {
-            showOk: false,
-            useIndicator: false,
-          },
-        },
-      },
-    });
-
-    expect(res.changes).toStrictEqual([
-      "Merged heartbeat visibility → channels.defaults.heartbeat (filled missing fields from legacy; kept explicit channels.defaults values).",
-    ]);
-    expect(res.config?.channels?.defaults?.heartbeat).toEqual({
-      showOk: false,
-      showAlerts: true,
-      useIndicator: false,
-    });
-    expect((res.config as { heartbeat?: unknown } | null)?.heartbeat).toBeUndefined();
-  });
-
-  it("preserves agents.defaults.heartbeat precedence over top-level heartbeat legacy key", () => {
-    const res = migrateLegacyConfigForTest({
-      agents: {
-        defaults: {
-          heartbeat: {
-            every: "1h",
-            target: "telegram",
-          },
-        },
-      },
-      heartbeat: {
-        every: "30m",
-        target: "discord",
-        model: "anthropic/claude-3-5-haiku-20241022",
-      },
-    });
-
-    expect(res.config?.agents?.defaults?.heartbeat).toEqual({
-      every: "1h",
-      target: "telegram",
-      model: "anthropic/claude-3-5-haiku-20241022",
-    });
-    expect((res.config as { heartbeat?: unknown } | null)?.heartbeat).toBeUndefined();
-  });
-
-  it("drops blocked prototype keys when migrating top-level heartbeat", () => {
-    const res = migrateLegacyConfigForTest(
-      JSON.parse(
-        '{"heartbeat":{"every":"30m","__proto__":{"polluted":true},"showOk":true}}',
-      ) as Record<string, unknown>,
-    );
-
-    const heartbeat = res.config?.agents?.defaults?.heartbeat as
-      | Record<string, unknown>
-      | undefined;
-    expect(heartbeat?.every).toBe("30m");
-    expect((heartbeat as { polluted?: unknown } | undefined)?.polluted).toBeUndefined();
-    expect(Object.prototype.hasOwnProperty.call(heartbeat ?? {}, "__proto__")).toBe(false);
-    expect(res.config?.channels?.defaults?.heartbeat).toEqual({ showOk: true });
-  });
-
-  it("records a migration change when removing empty top-level heartbeat", () => {
-    const res = migrateLegacyConfigForTest({
-      heartbeat: {},
-    });
-
-    expect(res.changes).toStrictEqual(["Removed empty top-level heartbeat."]);
-    if (res.config === null) {
-      throw new Error("Expected migrated config");
-    }
-    expect((res.config as { heartbeat?: unknown }).heartbeat).toBeUndefined();
+    expect(res.config?.plugins?.allow).toEqual(["telegram", "openai"]);
+    expect(res.config?.plugins?.deny).toEqual(["openai"]);
+    expect(res.config?.plugins?.entries?.openai).toEqual({ enabled: false });
+    expect(res.config?.plugins?.entries?.["openai-codex"]).toBeUndefined();
+    expect(res.config?.plugins?.slots?.memory).toBe("openai");
   });
 });
 
 describe("legacy migrate controlUi.allowedOrigins seed (issue #29385)", () => {
-  it("seeds allowedOrigins for bind=lan with no existing controlUi config", () => {
-    const res = migrateLegacyConfigForTest({
-      gateway: {
-        bind: "lan",
-        auth: { mode: "token", token: "tok" },
-      },
-    });
-    expect(res.config?.gateway?.controlUi?.allowedOrigins).toEqual([
-      "http://localhost:18789",
-      "http://127.0.0.1:18789",
-    ]);
-    expect(res.changes).toStrictEqual([
-      'Seeded gateway.controlUi.allowedOrigins ["http://localhost:18789","http://127.0.0.1:18789"] for bind=lan. Required since v2026.2.26. Add other machine origins to gateway.controlUi.allowedOrigins if needed.',
-    ]);
-  });
+  it.each([
+    {
+      gateway: { bind: "custom", port: 9000, customBindHost: "192.168.1.100" },
+      bind: "custom",
+      allowedOrigins: [
+        "http://localhost:9000",
+        "http://127.0.0.1:9000",
+        "http://192.168.1.100:9000",
+      ],
+    },
+    {
+      gateway: { bind: "0.0.0.0", controlUi: { basePath: "/app", allowedOrigins: ["", "   "] } },
+      bind: "lan",
+      allowedOrigins: ["http://localhost:18789", "http://127.0.0.1:18789"],
+    },
+  ])(
+    "seeds non-loopback origins while preserving gateway settings: $gateway.bind",
+    ({ gateway, bind, allowedOrigins }) => {
+      expect(migrate({ gateway }).config?.gateway).toEqual({
+        ...gateway,
+        bind,
+        controlUi: { ...gateway.controlUi, allowedOrigins },
+      });
+    },
+  );
 
-  it("seeds allowedOrigins using configured port", () => {
-    const res = migrateLegacyConfigForTest({
-      gateway: {
-        bind: "lan",
-        port: 9000,
-        auth: { mode: "token", token: "tok" },
-      },
+  it.each([
+    { allowedOrigins: ["https://control.example.com"] },
+    { dangerouslyAllowHostHeaderOriginFallback: true },
+  ])("preserves an explicit origin policy: %j", (controlUi) => {
+    expect(migrate({ gateway: { bind: "lan", controlUi } })).toEqual({
+      config: null,
+      changes: [],
     });
-    expect(res.config?.gateway?.controlUi?.allowedOrigins).toEqual([
-      "http://localhost:9000",
-      "http://127.0.0.1:9000",
-    ]);
-  });
-
-  it("seeds allowedOrigins including custom bind host for bind=custom", () => {
-    const res = migrateLegacyConfigForTest({
-      gateway: {
-        bind: "custom",
-        customBindHost: "192.168.1.100",
-        auth: { mode: "token", token: "tok" },
-      },
-    });
-    expect(res.config?.gateway?.controlUi?.allowedOrigins).toEqual([
-      "http://localhost:18789",
-      "http://127.0.0.1:18789",
-      "http://192.168.1.100:18789",
-    ]);
-  });
-
-  it("does not overwrite existing allowedOrigins — returns null (no migration needed)", () => {
-    // When allowedOrigins already exists, the migration is a no-op.
-    // applyLegacyDoctorMigrations returns next=null when changes.length===0, so config is null.
-    const res = migrateLegacyConfigForTest({
-      gateway: {
-        bind: "lan",
-        auth: { mode: "token", token: "tok" },
-        controlUi: { allowedOrigins: ["https://control.example.com"] },
-      },
-    });
-    expect(res.config).toBeNull();
-    expect(res.changes).toStrictEqual([]);
-  });
-
-  it("does not migrate when dangerouslyAllowHostHeaderOriginFallback is set — returns null", () => {
-    const res = migrateLegacyConfigForTest({
-      gateway: {
-        bind: "lan",
-        auth: { mode: "token", token: "tok" },
-        controlUi: { dangerouslyAllowHostHeaderOriginFallback: true },
-      },
-    });
-    expect(res.config).toBeNull();
-    expect(res.changes).toStrictEqual([]);
-  });
-
-  it("seeds allowedOrigins when existing entries are blank strings", () => {
-    const res = migrateLegacyConfigForTest({
-      gateway: {
-        bind: "lan",
-        auth: { mode: "token", token: "tok" },
-        controlUi: { allowedOrigins: ["", "   "] },
-      },
-    });
-    expect(res.config?.gateway?.controlUi?.allowedOrigins).toEqual([
-      "http://localhost:18789",
-      "http://127.0.0.1:18789",
-    ]);
-    expect(res.changes).toStrictEqual([
-      'Seeded gateway.controlUi.allowedOrigins ["http://localhost:18789","http://127.0.0.1:18789"] for bind=lan. Required since v2026.2.26. Add other machine origins to gateway.controlUi.allowedOrigins if needed.',
-    ]);
-  });
-
-  it("does not migrate loopback bind — returns null", () => {
-    const res = migrateLegacyConfigForTest({
-      gateway: {
-        bind: "loopback",
-        auth: { mode: "token", token: "tok" },
-      },
-    });
-    expect(res.config).toBeNull();
-    expect(res.changes).toStrictEqual([]);
-  });
-
-  it("preserves existing controlUi fields when seeding allowedOrigins", () => {
-    const res = migrateLegacyConfigForTest({
-      gateway: {
-        bind: "lan",
-        auth: { mode: "token", token: "tok" },
-        controlUi: { basePath: "/app" },
-      },
-    });
-    expect(res.config?.gateway?.controlUi?.basePath).toBe("/app");
-    expect(res.config?.gateway?.controlUi?.allowedOrigins).toEqual([
-      "http://localhost:18789",
-      "http://127.0.0.1:18789",
-    ]);
   });
 });
+
+describe("legacy model compat migrate", () => {
+  it("normalizes persisted model aliases across nested selections and provider catalogs", () => {
+    const retired = "google/gemini-3-pro-preview";
+    const canonical = "google/gemini-3.1-pro-preview";
+    const raw = configAt({
+      "agents.defaults.model": retired,
+      "agents.defaults.mediaModels": {
+        image: retired,
+        video: { primary: retired, fallbacks: [retired] },
+      },
+      "models.providers.google": { models: [{ id: "gemini-3-pro-preview", name: "Gemini" }] },
+      "models.providers.myproxy": {
+        models: [{ id: "google/gemini-3-pro-preview", name: "Gemini proxy" }],
+      },
+      "models.providers.openai": { models: [{ id: "gpt-4o", name: "GPT-4o" }] },
+    });
+
+    expect(issuePaths(raw)).toEqual(expect.arrayContaining(["agents", "models"]));
+    const res = migrate(raw);
+    expect(res.config?.agents?.defaults).toMatchObject({
+      model: canonical,
+      mediaModels: { image: canonical, video: { primary: canonical, fallbacks: [canonical] } },
+    });
+    expect(res.config?.models?.providers?.google?.models?.[0]?.id).toBe("gemini-3.1-pro-preview");
+    expect(res.config?.models?.providers?.myproxy?.models?.[0]?.id).toBe(canonical);
+    expect(res.config?.models?.providers?.openai?.models?.[0]?.id).toBe("gpt-4o");
+  });
+
+  it("canonicalizes persisted OpenAI GPT-5.6 aliases without affecting GitHub Copilot", () => {
+    const copilot = "github-copilot/gpt-5.6";
+    const res = migratePaths({
+      "agents.defaults.model": { primary: "openai/gpt-5.6@openai:work" },
+      "agents.defaults.modelPolicy": { allow: ["openai/gpt-5.6", copilot] },
+      "agents.defaults.models": {
+        "openai/gpt-5.6": { alias: "GPT" },
+        "openai/gpt-5.6-sol": { agentRuntime: { id: "openclaw" } },
+        [copilot]: { alias: "Copilot GPT" },
+      },
+      "models.providers.openai": { models: [{ id: "gpt-5.6", name: "GPT alias" }] },
+      "models.providers.github-copilot": { models: [{ id: "gpt-5.6", name: "Copilot GPT" }] },
+    });
+    const defaults = res.config?.agents?.defaults;
+    expect(defaults).toMatchObject({
+      model: { primary: "openai/gpt-5.6-sol@openai:work" },
+      modelPolicy: { allow: ["openai/gpt-5.6-sol", copilot] },
+    });
+    expect(defaults?.models).toEqual({
+      "openai/gpt-5.6-sol": { alias: "GPT", agentRuntime: { id: "openclaw" } },
+      [copilot]: { alias: "Copilot GPT" },
+    });
+    expect(res.config?.models?.providers?.openai?.models?.[0]?.id).toBe("gpt-5.6-sol");
+    expect(res.config?.models?.providers?.["github-copilot"]?.models?.[0]?.id).toBe("gpt-5.6");
+  });
+
+  it("merges provider catalog rows that normalize to an explicitly canonical id", () => {
+    const res = migrateProviderConfig({
+      google: {
+        models: [
+          {
+            id: "gemini-3-pro-preview",
+            name: "Retired alias",
+            maxTokens: 65_536,
+            cost: { input: 1 },
+          },
+          { id: "gemini-3.1-pro-preview", name: "Canonical", cost: { output: 2 } },
+        ],
+      },
+    });
+
+    expect(res.config?.models?.providers?.google?.models).toEqual([
+      {
+        id: "gemini-3.1-pro-preview",
+        name: "Canonical",
+        maxTokens: 65_536,
+        cost: { output: 2, input: 1 },
+      },
+    ]);
+  });
+
+  it("deep-merges colliding model spellings and reports only unequal fields", () => {
+    const res = migrate(
+      modelMapConfig({
+        "openai/gpt-5.6": {
+          params: {
+            reasoning: { effort: "high", budget: 100 },
+            tags: ["stable"],
+            fallbacks: ["openai/GPT-5.6"],
+          },
+          streaming: false,
+        },
+        "openai/GPT-5.6": {
+          params: {
+            reasoning: { effort: "low", summary: "auto" },
+            tags: ["stable"],
+            fallbacks: ["openai/gpt-5.6-sol"],
+          },
+          alias: "legacy-four",
+        },
+      }),
+    );
+
+    expect(res.config?.agents?.defaults?.models).toEqual({
+      "openai/gpt-5.6-sol": {
+        params: {
+          reasoning: { effort: "high", budget: 100, summary: "auto" },
+          tags: ["stable"],
+          fallbacks: ["openai/gpt-5.6-sol"],
+        },
+        streaming: false,
+        alias: "legacy-four",
+      },
+    });
+    expect(res.changes.filter((change) => change.includes("Merged"))).toEqual([
+      'Merged config.agents.defaults.models key "openai/GPT-5.6" into "openai/gpt-5.6-sol"; kept existing values for conflicting fields: params.reasoning.effort.',
+    ]);
+  });
+
+  it("filters blocked keys recursively from both model collision sides", () => {
+    const raw =
+      '{"agents":{"defaults":{"models":{"openai/gpt-5.6-sol":{"__proto__":{"polluted":true},"alias":"canonical-five","params":{"nested":{"__proto__":{"polluted":true},"model":"openai/gpt-5.6"}}},"openai/GPT-5.6":{"alias":"legacy-four","__proto__":{"polluted":true},"streaming":false,"params":{"nested":{"__proto__":{"polluted":true},"added":true}}}}}}}';
+    const res = migrate(JSON.parse(raw));
+    const merged = res.config?.agents?.defaults?.models?.["openai/gpt-5.6-sol"] as Record<
+      string,
+      unknown
+    >;
+    const params = merged.params as Record<string, unknown>;
+    const nested = params.nested as Record<string, unknown>;
+
+    for (const record of [merged, params, nested]) {
+      expect(Object.getOwnPropertyNames(record)).not.toContain("__proto__");
+      expect(Object.getPrototypeOf(record)).toBe(Object.prototype);
+      expect(record.polluted).toBeUndefined();
+    }
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(merged).toEqual({
+      alias: "canonical-five",
+      params: { nested: { model: "openai/gpt-5.6-sol", added: true } },
+      streaming: false,
+    });
+  });
+
+  it("does not invoke prototype setters when copying the rewritten config root", () => {
+    const raw = JSON.parse(
+      '{"__proto__":{"polluted":true},"agents":{"defaults":{"model":"openai/GPT-5.6"}}}',
+    ) as Record<string, unknown>;
+    const res = migrate(raw);
+    const config = res.config as unknown as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(config)).toBe(Object.prototype);
+    expect(Object.hasOwn(config, "__proto__")).toBe(true);
+    expect(config.polluted).toBeUndefined();
+    expect(res.config?.agents?.defaults?.model).toBe("openai/gpt-5.6-sol");
+  });
+
+  it("reports malformed scalar collisions without claiming equal values conflict", () => {
+    const res = migrate(
+      modelMapConfig({
+        "openai/gpt-5.6-sol": false,
+        "openai/GPT-5.6": true,
+        "openai/gpt-5.6": false,
+      }),
+    );
+
+    expect(res.config?.agents?.defaults?.models?.["openai/gpt-5.6-sol"]).toBe(false);
+    expect(res.changes.filter((change) => change.includes("Merged"))).toEqual([
+      'Merged config.agents.defaults.models key "openai/GPT-5.6" into "openai/gpt-5.6-sol"; kept existing values for conflicting fields: value.',
+      'Merged config.agents.defaults.models key "openai/gpt-5.6" into "openai/gpt-5.6-sol".',
+    ]);
+  });
+
+  it("moves Qwen model-map and model-row params while preserving canonical compat", () => {
+    const raw = configAt({
+      "agents.defaults.models.VLLM/Qwen/new@local.params.qwen_thinking_format": "enable_thinking",
+      "agents.defaults.models.vllm/Qwen/existing.params.qwenThinkingFormat": "chat-template",
+      "agents.defaults.models.vllm/Qwen/existing.params.temperature": 0.2,
+      "agents.defaults.models.vllm/Qwen/kept.params.qwenThinkingFormat": "top-level",
+      "models.providers.VLLM.models": [
+        { id: "vllm/Qwen/existing", name: "Existing" },
+        { id: "Qwen/kept", compat: { thinkingFormat: "qwen-chat-template" } },
+        { id: "Qwen/row", params: { qwenThinkingFormat: "chat-template", temperature: 0.2 } },
+      ],
+    });
+    expect(issuePaths(raw)).toEqual(
+      expect.arrayContaining(["agents.defaults.models", "models.providers"]),
+    );
+    const res = migrate(raw);
+    expect(res.config?.models?.providers?.vllm).toBeUndefined();
+    expect(res.config?.models?.providers?.VLLM?.models).toEqual([
+      qwenModel("vllm/Qwen/existing", "qwen-chat-template", { name: "Existing" }),
+      qwenModel("Qwen/kept", "qwen-chat-template"),
+      qwenModel("Qwen/row", "qwen-chat-template", { params: { temperature: 0.2 } }),
+      qwenModel("Qwen/new", "qwen", { name: "Qwen/new" }),
+    ]);
+    expect(res.config?.agents?.defaults?.models).toEqual({
+      "VLLM/Qwen/new@local": {},
+      "vllm/Qwen/existing": { params: { temperature: 0.2 } },
+      "vllm/Qwen/kept": {},
+    });
+  });
+
+  it("preserves vLLM target order and cached formats across provider, default, and agent params", () => {
+    const mainModel = selection("vllm/Qwen/Qwen3-8B", "vllm/Qwen/Qwen3-14B");
+    const workerModel = selection(
+      "vllm/Qwen/Qwen3-14B",
+      "vllm/Qwen/Qwen3-8B",
+      "vllm/Qwen/Qwen3-32B",
+    );
+    const cachedModel = qwenModel("Qwen/Qwen3-8B", "qwen-chat-template", { reasoning: false });
+    const res = migratePaths({
+      "agents.defaults.model": mainModel,
+      "agents.defaults.params.qwenThinkingFormat": "chat-template",
+      "agents.entries.worker.model": workerModel,
+      "agents.entries.worker.params.qwen_thinking_format": "invalid",
+      "models.providers.vllm.params.qwenThinkingFormat": "enable-thinking",
+      "models.providers.vllm.models": [cachedModel, { id: "Qwen/Qwen3-14B" }],
+    });
+
+    expect(res.config?.models?.providers?.vllm).toEqual({
+      models: [
+        cachedModel,
+        qwenModel("Qwen/Qwen3-14B", "qwen"),
+        qwenModel("Qwen/Qwen3-32B", "qwen", { name: "Qwen/Qwen3-32B" }),
+      ],
+    });
+    expect(res.config?.agents?.defaults).toEqual({ model: mainModel });
+    expect(res.config?.agents?.entries?.worker).toEqual({ model: workerModel });
+    expect(migrate(res.config)).toEqual({ config: null, changes: [] });
+  });
+
+  it("removes untargeted Qwen params from provider, default, and agent scopes", () => {
+    const raw = configAt({
+      "models.providers.vllm": {
+        baseUrl: "http://localhost:8000/v1",
+        params: { qwenThinkingFormat: "chat-template", temperature: 0.2 },
+      },
+      "agents.defaults.params": { qwenThinkingFormat: "chat-template", temperature: 0.3 },
+      "agents.list": [
+        { id: "local", params: { qwen_thinking_format: "enable_thinking", temperature: 0.4 } },
+      ],
+    });
+    expect(issuePaths(raw)).toEqual(
+      expect.arrayContaining(["models.providers.vllm.params", "agents.defaults.params", "agents"]),
+    );
+    const res = migrate(raw);
+    expect(res.config?.models?.providers?.vllm).toEqual({
+      baseUrl: "http://localhost:8000/v1",
+      params: { temperature: 0.2 },
+    });
+    expect(res.config?.agents?.defaults?.params).toEqual({ temperature: 0.3 });
+    expect(res.config?.agents?.entries?.local).toEqual({ params: { temperature: 0.4 } });
+  });
+});
+
+describe("legacy memory search config migrate", () => {
+  it("merges legacy defaults before normalizing memory search fields", () => {
+    const raw = configAt({
+      "memorySearch.enabled": true,
+      "memorySearch.provider": "auto",
+      "memorySearch.model": "text-embedding-3-small",
+      "memorySearch.chunkSize": 800,
+      "memorySearch.chunkOverlap": 100,
+      "memorySearch.maxResults": 5,
+      "memorySearch.store.vector.enabled": false,
+      "agents.defaults.memorySearch.chunking.tokens": 1200,
+      "agents.defaults.memorySearch.query.maxResults": 9,
+      "agents.defaults.memorySearch.store.fts.tokenizer": "trigram",
+    });
+    expect(issuePaths(raw)).toEqual(
+      expect.arrayContaining([
+        "memorySearch",
+        "memorySearch.provider",
+        "agents.defaults.memorySearch",
+      ]),
+    );
+    const res = migrate(raw);
+    expect(res.config).not.toHaveProperty("memorySearch");
+    expect(res.config?.memory?.search).toEqual({
+      enabled: true,
+      provider: "openai",
+      model: "text-embedding-3-small",
+      query: { maxResults: 9 },
+      store: { fts: { tokenizer: "trigram" }, vector: { enabled: false } },
+    });
+  });
+
+  it("normalizes per-agent memory search independently and removes empty retired settings", () => {
+    const raw = configAt({
+      "agents.defaults.memorySearch": {
+        provider: "auto",
+        chunkSize: 800,
+        chunkOverlap: 100,
+        maxResults: 5,
+      },
+      "agents.list": [
+        {
+          id: "local",
+          memorySearch: {
+            provider: " auto ",
+            chunkSize: 500,
+            store: { vector: { enabled: true } },
+          },
+        },
+        {
+          id: "custom",
+          memorySearch: { provider: "openai-compatible", chunkOverlap: 50, maxResults: 10 },
+        },
+        { id: "retired", memorySearch: { chunkSize: 500 } },
+      ],
+    });
+    expect(issuePaths(raw)).toEqual(
+      expect.arrayContaining(["agents.defaults.memorySearch", "agents", "agents.list"]),
+    );
+    const res = migrate(raw);
+    expect(res.config?.memory?.search).toEqual({ provider: "openai", query: { maxResults: 5 } });
+    expect(res.config?.agents?.entries?.local?.memory?.search).toEqual({
+      provider: "openai",
+      store: { vector: { enabled: true } },
+    });
+    expect(res.config?.agents?.entries?.custom?.memory?.search).toEqual({
+      provider: "openai-compatible",
+      query: { maxResults: 10 },
+    });
+    expect(res.config?.agents?.entries?.retired?.memory?.search).toBeUndefined();
+  });
+});
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

@@ -1,3 +1,6 @@
+import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
+import { readPositiveIntegerParam } from "openclaw/plugin-sdk/param-readers";
+import type { SearchConfigRecord } from "openclaw/plugin-sdk/provider-web-search";
 import {
   createWebSearchProviderContractFields,
   type WebSearchProviderPlugin,
@@ -5,21 +8,14 @@ import {
 
 const TAVILY_CREDENTIAL_PATH = "plugins.entries.tavily.config.webSearch.apiKey";
 
-type TavilyClientModule = typeof import("./tavily-client.js");
+const loadTavilyClientModule = createLazyRuntimeModule(() => import("./tavily-client.js"));
 
-let tavilyClientModulePromise: Promise<TavilyClientModule> | undefined;
-
-function loadTavilyClientModule(): Promise<TavilyClientModule> {
-  tavilyClientModulePromise ??= import("./tavily-client.js");
-  return tavilyClientModulePromise;
-}
-
-const GenericTavilySearchSchema = {
+const TAVILY_GENERIC_SEARCH_SCHEMA = {
   type: "object",
   properties: {
     query: { type: "string", description: "Search query string." },
     count: {
-      type: "number",
+      type: "integer",
       description: "Number of results to return (1-20).",
       minimum: 1,
       maximum: 20,
@@ -50,13 +46,22 @@ export function createTavilyWebSearchProvider(): WebSearchProviderPlugin {
     createTool: (ctx) => ({
       description:
         "Search the web using Tavily. Returns structured results with snippets. Use tavily_search for Tavily-specific options like search depth, topic filtering, or AI answers.",
-      parameters: GenericTavilySearchSchema,
-      execute: async (args) => {
+      parameters: TAVILY_GENERIC_SEARCH_SCHEMA,
+      execute: async (args, executionContext) => {
+        executionContext?.signal?.throwIfAborted();
         const { runTavilySearch } = await loadTavilyClientModule();
+        // SAFETY: tools.web.search is config-schema-validated upstream of this cast.
+        const searchConfig = ctx.searchConfig as SearchConfigRecord | undefined;
         return await runTavilySearch({
           cfg: ctx.config,
           query: typeof args.query === "string" ? args.query : "",
-          maxResults: typeof args.count === "number" ? args.count : undefined,
+          maxResults:
+            readPositiveIntegerParam(args, "count", {
+              message: "count must be an integer from 1 to 20",
+              max: 20,
+            }) ?? searchConfig?.maxResults,
+          timeoutSeconds: searchConfig?.timeoutSeconds,
+          ...(executionContext?.signal ? { signal: executionContext.signal } : {}),
         });
       },
     }),

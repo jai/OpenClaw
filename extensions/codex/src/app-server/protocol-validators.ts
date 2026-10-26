@@ -1,78 +1,187 @@
-import AjvPkg, { type ValidateFunction } from "ajv";
-import dynamicToolCallParamsSchema from "./protocol-generated/json/DynamicToolCallParams.json" with { type: "json" };
-import errorNotificationSchema from "./protocol-generated/json/v2/ErrorNotification.json" with { type: "json" };
-import modelListResponseSchema from "./protocol-generated/json/v2/ModelListResponse.json" with { type: "json" };
-import threadResumeResponseSchema from "./protocol-generated/json/v2/ThreadResumeResponse.json" with { type: "json" };
-import threadStartResponseSchema from "./protocol-generated/json/v2/ThreadStartResponse.json" with { type: "json" };
-import turnCompletedNotificationSchema from "./protocol-generated/json/v2/TurnCompletedNotification.json" with { type: "json" };
-import turnStartResponseSchema from "./protocol-generated/json/v2/TurnStartResponse.json" with { type: "json" };
-import type {
-  CodexDynamicToolCallParams,
-  CodexErrorNotification,
-  CodexModelListResponse,
-  CodexThreadForkResponse,
-  CodexThreadResumeResponse,
-  CodexThreadStartResponse,
-  CodexTurn,
-  CodexTurnCompletedNotification,
-  CodexTurnStartResponse,
+import path from "node:path";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { Errors } from "typebox/schema";
+import { readCodexNotificationScope } from "./notification-correlation.js";
+import {
+  isCodexDynamicToolCallParams,
+  isCodexErrorNotification,
+  isCodexModelListResponse,
+  isCodexThreadResumeResponse,
+  isCodexThreadStartResponse,
+  isCodexTurnCompletedNotification,
+  isCodexTurnStartResponse,
+} from "./protocol-validators.generated.js";
+import diagnosticSchemas from "./protocol-validators.generated.json" with { type: "json" };
+import {
+  isJsonObject,
+  type CodexDynamicToolCallParams,
+  type CodexErrorNotification,
+  type CodexModelListResponse,
+  type CodexPreparedServerNotification,
+  type CodexServerNotification,
+  type CodexThread,
+  type CodexThreadForkResponse,
+  type CodexThreadItem,
+  type CodexThreadResumeResponse,
+  type CodexThreadStartResponse,
+  type CodexTurnCompletedNotification,
+  type CodexTurnStartResponse,
+  type CodexUserInput,
 } from "./protocol.js";
 
-type AjvInstance = import("ajv").default;
+export function readSupervisionResponseThreadId(value: unknown): unknown {
+  const thread = isRecord(value) ? value.thread : undefined;
+  return isRecord(thread) ? thread.id : undefined;
+}
 
-const AjvCtor = AjvPkg as unknown as new (opts?: object) => AjvInstance;
-const ajv = new AjvCtor({
-  allErrors: true,
-  strict: false,
-  useDefaults: true,
-  validateFormats: false,
-});
+export function resolveCodexThreadRolloutPath(thread: CodexThread): string | undefined {
+  const rolloutPath = thread.path?.trim();
+  if (
+    !rolloutPath ||
+    !path.isAbsolute(rolloutPath) ||
+    path.extname(rolloutPath) !== ".jsonl" ||
+    !path.basename(rolloutPath).includes(thread.id)
+  ) {
+    return undefined;
+  }
+  return rolloutPath;
+}
 
-const validateDynamicToolCallParams = ajv.compile<CodexDynamicToolCallParams>(
-  dynamicToolCallParamsSchema,
+type ValidationError = {
+  instancePath?: string;
+  message?: string;
+};
+
+type CodexValidator<T> = {
+  check: (value: unknown) => value is T;
+  errors: (value: unknown) => ValidationError[];
+};
+
+type CodexValidationSchemaName = keyof typeof diagnosticSchemas.schemas;
+
+function createCodexValidator<T>(
+  check: (value: unknown) => value is T,
+  name: CodexValidationSchemaName,
+): CodexValidator<T> {
+  return {
+    check,
+    errors: (value) => Errors(diagnosticSchemas.context, diagnosticSchemas.schemas[name], value)[1],
+  };
+}
+
+const validateDynamicToolCallParams = createCodexValidator(
+  isCodexDynamicToolCallParams,
+  "CodexDynamicToolCallParams",
 );
-const validateErrorNotification = ajv.compile<CodexErrorNotification>(errorNotificationSchema);
-const validateModelListResponse = ajv.compile<CodexModelListResponse>(modelListResponseSchema);
-const validateThreadResumeResponse = ajv.compile<CodexThreadResumeResponse>(
-  threadResumeResponseSchema,
+const validateErrorNotification = createCodexValidator(
+  isCodexErrorNotification,
+  "CodexErrorNotification",
 );
-const validateThreadStartResponse =
-  ajv.compile<CodexThreadStartResponse>(threadStartResponseSchema);
-const validateTurnCompletedNotification = ajv.compile<CodexTurnCompletedNotification>(
-  turnCompletedNotificationSchema,
+const validateModelListResponse = createCodexValidator(
+  isCodexModelListResponse,
+  "CodexModelListResponse",
 );
-const validateTurnStartResponse = ajv.compile<CodexTurnStartResponse>(turnStartResponseSchema);
+const validateThreadResumeResponse = createCodexValidator(
+  isCodexThreadResumeResponse,
+  "CodexThreadResumeResponse",
+);
+const validateThreadStartResponse = createCodexValidator(
+  isCodexThreadStartResponse,
+  "CodexThreadStartResponse",
+);
+const validateTurnCompletedNotification = createCodexValidator(
+  isCodexTurnCompletedNotification,
+  "CodexTurnCompletedNotification",
+);
+const validateTurnStartResponse = createCodexValidator(
+  isCodexTurnStartResponse,
+  "CodexTurnStartResponse",
+);
 
 export function assertCodexThreadStartResponse(value: unknown): CodexThreadStartResponse {
-  return assertCodexShape(
-    validateThreadStartResponse,
-    normalizeThreadResponse(value),
-    "thread/start response",
-  );
+  return assertCodexShape(validateThreadStartResponse, value, "thread/start response");
 }
 
 export function assertCodexThreadForkResponse(value: unknown): CodexThreadForkResponse {
-  return assertCodexShape(
-    validateThreadStartResponse,
-    normalizeThreadResponse(value),
-    "thread/fork response",
-  );
+  return assertCodexShape(validateThreadStartResponse, value, "thread/fork response");
 }
 
 export function assertCodexThreadResumeResponse(value: unknown): CodexThreadResumeResponse {
-  return assertCodexShape(
-    validateThreadResumeResponse,
-    normalizeThreadResponse(value),
-    "thread/resume response",
-  );
+  return assertCodexShape(validateThreadResumeResponse, value, "thread/resume response");
+}
+
+export class CodexThreadDirectInputError extends Error {
+  constructor(threadId: string) {
+    super(
+      `Codex thread ${threadId} is controlled by its parent and cannot accept direct input. ` +
+        "Continue its parent thread, or use /new for a separate OpenClaw session.",
+    );
+    this.name = "CodexThreadDirectInputError";
+  }
+}
+
+/** Native V2 children allow observation, but only their parent may supply turn input. */
+export function assertCodexThreadAcceptsDirectInput(
+  thread: Pick<CodexThread, "id" | "canAcceptDirectInput">,
+): void {
+  // Unloaded threads report null; only an explicit native refusal is conclusive.
+  if (thread.canAcceptDirectInput === false) {
+    throw new CodexThreadDirectInputError(thread.id);
+  }
 }
 
 export function assertCodexTurnStartResponse(value: unknown): CodexTurnStartResponse {
-  return assertCodexShape(
-    validateTurnStartResponse,
-    normalizeTurnStartResponse(value),
-    "turn/start response",
-  );
+  return assertCodexShape(validateTurnStartResponse, value, "turn/start response");
+}
+
+/** Exact input echoes and attested managed-hook continuations cannot admit native capabilities. */
+export function assertCodexPassiveTurnItems(
+  items: readonly CodexThreadItem[],
+  submittedInput: readonly CodexUserInput[],
+  taskLabel: string,
+  options: { allowManagedHookPrompts?: boolean } = {},
+): void {
+  let promptEchoSeen = false;
+  for (const item of items) {
+    if (item.type === "agentMessage" || item.type === "reasoning") {
+      continue;
+    }
+    if (
+      item.type === "hookPrompt" &&
+      options.allowManagedHookPrompts === true &&
+      Array.isArray(item.fragments) &&
+      item.fragments.length > 0 &&
+      item.fragments.every(
+        (fragment) =>
+          isJsonObject(fragment) &&
+          typeof fragment.text === "string" &&
+          typeof fragment.hookRunId === "string" &&
+          fragment.hookRunId.trim().length > 0,
+      )
+    ) {
+      continue;
+    }
+    if (item.type === "userMessage" && !promptEchoSeen) {
+      const content = Array.isArray(item.content) ? item.content : [];
+      if (
+        submittedInput.length > 0 &&
+        content.length === submittedInput.length &&
+        submittedInput.every((expected, index) => {
+          const echoed = content[index];
+          return (
+            expected.type === "text" &&
+            isJsonObject(echoed) &&
+            echoed.type === "text" &&
+            echoed.text === expected.text
+          );
+        })
+      ) {
+        promptEchoSeen = true;
+        continue;
+      }
+    }
+    throw new Error(`Codex ${taskLabel} returned unexpected native item: ${item.type}`);
+  }
 }
 
 export function readCodexDynamicToolCallParams(
@@ -85,119 +194,65 @@ export function readCodexErrorNotification(value: unknown): CodexErrorNotificati
   return readCodexShape(validateErrorNotification, value);
 }
 
-export function readCodexModelListResponse(value: unknown): CodexModelListResponse | undefined {
-  return readCodexShape(validateModelListResponse, value);
+export function assertCodexModelListResponse(value: unknown): CodexModelListResponse {
+  return assertCodexShape(validateModelListResponse, value, "model/list response");
 }
 
-export function readCodexTurn(value: unknown): CodexTurn | undefined {
-  const response = readCodexShape(validateTurnStartResponse, { turn: normalizeTurn(value) });
-  return response?.turn;
-}
-
-export function readCodexTurnCompletedNotification(
+function readCodexTurnCompletedNotification(
   value: unknown,
 ): CodexTurnCompletedNotification | undefined {
-  return readCodexShape(
-    validateTurnCompletedNotification,
-    normalizeTurnCompletedNotification(value),
-  );
+  const notification = readCodexShape(validateTurnCompletedNotification, value);
+  // Turn is shared with turn/start, but only terminal states belong in this notification.
+  return notification?.turn.status === "inProgress" ? undefined : notification;
 }
 
-function assertCodexShape<T>(validate: ValidateFunction<T>, value: unknown, label: string): T {
-  if (validate(value)) {
-    return value;
-  }
-  throw new Error(`Invalid Codex app-server ${label}: ${formatAjvErrors(validate)}`);
-}
-
-function readCodexShape<T>(validate: ValidateFunction<T>, value: unknown): T | undefined {
-  return validate(value) ? value : undefined;
-}
-
-function normalizeTurn(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return value;
-  }
+/** Normalize the native terminal snapshot once before receipt and queued projection fan-out. */
+export function prepareCodexServerNotification(
+  notification: CodexServerNotification,
+  scope = readCodexNotificationScope(notification.params),
+): CodexPreparedServerNotification {
   return {
-    error: null,
-    startedAt: null,
-    completedAt: null,
-    durationMs: null,
-    ...value,
-    items: Array.isArray((value as { items?: unknown }).items)
-      ? (value as { items: unknown[] }).items.map(normalizeThreadItem)
-      : [],
+    ...notification,
+    ...scope,
+    completedTurn:
+      notification.method === "turn/completed"
+        ? readCodexTurnCompletedNotification(notification.params)?.turn
+        : undefined,
   };
 }
 
-function normalizeThreadItem(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return value;
-  }
-  const item = value as { type?: unknown };
-  switch (item.type) {
-    case "agentMessage":
-      return { phase: null, memoryCitation: null, ...value };
-    case "plan":
-      return { text: "", ...value };
-    case "reasoning":
-      return { summary: [], content: [], ...value };
-    case "dynamicToolCall":
-      return {
-        namespace: null,
-        arguments: null,
-        status: "completed",
-        contentItems: null,
-        success: null,
-        durationMs: null,
-        ...value,
-      };
-    default:
-      return value;
+export function assertExactSupervisionModelSelection(
+  value: { model?: string | null; modelProvider?: string | null },
+  expected: { model: string; modelProvider: string; operation: string },
+): void {
+  if (value.model !== expected.model || value.modelProvider !== expected.modelProvider) {
+    throw new Error(
+      `Codex supervision ${expected.operation} changed native model selection: ` +
+        `${value.modelProvider ?? "unknown"}/${value.model ?? "unknown"}`,
+    );
   }
 }
 
-function normalizeThreadResponse(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value) || !("thread" in value)) {
+function assertCodexShape<T>(validate: CodexValidator<T>, value: unknown, label: string): T {
+  if (validate.check(value)) {
     return value;
   }
-  const thread = (value as { thread?: unknown }).thread;
-  if (thread && typeof thread === "object" && !Array.isArray(thread)) {
-    const t = thread as { id?: string; sessionId?: string };
-    if (typeof t.id === "string" && typeof t.sessionId !== "string") {
-      return { ...value, thread: { ...thread, sessionId: t.id } };
-    }
-    if (typeof t.sessionId === "string" && typeof t.id !== "string") {
-      return { ...value, thread: { ...thread, id: t.sessionId } };
-    }
-  }
-  return value;
+  throw new Error(`Invalid Codex app-server ${label}: ${formatValidationErrors(validate, value)}`);
 }
 
-function normalizeTurnStartResponse(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value) || !("turn" in value)) {
-    return value;
-  }
-  return {
-    ...value,
-    turn: normalizeTurn((value as { turn?: unknown }).turn),
-  };
+function readCodexShape<T>(validate: CodexValidator<T>, value: unknown): T | undefined {
+  return validate.check(value) ? value : undefined;
 }
 
-function normalizeTurnCompletedNotification(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value) || !("turn" in value)) {
-    return value;
-  }
-  return {
-    ...value,
-    turn: normalizeTurn((value as { turn?: unknown }).turn),
-  };
-}
-
-function formatAjvErrors(validate: ValidateFunction): string {
-  const errors = validate.errors;
+function formatValidationErrors(validate: CodexValidator<unknown>, value: unknown): string {
+  const errors = validate.errors(value);
   if (!errors || errors.length === 0) {
     return "schema validation failed";
   }
-  return ajv.errorsText(errors, { separator: "; " });
+  return errors
+    .map((error) => {
+      const message = error.message?.trim() || "schema validation failed";
+      return error.instancePath ? `${error.instancePath} ${message}` : message;
+    })
+    .join("; ");
 }

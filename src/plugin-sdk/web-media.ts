@@ -1,5 +1,5 @@
 export {
-  getDefaultLocalRoots,
+  getDefaultLocalRootsCore as getDefaultLocalRoots,
   LocalMediaAccessError,
   loadWebMedia,
   loadWebMediaRaw,

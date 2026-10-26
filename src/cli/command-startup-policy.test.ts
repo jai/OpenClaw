@@ -1,247 +1,107 @@
 import { describe, expect, it } from "vitest";
-import {
-  resolveCliStartupPolicy,
-  shouldBypassConfigGuardForCommandPath,
-  shouldEnsureCliPathForCommandPath,
-  shouldHideCliBannerForCommandPath,
-  shouldLoadPluginsForCommandPath,
-  shouldSkipRouteConfigGuardForCommandPath,
-} from "./command-startup-policy.js";
+import { captureEnv } from "../test-utils/env.js";
+import { resolveCliStartupPolicy } from "./command-startup-policy.js";
+
+function resolvePolicy(
+  command: string,
+  params: Partial<Parameters<typeof resolveCliStartupPolicy>[0]> = {},
+) {
+  return resolveCliStartupPolicy({
+    commandPath: command.split(" "),
+    jsonOutputMode: false,
+    ...params,
+  });
+}
 
 describe("command-startup-policy", () => {
-  it("matches config guard bypass commands", () => {
-    expect(shouldBypassConfigGuardForCommandPath(["backup", "create"])).toBe(true);
-    expect(shouldBypassConfigGuardForCommandPath(["config"])).toBe(true);
-    expect(shouldBypassConfigGuardForCommandPath(["config", "validate"])).toBe(true);
-    expect(shouldBypassConfigGuardForCommandPath(["config", "schema"])).toBe(true);
-    expect(shouldBypassConfigGuardForCommandPath(["config", "set"])).toBe(false);
-    expect(shouldBypassConfigGuardForCommandPath(["status"])).toBe(false);
-  });
-
-  it("matches route-first config guard skip policy", () => {
-    expect(
-      shouldSkipRouteConfigGuardForCommandPath({
-        commandPath: ["status"],
-        suppressDoctorStdout: true,
-      }),
-    ).toBe(true);
-    expect(
-      shouldSkipRouteConfigGuardForCommandPath({
-        commandPath: ["gateway", "status"],
-        suppressDoctorStdout: false,
-      }),
-    ).toBe(true);
-    expect(
-      shouldSkipRouteConfigGuardForCommandPath({
-        commandPath: ["status"],
-        suppressDoctorStdout: false,
-      }),
-    ).toBe(false);
-  });
-
-  it("matches plugin preload policy", () => {
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["status"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["status"],
-        jsonOutputMode: true,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["health"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["channels", "status"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["channels", "list"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["channels", "add"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["channels", "logs"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["message", "send"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["message", "send"],
-        jsonOutputMode: true,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        argv: ["node", "openclaw", "agent", "--json"],
-        commandPath: ["agent"],
-        jsonOutputMode: true,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        argv: ["node", "openclaw", "agent", "--json", "--local"],
-        commandPath: ["agent"],
-        jsonOutputMode: true,
-      }),
-    ).toBe(true);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        argv: ["node", "openclaw", "agent"],
-        commandPath: ["agent"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(true);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["agents"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["agents", "list"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["agents", "list"],
-        jsonOutputMode: true,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["agents", "bind"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["agents", "bindings"],
-        jsonOutputMode: true,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["agents", "unbind"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["agents", "set-identity"],
-        jsonOutputMode: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldLoadPluginsForCommandPath({
-        commandPath: ["agents", "delete"],
-        jsonOutputMode: true,
-      }),
-    ).toBe(false);
-  });
-
-  it("matches banner suppression policy", () => {
-    expect(shouldHideCliBannerForCommandPath(["update", "status"])).toBe(true);
-    expect(shouldHideCliBannerForCommandPath(["completion"])).toBe(true);
-    expect(
-      shouldHideCliBannerForCommandPath(["status"], {
-        ...process.env,
-        OPENCLAW_HIDE_BANNER: "1",
-      }),
-    ).toBe(true);
-    expect(shouldHideCliBannerForCommandPath(["status"], {})).toBe(false);
-  });
-
-  it("uses process env banner suppression when startup env is omitted", () => {
-    const originalHideBanner = process.env.OPENCLAW_HIDE_BANNER;
-    try {
-      process.env.OPENCLAW_HIDE_BANNER = "1";
-
-      expect(
-        resolveCliStartupPolicy({
-          commandPath: ["status"],
-          jsonOutputMode: false,
-        }).hideBanner,
-      ).toBe(true);
-      expect(
-        resolveCliStartupPolicy({
-          commandPath: ["status"],
-          jsonOutputMode: false,
-          env: {},
-        }).hideBanner,
-      ).toBe(false);
-    } finally {
-      if (originalHideBanner === undefined) {
-        delete process.env.OPENCLAW_HIDE_BANNER;
-      } else {
-        process.env.OPENCLAW_HIDE_BANNER = originalHideBanner;
+  it("leaves reset config and state preparation to onboarding", () => {
+    expect(resolvePolicy("onboard").skipConfigGuard).toBe(false);
+    for (const command of ["onboard", "setup"]) {
+      for (const params of [
+        { argv: ["node", "openclaw", command, "--reset"] },
+        { options: { reset: true } },
+      ]) {
+        expect(resolvePolicy(command, params)).toMatchObject({
+          skipConfigGuard: true,
+          validateConfigOnly: true,
+          loadPlugins: false,
+        });
       }
     }
   });
 
-  it("matches CLI PATH bootstrap policy", () => {
-    expect(shouldEnsureCliPathForCommandPath(["status"])).toBe(false);
-    expect(shouldEnsureCliPathForCommandPath(["sessions"])).toBe(false);
-    expect(shouldEnsureCliPathForCommandPath(["config", "get"])).toBe(false);
-    expect(shouldEnsureCliPathForCommandPath(["models", "status"])).toBe(false);
-    expect(shouldEnsureCliPathForCommandPath(["tools", "effective"])).toBe(false);
-    expect(shouldEnsureCliPathForCommandPath(["message", "send"])).toBe(true);
-    expect(shouldEnsureCliPathForCommandPath([])).toBe(true);
+  it.each(["gateway"])("defers only %s installs with a runtime expectation", (parent) => {
+    const command = `${parent} install`;
+    expect(resolvePolicy(command).skipConfigGuard).toBe(false);
+    expect(
+      resolvePolicy(command, {
+        options: { expectedRuntimePin: "{}" },
+        jsonOutputMode: true,
+      }).skipConfigGuard,
+    ).toBe(true);
   });
 
-  it("aggregates startup policy for commander and route-first callers", () => {
+  it("resolves config guard policy for Commander and invocation-aware commands", () => {
+    const paths = [
+      "backup create|database|config|config file|config validate|config schema",
+      "config set|config patch|config unset|docs|reset|uninstall|agent exec",
+      "status|node status|triage|agents bindings|agents add|agents team create|approvals pending",
+      "skills|skills list|skills check|skills info|skills search|hooks|hooks list|hooks info|hooks check",
+      "memory search|memory status|gateway stop|gateway recover-lock|gateway restart|gateway uninstall",
+      "daemon stop|daemon restart|daemon uninstall|gateway diagnostics export",
+      "gateway stability|gateway usage-cost|gateway call",
+    ].flatMap((group) => group.split("|"));
+    for (const command of paths) {
+      expect(resolvePolicy(command).skipConfigGuard, command).toBe(true);
+    }
     expect(
-      resolveCliStartupPolicy({
-        commandPath: ["status"],
-        jsonOutputMode: true,
-        env: {},
-      }),
-    ).toEqual({
-      suppressDoctorStdout: true,
-      hideBanner: false,
-      skipConfigGuard: false,
-      loadPlugins: false,
-      pluginRegistry: { scope: "channels" },
-    });
+      resolvePolicy("agent", {
+        argv: ["node", "openclaw", "agent"],
+      }).skipConfigGuard,
+    ).toBe(true);
+    expect(
+      resolvePolicy("agent", {
+        argv: ["node", "openclaw", "agent", "--local"],
+      }).skipConfigGuard,
+    ).toBe(false);
+    for (const flag of ["--index", "--fix"]) {
+      expect(
+        resolvePolicy("memory status", {
+          argv: ["node", "openclaw", "memory", "status", flag],
+        }).skipConfigGuard,
+      ).toBe(false);
+    }
+  });
+  it("uses process env banner suppression when startup env is omitted", () => {
+    const originalEnv = captureEnv(["OPENCLAW_HIDE_BANNER"]);
+    try {
+      process.env.OPENCLAW_HIDE_BANNER = "1";
 
-    expect(
-      resolveCliStartupPolicy({
-        commandPath: ["status"],
-        jsonOutputMode: true,
-        env: {},
-        routeMode: true,
-      }),
-    ).toEqual({
-      suppressDoctorStdout: true,
-      hideBanner: false,
-      skipConfigGuard: true,
+      expect(resolvePolicy("status").hideBanner).toBe(true);
+      expect(resolvePolicy("status", { env: {} }).hideBanner).toBe(false);
+    } finally {
+      originalEnv.restore();
+    }
+  });
+
+  it("reserves stdout for the node worker protocol", () => {
+    expect(resolvePolicy("node worker")).toMatchObject({
+      hideBanner: true,
       loadPlugins: false,
-      pluginRegistry: { scope: "channels" },
+      suppressDoctorStdout: true,
+      validateConfigOnly: true,
+      skipConfigGuard: false,
     });
+    expect(resolvePolicy("node run").validateConfigOnly).toBeUndefined();
+  });
+
+  it.each([
+    ["mcp serve", true],
+    ["acp", true],
+    ["mcp list", false],
+    ["acp client", false],
+    ["status", false],
+  ] as const)("reserves stdout only for protocol command %s: %s", (command, suppressed) => {
+    expect(resolvePolicy(command).suppressDoctorStdout).toBe(suppressed);
   });
 });

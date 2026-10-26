@@ -1,20 +1,43 @@
+// Covers plugin CLI command behavior and output paths.
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
 import { listRegisteredPluginAgentPromptGuidance } from "./command-registry-state.js";
 import {
-  __testing,
-  clearPluginCommands,
-  executePluginCommand,
+  getPluginCommandEntrySpecs,
   getPluginCommandSpecs,
   listProviderPluginCommandSpecs,
+} from "./command-specs.js";
+import {
+  clearPluginCommands,
+  executePluginCommand,
   listPluginCommands,
   matchPluginCommand,
   registerPluginCommand,
 } from "./commands.js";
-import { createPluginRegistry, type PluginRecord } from "./registry.js";
-import { setActivePluginRegistry } from "./runtime.js";
+import { createEmptyPluginRegistry } from "./registry-empty.js";
+import { createPluginRegistry } from "./registry.js";
+import { setActivePluginRegistry, withPluginRegistrationContext } from "./runtime.js";
+import { withPluginRuntimeRegistryScope } from "./runtime/gateway-request-scope.js";
 import type { PluginRuntime } from "./runtime/types.js";
+import { createBundledPluginRecord } from "./status.test-fixtures.js";
+
+const completionMocks = vi.hoisted(() => ({
+  acquireSimpleCompletionModelForAgent:
+    vi.fn<
+      typeof import("../agents/simple-completion-runtime.js").acquireSimpleCompletionModelForAgent
+    >(),
+  completeWithPreparedSimpleCompletionModel: vi.fn(),
+  resolveSimpleCompletionSelectionForAgent: vi.fn(),
+}));
+
+vi.mock("../agents/simple-completion-runtime.js", () => ({
+  acquireSimpleCompletionModelForAgent: completionMocks.acquireSimpleCompletionModelForAgent,
+  completeWithPreparedSimpleCompletionModel:
+    completionMocks.completeWithPreparedSimpleCompletionModel,
+  resolveSimpleCompletionSelectionForAgent:
+    completionMocks.resolveSimpleCompletionSelectionForAgent,
+}));
 
 type CommandsModule = typeof import("./commands.js");
 
@@ -33,68 +56,18 @@ function createVoiceCommand(overrides: Partial<Parameters<typeof registerPluginC
   };
 }
 
-function createBundledPluginRecord(id: string): PluginRecord {
-  return {
-    id,
-    name: id,
-    source: `bundled:${id}`,
-    rootDir: `/bundled/${id}`,
-    origin: "bundled",
-    enabled: true,
-    status: "loaded",
-    toolNames: [],
-    hookNames: [],
-    channelIds: [],
-    cliBackendIds: [],
-    providerIds: [],
-    speechProviderIds: [],
-    realtimeTranscriptionProviderIds: [],
-    realtimeVoiceProviderIds: [],
-    mediaUnderstandingProviderIds: [],
-    imageGenerationProviderIds: [],
-    videoGenerationProviderIds: [],
-    musicGenerationProviderIds: [],
-    webFetchProviderIds: [],
-    webSearchProviderIds: [],
-    migrationProviderIds: [],
-    memoryEmbeddingProviderIds: [],
-    agentHarnessIds: [],
-    cliCommands: [],
-    services: [],
-    gatewayDiscoveryServiceIds: [],
-    commands: [],
-    httpRoutes: 0,
-    hookCount: 0,
-    configSchema: false,
-  } as PluginRecord;
-}
-
 function registerHostTrustedReservedCommandForTest(
   command: Parameters<typeof registerPluginCommand>[1],
 ) {
-  const pluginRegistry = createPluginRegistry({
-    logger: {
-      info() {},
-      warn() {},
-      error() {},
-      debug() {},
-    },
-    runtime: {} as PluginRuntime,
-    activateGlobalSideEffects: true,
-  });
+  const pluginRegistry = createCommandRegistryFixture();
   pluginRegistry.registerCommand(createBundledPluginRecord(command.name), command);
+  setActivePluginRegistry(pluginRegistry.registry);
 }
 
 function registerVoiceCommandForTest(
   overrides: Partial<Parameters<typeof registerPluginCommand>[1]> = {},
 ) {
   return registerPluginCommand("demo-plugin", createVoiceCommand(overrides));
-}
-
-function resolveBindingConversationFromCommand(
-  params: Parameters<typeof __testing.resolveBindingConversationFromCommand>[0],
-) {
-  return __testing.resolveBindingConversationFromCommand(params);
 }
 
 function expectCommandMatch(
@@ -152,14 +125,90 @@ function expectUnsupportedBindingApiResult(result: { text?: string }) {
   );
 }
 
-function expectBindingConversationCase(
-  params: Parameters<typeof resolveBindingConversationFromCommand>[0],
-  expected: ReturnType<typeof resolveBindingConversationFromCommand>,
+type ExecutionParams = Parameters<typeof executePluginCommand>[0];
+
+function executeCommandFixture(
+  command: ExecutionParams["command"],
+  params: Partial<Omit<ExecutionParams, "command">> = {},
 ) {
-  expect(resolveBindingConversationFromCommand(params)).toEqual(expected);
+  return executePluginCommand({
+    command,
+    channel: "telegram",
+    isAuthorizedSender: true,
+    commandBody: `/${command.name}`,
+    config: {},
+    ...params,
+  });
+}
+
+function executionCommand(
+  name: string,
+  handler: ExecutionParams["command"]["handler"],
+  overrides: Partial<ExecutionParams["command"]> = {},
+): ExecutionParams["command"] {
+  return {
+    name,
+    description: "Demo command",
+    acceptsArgs: false,
+    handler,
+    pluginId: "demo-plugin",
+    ...overrides,
+  };
+}
+
+function createCommandRegistryFixture() {
+  return createPluginRegistry({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    runtime: {} as PluginRuntime,
+    activateGlobalSideEffects: true,
+  });
+}
+
+function completionCommandHandler(content: string): ExecutionParams["command"]["handler"] {
+  return async (ctx) => {
+    await ctx.runtimeContext?.llm?.complete({ messages: [{ role: "user", content }] });
+    return { text: "ok" };
+  };
 }
 
 beforeEach(() => {
+  completionMocks.acquireSimpleCompletionModelForAgent.mockReset();
+  completionMocks.acquireSimpleCompletionModelForAgent.mockResolvedValue({
+    async [Symbol.asyncDispose]() {},
+    selection: {
+      provider: "openai",
+      modelId: "gpt-5.5",
+      agentDir: "/tmp/openclaw-agent",
+    },
+    model: {
+      provider: "openai",
+      id: "gpt-5.5",
+      name: "GPT-5.5",
+      api: "openai",
+      baseUrl: "https://fixture.invalid/v1",
+      input: ["text"],
+      reasoning: false,
+      contextWindow: 128_000,
+      maxTokens: 4096,
+      cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+    },
+    auth: {
+      apiKey: "test-api-key",
+      source: "test",
+      mode: "api-key",
+    },
+  });
+  completionMocks.completeWithPreparedSimpleCompletionModel.mockReset();
+  completionMocks.completeWithPreparedSimpleCompletionModel.mockResolvedValue({
+    content: [{ type: "text", text: "done" }],
+    usage: {},
+  });
+  completionMocks.resolveSimpleCompletionSelectionForAgent.mockReset();
+  completionMocks.resolveSimpleCompletionSelectionForAgent.mockReturnValue({
+    provider: "openai",
+    modelId: "gpt-5.5",
+    agentDir: "/tmp/openclaw-agent",
+  });
   setActivePluginRegistry(
     createTestRegistry([
       {
@@ -284,14 +333,27 @@ afterEach(() => {
 });
 
 describe("registerPluginCommand", () => {
+  it("writes direct registrations into the synchronous builder context", () => {
+    const active = createEmptyPluginRegistry();
+    const building = createEmptyPluginRegistry();
+    setActivePluginRegistry(active);
+
+    expect(
+      withPluginRegistrationContext(building, "demo-plugin", () =>
+        registerPluginCommand("spoofed-plugin", createVoiceCommand()),
+      ),
+    ).toEqual({ ok: true });
+    expect(active.commands).toStrictEqual([]);
+    expect(building.commands.map((entry) => entry.command.name)).toEqual(["voice"]);
+    expect(building.commands[0]?.pluginId).toBe("demo-plugin");
+  });
+
   it.each([
     {
       name: "rejects invalid command names",
       command: {
         // Runtime plugin payloads are untyped; guard at boundary.
         name: undefined as unknown as string,
-        description: "Demo",
-        handler: async () => ({ text: "ok" }),
       },
       expected: {
         ok: false,
@@ -301,9 +363,7 @@ describe("registerPluginCommand", () => {
     {
       name: "rejects invalid command descriptions",
       command: {
-        name: "demo",
         description: undefined as unknown as string,
-        handler: async () => ({ text: "ok" }),
       },
       expected: {
         ok: false,
@@ -313,31 +373,108 @@ describe("registerPluginCommand", () => {
     {
       name: "rejects invalid agent prompt guidance",
       command: {
-        name: "demo",
-        description: "Demo",
         agentPromptGuidance: "use /demo" as unknown as string[],
-        handler: async () => ({ text: "ok" }),
       },
       expected: {
         ok: false,
-        error: "Agent prompt guidance must be an array of strings",
+        error: "Agent prompt guidance must be an array of strings or objects",
+      },
+    },
+    {
+      name: "rejects invalid structured agent prompt guidance",
+      command: {
+        agentPromptGuidance: [{ text: "Use /demo.", surfaces: ["nope"] }] as never,
+      },
+      expected: {
+        ok: false,
+        error:
+          "Agent prompt guidance 1 surface 1 must be one of: openclaw_main, pi_main, codex_app_server, cli_backend, acp_backend, subagent",
+      },
+    },
+    {
+      name: "rejects empty structured agent prompt guidance surfaces",
+      command: {
+        agentPromptGuidance: [{ text: "Use /demo.", surfaces: [] }] as never,
+      },
+      expected: {
+        ok: false,
+        error: "Agent prompt guidance 1 surfaces cannot be empty",
       },
     },
     {
       name: "rejects invalid channel scopes",
       command: {
-        name: "demo",
-        description: "Demo",
         channels: ["telegram", "   "],
-        handler: async () => ({ text: "ok" }),
       },
       expected: {
         ok: false,
         error: "Command channel 2 cannot be empty",
       },
     },
+    {
+      name: "rejects primitive native command metadata",
+      command: {
+        nativeNames: "demo-native",
+      },
+      expected: {
+        ok: false,
+        error: "Command nativeNames must be an object",
+      },
+    },
+    {
+      name: "rejects primitive client presentation metadata",
+      command: {
+        clientPresentation: "device-pairing",
+      },
+      expected: {
+        ok: false,
+        error: "Command clientPresentation must be an object",
+      },
+    },
+    {
+      name: "rejects unknown client presentation actions",
+      command: {
+        clientPresentation: {
+          when: "no-arguments",
+          action: { kind: "open-route" },
+        },
+      },
+      expected: {
+        ok: false,
+        error: "Command clientPresentation action kind is not supported",
+      },
+    },
+    {
+      name: "rejects additional client presentation fields",
+      command: {
+        clientPresentation: {
+          when: "no-arguments",
+          action: { kind: "device-pairing" },
+          route: "/settings/devices",
+        },
+      },
+      expected: {
+        ok: false,
+        error: "Command clientPresentation must contain only when and action",
+      },
+    },
+    {
+      name: "rejects additional client presentation action fields",
+      command: {
+        clientPresentation: {
+          when: "no-arguments",
+          action: { kind: "device-pairing", callback: "run" },
+        },
+      },
+      expected: {
+        ok: false,
+        error: "Command clientPresentation action must contain only kind",
+      },
+    },
   ] as const)("$name", ({ command, expected }) => {
-    expect(registerPluginCommand("demo-plugin", command)).toEqual(expected);
+    expect(registerPluginCommand("demo-plugin", createVoiceCommand(command as never))).toEqual(
+      expected,
+    );
   });
 
   it("normalizes command metadata for downstream consumers", () => {
@@ -345,6 +482,10 @@ describe("registerPluginCommand", () => {
       name: "  demo_cmd  ",
       description: "  Demo command  ",
       agentPromptGuidance: ["  Use /demo_cmd for demo routing.  "],
+      clientPresentation: {
+        when: "no-arguments",
+        action: { kind: "device-pairing" },
+      },
       handler: async () => ({ text: "ok" }),
     });
     expect(result).toEqual({ ok: true });
@@ -363,7 +504,126 @@ describe("registerPluginCommand", () => {
         acceptsArgs: false,
       },
     ]);
+    expect(getPluginCommandEntrySpecs()).toEqual([
+      {
+        name: "demo_cmd",
+        nativeName: "demo_cmd",
+        description: "Demo command",
+        acceptsArgs: false,
+        clientPresentation: {
+          when: "no-arguments",
+          action: { kind: "device-pairing" },
+        },
+      },
+    ]);
     expect(listRegisteredPluginAgentPromptGuidance()).toEqual(["Use /demo_cmd for demo routing."]);
+  });
+
+  it("prefers a request-scoped registry over ambient compatibility state", async () => {
+    const ambientHandler = vi.fn(async () => ({ text: "ambient" }));
+    const scopedHandler = vi.fn(async () => ({ text: "scoped" }));
+    expect(
+      registerPluginCommand("ambient", {
+        name: "same",
+        description: "Ambient command",
+        agentPromptGuidance: ["Ambient guidance"],
+        handler: ambientHandler,
+      }),
+    ).toEqual({ ok: true });
+    const scoped = createEmptyPluginRegistry();
+
+    await withPluginRuntimeRegistryScope(scoped, async () => {
+      expect(
+        registerPluginCommand("scoped", {
+          name: "same",
+          description: "Scoped command",
+          agentPromptGuidance: ["Scoped guidance"],
+          handler: scopedHandler,
+        }),
+      ).toEqual({ ok: true });
+      expect(listProviderPluginCommandSpecs().map((entry) => entry.description)).toEqual([
+        "Scoped command",
+      ]);
+      expect(listRegisteredPluginAgentPromptGuidance()).toEqual(["Scoped guidance"]);
+      const match = matchPluginCommand("/same");
+      expect(match?.command.pluginId).toBe("scoped");
+      await executeCommandFixture(match!.command, {
+        senderId: "user-1",
+      });
+    });
+
+    expect(scopedHandler).toHaveBeenCalledOnce();
+    expect(ambientHandler).not.toHaveBeenCalled();
+    expect(listRegisteredPluginAgentPromptGuidance()).toEqual(["Ambient guidance"]);
+  });
+
+  it.each([["zeta-plugin", "alpha-plugin"]])(
+    "keeps prompt guidance stable for plugin discovery order %j",
+    (...pluginIds) => {
+      for (const pluginId of pluginIds) {
+        const alpha = pluginId === "alpha-plugin";
+        expect(
+          registerPluginCommand(pluginId, {
+            name: alpha ? "alpha_cmd" : "zeta_cmd",
+            description: alpha ? "Alpha command" : "Zeta command",
+            agentPromptGuidance: alpha
+              ? ["Use /alpha_cmd first.", "Then finish the alpha workflow."]
+              : ["Use /zeta_cmd for zeta routing."],
+            handler: async () => ({ text: "ok" }),
+          }),
+        ).toEqual({ ok: true });
+      }
+
+      expect(listRegisteredPluginAgentPromptGuidance()).toEqual([
+        "Use /alpha_cmd first.",
+        "Then finish the alpha workflow.",
+        "Use /zeta_cmd for zeta routing.",
+      ]);
+    },
+  );
+
+  it("normalizes and filters structured agent prompt guidance by surface", () => {
+    const result = registerPluginCommand("demo-plugin", {
+      name: "demo_cmd",
+      description: "Demo command",
+      agentPromptGuidance: [
+        "  Use /demo_cmd everywhere.  ",
+        {
+          text: "  Use /demo_cmd for main agent routing.  ",
+          surfaces: ["openclaw_main"],
+        },
+        {
+          text: "Use /demo_cmd for subagents.",
+          surfaces: ["subagent"],
+        },
+      ],
+      handler: async () => ({ text: "ok" }),
+    });
+    expect(result).toEqual({ ok: true });
+
+    expect(listRegisteredPluginAgentPromptGuidance()).toEqual([
+      "Use /demo_cmd everywhere.",
+      "Use /demo_cmd for main agent routing.",
+      "Use /demo_cmd for subagents.",
+    ]);
+    expect(listRegisteredPluginAgentPromptGuidance({ surface: "openclaw_main" })).toEqual([
+      "Use /demo_cmd everywhere.",
+      "Use /demo_cmd for main agent routing.",
+    ]);
+    expect(listRegisteredPluginAgentPromptGuidance({ surface: "pi_main" })).toEqual([
+      "Use /demo_cmd everywhere.",
+      "Use /demo_cmd for main agent routing.",
+    ]);
+    expect(listRegisteredPluginAgentPromptGuidance({ surface: "subagent" })).toEqual([
+      "Use /demo_cmd everywhere.",
+      "Use /demo_cmd for subagents.",
+    ]);
+    expect(
+      listRegisteredPluginAgentPromptGuidance({
+        surface: "subagent",
+        includeLegacyGlobalGuidance: false,
+      }),
+    ).toEqual(["Use /demo_cmd for subagents."]);
   });
 
   it("matches underscore aliases for hyphenated command names", () => {
@@ -378,6 +638,43 @@ describe("registerPluginCommand", () => {
       name: "active-memory",
       pluginId: "demo-plugin",
       args: "status",
+    });
+  });
+
+  it.each(["active_memory", "active-memory"])(
+    "prefers exact spelling %s even when its command rejects arguments",
+    (name) => {
+      const alternate = name.replace(/[_-]/g, name.includes("_") ? "-" : "_");
+      for (const [commandName, acceptsArgs] of [
+        [alternate, true],
+        [name, false],
+      ] as const) {
+        expect(
+          registerPluginCommand(commandName, {
+            name: commandName,
+            description: "Exact spelling selection",
+            acceptsArgs,
+            handler: async () => ({ text: "ok" }),
+          }),
+        ).toEqual({ ok: true });
+      }
+      expect(matchPluginCommand(`/${name}`)?.command.name).toBe(name);
+      expect(matchPluginCommand(`/${name} status`)).toBeNull();
+    },
+  );
+
+  it("matches plugin slash commands when users insert whitespace after the slash", () => {
+    registerPluginCommand("device-pair", {
+      name: "pair",
+      description: "Pair command",
+      acceptsArgs: true,
+      handler: async () => ({ text: "ok" }),
+    });
+
+    expectCommandMatch("/ pair qr", {
+      name: "pair",
+      pluginId: "device-pair",
+      args: "qr",
     });
   });
 
@@ -419,25 +716,6 @@ describe("registerPluginCommand", () => {
     expect(listProviderPluginCommandSpecs("discord")).toStrictEqual([]);
   });
 
-  it("allows Slack to resolve provider-native plugin specs without changing shared native gating", () => {
-    const result = registerVoiceCommandForTest({
-      nativeNames: {
-        default: "talkvoice",
-        discord: "discordvoice",
-      },
-      description: "Demo command",
-    });
-
-    expect(result).toEqual({ ok: true });
-    expect(listProviderPluginCommandSpecs("slack")).toEqual([
-      {
-        name: "talkvoice",
-        description: "Demo command",
-        acceptsArgs: false,
-      },
-    ]);
-  });
-
   it("requires config before using read-only manifest command defaults", () => {
     setActivePluginRegistry(createTestRegistry([]));
     registerVoiceCommandForTest({
@@ -449,7 +727,6 @@ describe("registerPluginCommand", () => {
     const env = {
       ...process.env,
       OPENCLAW_BUNDLED_PLUGINS_DIR: path.resolve("extensions"),
-      OPENCLAW_DISABLE_PERSISTED_PLUGIN_REGISTRY: "1",
     };
 
     expect(getPluginCommandSpecs("discord", { env })).toStrictEqual([]);
@@ -473,18 +750,6 @@ describe("registerPluginCommand", () => {
         acceptsArgs: false,
       },
     ]);
-  });
-
-  it("accepts native progress metadata on plugin commands", () => {
-    const result = registerVoiceCommandForTest({
-      nativeProgressMessages: { telegram: "Running voice command..." },
-      description: "Demo command",
-    });
-
-    expect(result).toEqual({ ok: true });
-    expect(matchPluginCommand("/voice")?.command.nativeProgressMessages).toEqual({
-      telegram: "Running voice command...",
-    });
   });
 
   it("exposes native description localizations on plugin command specs", () => {
@@ -513,18 +778,6 @@ describe("registerPluginCommand", () => {
     expect(result).toEqual({
       ok: false,
       error: 'Description localization "ko" cannot be empty',
-    });
-  });
-
-  it("rejects empty native progress metadata", () => {
-    const result = registerVoiceCommandForTest({
-      nativeProgressMessages: { telegram: "   " },
-      description: "Demo command",
-    });
-
-    expect(result).toEqual({
-      ok: false,
-      error: 'Native progress message "telegram" cannot be empty',
     });
   });
 
@@ -560,29 +813,30 @@ describe("registerPluginCommand", () => {
     });
   });
 
-  it("rejects reserved ownership on non-reserved direct command registrations", () => {
-    const result = registerPluginCommand(
-      "demo-plugin",
-      {
-        name: "voice",
-        description: "Voice command",
-        ownership: "reserved",
-        handler: async () => ({ text: "ok" }),
+  it("sanitizes oversized arguments before passing them to plugin handlers", async () => {
+    let observedArgs: string | undefined;
+    registerVoiceCommandForTest({
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        observedArgs = ctx.args;
+        return { text: "ok" };
       },
-      { allowReservedCommandNames: true },
-    );
-
-    expect(result).toEqual({
-      ok: false,
-      error: "Reserved command ownership is only available to bundled reserved commands",
     });
+    const match = requirePluginCommandMatch(`/voice \0${"a".repeat(4094)}😀tail`);
+
+    await executeCommandFixture(match.command, {
+      args: match.args,
+    });
+
+    expect(observedArgs).toBe("a".repeat(4094));
   });
 
-  it("does not expose owner status to normal plugin commands", async () => {
+  it("ignores owner status opt-in from direct plugin command registration", async () => {
     let observedOwnerStatus: boolean | undefined;
     registerPluginCommand("demo-plugin", {
       name: "voice",
       description: "Voice command",
+      exposeSenderIsOwner: true,
       handler: async (ctx) => {
         observedOwnerStatus = ctx.senderIsOwner;
         return { text: "ok" };
@@ -590,91 +844,63 @@ describe("registerPluginCommand", () => {
     });
     const match = requirePluginCommandMatch("/voice");
 
-    await executePluginCommand({
-      command: match.command,
-      channel: "telegram",
-      isAuthorizedSender: true,
+    await executeCommandFixture(match.command, {
       senderIsOwner: true,
-      commandBody: "/voice",
-      config: {},
     });
 
     expect(observedOwnerStatus).toBeUndefined();
   });
 
-  it("allows command owners to run scoped plugin commands without gateway scopes", async () => {
+  it("ignores owner status opt-in from external plugin registry commands", async () => {
+    const pluginRegistry = createCommandRegistryFixture();
     let observedOwnerStatus: boolean | undefined;
-    const handler = vi.fn(async (ctx: { senderIsOwner?: boolean }) => {
-      observedOwnerStatus = ctx.senderIsOwner;
-      return { text: "ok" };
-    });
-    registerPluginCommand("demo-plugin", {
-      name: "pairlike",
-      description: "Scoped command",
-      requiredScopes: ["operator.pairing"],
-      handler,
-    });
-    const match = requirePluginCommandMatch("/pairlike");
+    pluginRegistry.registerCommand(
+      {
+        ...createBundledPluginRecord("external-plugin"),
+        origin: "workspace",
+        source: "/workspace/external-plugin/index.ts",
+        rootDir: "/workspace/external-plugin",
+      },
+      {
+        name: "external",
+        description: "External command",
+        exposeSenderIsOwner: true,
+        handler: async (ctx) => {
+          observedOwnerStatus = ctx.senderIsOwner;
+          return { text: "ok" };
+        },
+      },
+    );
+    setActivePluginRegistry(pluginRegistry.registry);
+    const match = requirePluginCommandMatch("/external");
 
-    const result = await executePluginCommand({
-      command: match.command,
-      channel: "telegram",
-      isAuthorizedSender: true,
+    await executeCommandFixture(match.command, {
       senderIsOwner: true,
-      commandBody: "/pairlike",
-      config: {},
     });
 
-    expect(result).toEqual({ text: "ok" });
-    expect(handler).toHaveBeenCalledTimes(1);
+    expect(observedOwnerStatus).toBeUndefined();
+  });
+
+  it("exposes owner status to trusted bundled plugin commands that opt in", async () => {
+    const pluginRegistry = createCommandRegistryFixture();
+    let observedOwnerStatus: boolean | undefined;
+    pluginRegistry.registerCommand(createBundledPluginRecord("device-pair"), {
+      name: "pair_test",
+      description: "Pair test command",
+      exposeSenderIsOwner: true,
+      handler: async (ctx) => {
+        observedOwnerStatus = ctx.senderIsOwner;
+        return { text: "ok" };
+      },
+    });
+    setActivePluginRegistry(pluginRegistry.registry);
+    const match = requirePluginCommandMatch("/pair_test");
+
+    await executeCommandFixture(match.command, {
+      senderIsOwner: true,
+    });
+
     expect(observedOwnerStatus).toBe(true);
-  });
-
-  it("rejects command owners when explicit gateway scopes miss the required scope", async () => {
-    const handler = vi.fn(async () => ({ text: "ok" }));
-    registerPluginCommand("demo-plugin", {
-      name: "pairlike",
-      description: "Scoped command",
-      requiredScopes: ["operator.pairing"],
-      handler,
-    });
-    const match = requirePluginCommandMatch("/pairlike");
-
-    const result = await executePluginCommand({
-      command: match.command,
-      channel: "webchat",
-      isAuthorizedSender: true,
-      senderIsOwner: true,
-      commandBody: "/pairlike",
-      gatewayClientScopes: ["operator.write"],
-      config: {},
-    });
-
-    expect(result).toEqual({ text: "⚠️ This command requires gateway scope: operator.pairing." });
-    expect(handler).not.toHaveBeenCalled();
-  });
-
-  it("rejects non-owner scoped plugin commands without gateway scopes", async () => {
-    const handler = vi.fn(async () => ({ text: "ok" }));
-    registerPluginCommand("demo-plugin", {
-      name: "pairlike",
-      description: "Scoped command",
-      requiredScopes: ["operator.pairing"],
-      handler,
-    });
-    const match = requirePluginCommandMatch("/pairlike");
-
-    const result = await executePluginCommand({
-      command: match.command,
-      channel: "telegram",
-      isAuthorizedSender: true,
-      senderIsOwner: false,
-      commandBody: "/pairlike",
-      config: {},
-    });
-
-    expect(result).toEqual({ text: "⚠️ This command requires gateway scope: operator.pairing." });
-    expect(handler).not.toHaveBeenCalled();
   });
 
   it("skips direct plugin command execution on unsupported channels", async () => {
@@ -684,19 +910,16 @@ describe("registerPluginCommand", () => {
       return { text: "ok" };
     };
 
-    const result = await executePluginCommand({
-      command: {
+    const result = await executeCommandFixture(
+      {
         name: "voice",
         description: "Voice command",
         channels: ["qqbot"],
         handler,
         pluginId: "demo-plugin",
       },
-      channel: "discord",
-      isAuthorizedSender: true,
-      commandBody: "/voice",
-      config: {},
-    });
+      { channel: "discord" },
+    );
 
     expect(result).toEqual({ continueAgent: true });
     expect(handlerCalled).toBe(false);
@@ -734,29 +957,15 @@ describe("registerPluginCommand", () => {
     });
     const match = requirePluginCommandMatch("/codex");
 
-    await executePluginCommand({
-      command: match.command,
-      channel: "telegram",
-      isAuthorizedSender: true,
+    await executeCommandFixture(match.command, {
       senderIsOwner: true,
-      commandBody: "/codex",
-      config: {},
     });
 
     expect(observedOwnerStatus).toBe(true);
   });
 
   it("rejects mismatched reserved command owners", () => {
-    const pluginRegistry = createPluginRegistry({
-      logger: {
-        info() {},
-        warn() {},
-        error() {},
-        debug() {},
-      },
-      runtime: {} as PluginRuntime,
-      activateGlobalSideEffects: true,
-    });
+    const pluginRegistry = createCommandRegistryFixture();
     pluginRegistry.registerCommand(createBundledPluginRecord("bundled-plugin"), {
       name: "codex",
       description: "Codex command",
@@ -790,7 +999,7 @@ describe("registerPluginCommand", () => {
       ),
     ).toEqual({ ok: true });
 
-    expect(second.getPluginCommandSpecs("telegram")).toEqual([
+    expect(getPluginCommandSpecs("telegram")).toEqual([
       {
         name: "voice",
         description: "Voice command",
@@ -804,14 +1013,13 @@ describe("registerPluginCommand", () => {
     second.clearPluginCommands();
   });
 
-  it.each(["/talkvoice now", "/discordvoice now"] as const)(
-    "matches provider-specific native alias %s back to the canonical command",
-    (commandBody) => {
+  it.each(["discord"] as const)(
+    "matches live %s aliases back to the canonical command",
+    (provider) => {
+      const nativeNames = { default: "talkvoice", discord: "discordvoice" };
+      const commandBody = `/${nativeNames[provider]} now`;
       const result = registerVoiceCommandForTest({
-        nativeNames: {
-          default: "talkvoice",
-          discord: "discordvoice",
-        },
+        nativeNames,
         description: "Demo command",
         acceptsArgs: true,
       });
@@ -821,6 +1029,13 @@ describe("registerPluginCommand", () => {
         name: "voice",
         pluginId: "demo-plugin",
         args: "now",
+      });
+      nativeNames[provider] = "renamedvoice";
+      expect(matchPluginCommand(commandBody)).toBeNull();
+      expectCommandMatch("/renamedvoice later", {
+        name: "voice",
+        pluginId: "demo-plugin",
+        args: "later",
       });
     },
   );
@@ -850,94 +1065,9 @@ describe("registerPluginCommand", () => {
         error: 'Command "pair_device" already registered by plugin "demo-plugin"',
       },
     },
-    {
-      name: "rejects reserved provider aliases",
-      candidate: createVoiceCommand({
-        nativeNames: {
-          telegram: "help",
-        },
-      }),
-      expected: {
-        ok: false,
-        error:
-          'Native command alias "telegram" invalid: Command name "help" is reserved by a built-in command',
-      },
-    },
   ] as const)("$name", ({ setup, candidate, expected }) => {
     setup?.();
     expect(registerPluginCommand("other-plugin", candidate)).toEqual(expected);
-  });
-
-  it.each([
-    {
-      name: "resolves Discord DM command bindings with the user target prefix intact",
-      params: {
-        channel: "discord",
-        from: "discord:1177378744822943744",
-        to: "slash:1177378744822943744",
-        accountId: "default",
-      },
-      expected: {
-        channel: "discord",
-        accountId: "default",
-        conversationId: "user:1177378744822943744",
-      },
-    },
-    {
-      name: "resolves Discord guild command bindings with the channel target prefix intact",
-      params: {
-        channel: "discord",
-        from: "discord:channel:1480554272859881494",
-        accountId: "default",
-      },
-      expected: {
-        channel: "discord",
-        accountId: "default",
-        conversationId: "channel:1480554272859881494",
-      },
-    },
-    {
-      name: "resolves Discord thread command bindings with parent channel context intact",
-      params: {
-        channel: "discord",
-        from: "discord:channel:1480554272859881494",
-        accountId: "default",
-        messageThreadId: "thread-42",
-        threadParentId: "channel-parent-7",
-      },
-      expected: {
-        channel: "discord",
-        accountId: "default",
-        conversationId: "channel:1480554272859881494",
-        parentConversationId: "channel-parent-7",
-        threadId: "thread-42",
-      },
-    },
-    {
-      name: "does not resolve binding conversations for unsupported command channels",
-      params: {
-        channel: "slack",
-        from: "slack:U123",
-        to: "C456",
-        accountId: "default",
-      },
-      expected: null,
-    },
-    {
-      name: "resolves sender-keyed command bindings when only senderId is available",
-      params: {
-        channel: "signal",
-        senderId: "signal-user-42",
-        accountId: "default",
-      },
-      expected: {
-        channel: "signal",
-        accountId: "default",
-        conversationId: "dm:signal-user-42",
-      },
-    },
-  ] as const)("$name", ({ params, expected }) => {
-    expectBindingConversationCase(params, expected);
   });
 
   it("does not expose binding APIs to plugin commands on unsupported channels", async () => {
@@ -970,26 +1100,60 @@ describe("registerPluginCommand", () => {
       { pluginRoot: "/plugins/demo-plugin" },
     );
 
-    const result = await executePluginCommand({
-      command: {
-        name: "bindcheck",
-        description: "Demo command",
+    const result = await executeCommandFixture(
+      executionCommand("bindcheck", handler, { pluginRoot: "/plugins/demo-plugin" }),
+      {
+        channel: "slack",
+        senderId: "U123",
+        from: "slack:U123",
+        to: "C456",
+        accountId: "default",
+      },
+    );
+
+    expectUnsupportedBindingApiResult(result);
+  });
+
+  it("uses the stable originating target for plugin conversation commands", async () => {
+    const resolveCommandConversation = vi.fn(() => null);
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "slack",
+          source: "test",
+          plugin: {
+            ...createChannelTestPluginBase({ id: "slack", label: "Slack" }),
+            bindings: { resolveCommandConversation },
+          },
+        },
+      ]),
+    );
+    const handler = vi.fn(async () => ({ text: "ok" }));
+
+    await executeCommandFixture(
+      {
+        name: "control",
+        description: "Control a binding",
         acceptsArgs: false,
         handler,
         pluginId: "demo-plugin",
-        pluginRoot: "/plugins/demo-plugin",
       },
-      channel: "slack",
-      senderId: "U123",
-      isAuthorizedSender: true,
-      commandBody: "/bindcheck",
-      config: {} as never,
-      from: "slack:U123",
-      to: "C456",
-      accountId: "default",
-    });
+      {
+        channel: "slack",
+        senderId: "U123",
+        from: "slack:U123",
+        to: "changed-runtime-target",
+        originatingTo: "user:U123",
+        accountId: "default",
+      },
+    );
 
-    expectUnsupportedBindingApiResult(result);
+    expect(resolveCommandConversation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        originatingTo: "user:U123",
+        commandTo: "changed-runtime-target",
+      }),
+    );
   });
 
   it("passes host session identity through to the plugin command context", async () => {
@@ -1004,21 +1168,11 @@ describe("registerPluginCommand", () => {
       return { text: "ok" };
     };
 
-    const result = await executePluginCommand({
-      command: {
-        name: "sessioncheck",
-        description: "Demo command",
-        acceptsArgs: false,
-        handler,
-        pluginId: "demo-plugin",
-      },
+    const result = await executeCommandFixture(executionCommand("sessioncheck", handler), {
       channel: "whatsapp",
       senderId: "U123",
-      isAuthorizedSender: true,
       sessionKey: "agent:main:whatsapp:direct:123",
       sessionId: "session-123",
-      commandBody: "/sessioncheck",
-      config: {} as never,
     });
 
     expect(result).toEqual({ text: "ok" });
@@ -1026,22 +1180,56 @@ describe("registerPluginCommand", () => {
     expect(receivedCtx?.sessionId).toBe("session-123");
   });
 
+  it("binds legacy main session plugin llm runtime to the default agent", async () => {
+    const handler = completionCommandHandler("draft");
+
+    await executeCommandFixture(executionCommand("runtimecheck", handler), {
+      senderId: "U123",
+      sessionKey: "main",
+      config: {
+        agents: {
+          entries: { ops: {} },
+          defaults: {
+            model: "openai/gpt-5.5",
+          },
+        },
+        session: {
+          mainKey: "main",
+        },
+      } as never,
+    });
+
+    expect(completionMocks.acquireSimpleCompletionModelForAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "ops",
+      }),
+    );
+  });
+
+  it("binds plugin-owned command sessions to the host-resolved agent", async () => {
+    const handler = completionCommandHandler("summarize");
+
+    await executeCommandFixture(executionCommand("runtimecheck", handler), {
+      channel: "discord",
+      senderId: "U123",
+      agentId: "codex",
+      sessionKey: "plugin-binding:openclaw-codex-app-server:dm",
+      authProfileId: "openai:owner@example.com",
+    });
+
+    expect(completionMocks.acquireSimpleCompletionModelForAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "codex",
+        preferredProfile: "openai:owner@example.com",
+      }),
+    );
+  });
+
   it("normalizes undefined plugin command handler results to an empty reply payload", async () => {
     const handler = async () => undefined as never;
 
-    const result = await executePluginCommand({
-      command: {
-        name: "silentcheck",
-        description: "Demo command",
-        acceptsArgs: false,
-        handler,
-        pluginId: "demo-plugin",
-      },
-      channel: "telegram",
+    const result = await executeCommandFixture(executionCommand("silentcheck", handler), {
       senderId: "U123",
-      isAuthorizedSender: true,
-      commandBody: "/silentcheck",
-      config: {} as never,
     });
 
     expect(result).toStrictEqual({});
@@ -1097,19 +1285,9 @@ describe("registerPluginCommand", () => {
       return { text: "ok" };
     };
 
-    const result = await executePluginCommand({
-      command: {
-        name: "accountcheck",
-        description: "Demo command",
-        acceptsArgs: false,
-        handler,
-        pluginId: "demo-plugin",
-      },
+    const result = await executeCommandFixture(executionCommand("accountcheck", handler), {
       channel: "line",
       senderId: "U123",
-      isAuthorizedSender: true,
-      commandBody: "/accountcheck",
-      config: {} as never,
       from: "line:user:U1234567890abcdef1234567890abcdef",
     });
 
@@ -1117,3 +1295,4 @@ describe("registerPluginCommand", () => {
     expect(receivedCtx?.accountId).toBe("work");
   });
 });
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

@@ -1,29 +1,33 @@
-import type { DiagnosticSessionActiveWorkKind } from "../infra/diagnostic-events.js";
-
-export type DiagnosticSessionRecoveryStatus =
-  | "aborted"
-  | "released"
-  | "skipped"
-  | "noop"
-  | "failed";
-
-export type DiagnosticSessionRecoverySkipReason =
-  | "active_embedded_run"
-  | "active_reply_work"
-  | "active_lane_task"
-  | "already_in_flight"
-  | "missing_session_ref"
-  | "stale_session_state";
-
-export type DiagnosticSessionRecoveryNoopReason = "no_active_work";
+import type {
+  DiagnosticSessionActiveWorkKind,
+  DiagnosticSessionState,
+} from "../infra/diagnostic-events.js";
+import type { ReplyOperation } from "../sessions/session-controller.contracts.js";
 
 export type StuckSessionRecoveryRequest = {
+  /** Exact captured controller owner; diagnostic IDs and map absence grant no authority. */
+  operation?: ReplyOperation;
   sessionId?: string;
   sessionKey?: string;
+  sessionFile?: string;
   ageMs: number;
   queueDepth?: number;
+  /** Recorded controller decision for SDK recovery callbacks, never independent authority. */
   allowActiveAbort?: boolean;
+  /** Legacy diagnostic threshold metadata retained by the logging-core SDK callback contract. */
+  repeatedRequestNoProgressAbortMs?: number;
+  expectedState?: DiagnosticSessionState;
   stateGeneration?: number;
+  /**
+   * Legacy observation threshold retained for SDK callback compatibility.
+   * The captured controller alone decides whether its work can be recovered.
+   */
+  staleActiveProgressAbortMs?: number;
+  /**
+   * Resolved compaction timeout metadata retained for SDK callbacks.
+   * It never grants ownerless recovery or changes the controller deadline.
+   */
+  compactionSafetyTimeoutMs?: number;
 };
 
 type DiagnosticSessionRecoveryBaseOutcome = {
@@ -36,62 +40,57 @@ type DiagnosticSessionRecoveryBaseOutcome = {
 
 export type StuckSessionRecoveryOutcome =
   | (DiagnosticSessionRecoveryBaseOutcome & {
+      status: "noop";
+      action: "reconcile_state";
+      reason: "no_active_work" | "pending_session_work";
+    })
+  | (DiagnosticSessionRecoveryBaseOutcome & {
       status: "aborted";
       action: "abort_embedded_run";
       aborted: boolean;
       drained: boolean;
       forceCleared: boolean;
       released: number;
+      queuedCount?: number;
     })
   | (DiagnosticSessionRecoveryBaseOutcome & {
       status: "released";
       action: "release_lane";
+      reason?: "no_active_work" | "stale_lane_task";
       released: number;
+      queuedCount?: number;
     })
   | (DiagnosticSessionRecoveryBaseOutcome & {
       status: "skipped";
       action: "observe_only" | "keep_lane";
-      reason: DiagnosticSessionRecoverySkipReason;
+      reason:
+        | "active_embedded_run"
+        | "model_attempt_recovery"
+        | "active_reply_work"
+        | "human_input_wait"
+        | "runtime_owned_wait"
+        | "deferred_maintenance_wait"
+        | "terminal_outcome_committed"
+        | "global_lane_wait"
+        | "active_lane_task"
+        | "already_in_flight"
+        | "missing_session_ref"
+        | "stale_session_state";
       activeCount?: number;
       queuedCount?: number;
-    })
-  | (DiagnosticSessionRecoveryBaseOutcome & {
-      status: "noop";
-      action: "none";
-      reason: DiagnosticSessionRecoveryNoopReason;
     })
   | (DiagnosticSessionRecoveryBaseOutcome & {
       status: "failed";
       action: "none";
       reason: "exception";
       error: string;
+    })
+  | (DiagnosticSessionRecoveryBaseOutcome & {
+      status: "failed";
+      action: "fail_worker_turn";
+      reason: "terminal_worker";
+      error: string;
     });
-
-export function recoveryOutcomeMutatesSessionState(
-  outcome: StuckSessionRecoveryOutcome | undefined,
-): boolean {
-  if (!outcome) {
-    return false;
-  }
-  return (
-    outcome.status === "aborted" ||
-    outcome.status === "released" ||
-    (outcome.status === "noop" && outcome.reason === "no_active_work")
-  );
-}
-
-export function recoveryOutcomeClearsQueuedSessionState(
-  outcome: StuckSessionRecoveryOutcome,
-): boolean {
-  return (
-    outcome.status === "released" ||
-    (outcome.status === "noop" && outcome.reason === "no_active_work")
-  );
-}
-
-export function recoveryOutcomeReleasedCount(outcome: StuckSessionRecoveryOutcome): number {
-  return "released" in outcome ? outcome.released : 0;
-}
 
 export function formatRecoveryOutcome(outcome: StuckSessionRecoveryOutcome): string {
   const fields = [
@@ -122,10 +121,16 @@ export function formatRecoveryOutcome(outcome: StuckSessionRecoveryOutcome): str
   if ("released" in outcome) {
     fields.push(`released=${outcome.released}`);
   }
+  if (
+    (outcome.status === "aborted" || outcome.status === "released") &&
+    outcome.queuedCount !== undefined
+  ) {
+    fields.push(`queuedCount=${outcome.queuedCount}`);
+  }
   if ("activeCount" in outcome && outcome.activeCount !== undefined) {
     fields.push(`laneActive=${outcome.activeCount}`);
   }
-  if ("queuedCount" in outcome && outcome.queuedCount !== undefined) {
+  if (outcome.status === "skipped" && outcome.queuedCount !== undefined) {
     fields.push(`laneQueued=${outcome.queuedCount}`);
   }
   if ("error" in outcome) {

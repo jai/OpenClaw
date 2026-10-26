@@ -1,5 +1,5 @@
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { detectBinary as defaultDetectBinary } from "../../plugins/setup-binary.js";
+import { detectBinary as defaultDetectBinary } from "../../infra/detect-binary.js";
 import type {
   ChannelSetupWizard,
   ChannelSetupWizardStatus,
@@ -38,19 +38,14 @@ export function createDetectedBinaryStatus(params: {
     async resolveStatusLines({ cfg, accountId, configured }: SetupStatusParams): Promise<string[]> {
       const binaryPath = params.resolveBinaryPath({ cfg, accountId });
       const detected = await detectBinary(binaryPath);
+      // Report config state and binary detection separately; users can be
+      // configured but still missing the CLI binary required for runtime use.
       return [
         `${params.channelLabel}: ${configured ? params.configuredLabel : params.unconfiguredLabel}`,
         `${params.binaryLabel}: ${detected ? "found" : "missing"} (${binaryPath})`,
       ];
     },
-    async resolveSelectionHint({
-      cfg,
-      accountId,
-    }: {
-      cfg: OpenClawConfig;
-      accountId?: string;
-      configured: boolean;
-    }): Promise<string | undefined> {
+    async resolveSelectionHint({ cfg, accountId }: SetupStatusParams): Promise<string | undefined> {
       return (await detectBinary(params.resolveBinaryPath({ cfg, accountId })))
         ? params.configuredHint
         : params.unconfiguredHint;
@@ -58,11 +53,7 @@ export function createDetectedBinaryStatus(params: {
     async resolveQuickstartScore({
       cfg,
       accountId,
-    }: {
-      cfg: OpenClawConfig;
-      accountId?: string;
-      configured: boolean;
-    }): Promise<number | undefined> {
+    }: SetupStatusParams): Promise<number | undefined> {
       return (await detectBinary(params.resolveBinaryPath({ cfg, accountId })))
         ? params.configuredScore
         : params.unconfiguredScore;
@@ -91,25 +82,9 @@ export function createCliPathTextInput(params: {
   };
 }
 
-export function createDelegatedSetupWizardStatusResolvers(
-  loadWizard: () => Promise<ChannelSetupWizard>,
-): Pick<
-  ChannelSetupWizardStatus,
-  "resolveStatusLines" | "resolveSelectionHint" | "resolveQuickstartScore"
-> {
-  return {
-    async resolveStatusLines(params) {
-      return (await loadWizard()).status.resolveStatusLines?.(params) ?? [];
-    },
-    async resolveSelectionHint(params) {
-      return await (await loadWizard()).status.resolveSelectionHint?.(params);
-    },
-    async resolveQuickstartScore(params) {
-      return await (await loadWizard()).status.resolveQuickstartScore?.(params);
-    },
-  };
-}
-
+/**
+ * Delegates a text input's `shouldPrompt` check to a lazily loaded setup wizard.
+ */
 export function createDelegatedTextInputShouldPrompt(params: {
   loadWizard: () => Promise<ChannelSetupWizard>;
   inputKey: ChannelSetupWizardTextInput["inputKey"];

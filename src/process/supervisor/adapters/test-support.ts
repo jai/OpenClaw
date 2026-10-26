@@ -5,6 +5,7 @@ type WaitResult = {
   signal: number | NodeJS.Signals | null;
 };
 
+/** Assert fallback SIGKILL resolves only after the grace timer expires. */
 export async function expectWaitStaysPendingUntilSigkillFallback(
   waitPromise: Promise<WaitResult>,
   triggerKill: () => void,
@@ -22,19 +23,4 @@ export async function expectWaitStaysPendingUntilSigkillFallback(
 
   await vi.advanceTimersByTimeAsync(1);
   await expect(waitPromise).resolves.toEqual({ code: null, signal: "SIGKILL" });
-}
-
-export async function expectRealExitWinsOverSigkillFallback(params: {
-  waitPromise: Promise<WaitResult>;
-  triggerKill: () => void;
-  emitExit: () => void;
-  expected: WaitResult;
-}): Promise<void> {
-  params.triggerKill();
-  params.emitExit();
-
-  await expect(params.waitPromise).resolves.toEqual(params.expected);
-
-  await vi.advanceTimersByTimeAsync(4_001);
-  await expect(params.waitPromise).resolves.toEqual(params.expected);
 }

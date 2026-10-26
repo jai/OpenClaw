@@ -1,96 +1,85 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createProviderUsageFetch } from "../test-utils/provider-usage-fetch.js";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type * as ProviderRuntime from "../plugins/provider-runtime.js";
+import { loadProviderUsageSummary } from "./provider-usage.load.js";
+import type { ProviderUsageSnapshot } from "./provider-usage.types.js";
 
-const resolveProviderUsageSnapshotWithPluginMock = vi.fn();
+const mocks = vi.hoisted(() => {
+  const dispatcher = { dispatch: () => true };
+  const fetch = vi.fn();
+  return {
+    resolve: vi.fn<typeof ProviderRuntime.resolveProviderUsageSnapshotWithPlugin>(),
+    dispatcher,
+    proxyAgent: vi.fn(() => dispatcher),
+    runtime: vi.fn(() => ({ FormData: globalThis.FormData, fetch })),
+    fetch,
+  };
+});
 
 vi.mock("../config/config.js", () => ({
   getRuntimeConfig: () => ({}),
 }));
 
-vi.mock("../plugins/provider-runtime.js", async () => {
-  const actual = await vi.importActual<typeof import("../plugins/provider-runtime.js")>(
-    "../plugins/provider-runtime.js",
+// mock-isolation: Capture proxy dispatch without opening real network connections.
+vi.mock("./net/undici-runtime.js", () => ({
+  createHttp1EnvHttpProxyAgent: mocks.proxyAgent,
+  loadUndiciRuntimeDeps: mocks.runtime,
+}));
+
+vi.mock("../plugins/provider-runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../plugins/provider-runtime.js")>()),
+  resolveProviderUsageSnapshotWithPlugin: mocks.resolve,
+}));
+
+const usageNow = Date.UTC(2026, 0, 7);
+const snapshot: ProviderUsageSnapshot = {
+  provider: "openai",
+  displayName: "OpenAI",
+  windows: [{ label: "5h", usedPercent: 9 }],
+};
+const expected = { updatedAt: usageNow, providers: [snapshot] };
+const env = { HTTP_PROXY: "", HTTPS_PROXY: "http://proxy.test:8080" };
+const url = "https://chatgpt.com/backend-api/wham/usage";
+const options = {
+  auth: [{ provider: "openai", token: "codex-token", accountId: "acc-1" }],
+  env,
+};
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.spyOn(Date, "now").mockReturnValue(usageNow);
+  mocks.resolve.mockResolvedValue(null);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => {
+      throw new Error("unexpected global fetch");
+    }),
   );
-  return {
-    ...actual,
-    resolveProviderUsageSnapshotWithPlugin: (...args: unknown[]) =>
-      resolveProviderUsageSnapshotWithPluginMock(...args),
-  };
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
-let loadProviderUsageSummary: typeof import("./provider-usage.load.js").loadProviderUsageSummary;
-
-const usageNow = Date.UTC(2026, 0, 7, 0, 0, 0);
-
-function requireFirstPluginUsageCall(): {
-  provider?: unknown;
-  context?: {
-    provider?: unknown;
-    token?: unknown;
-    timeoutMs?: unknown;
-  };
-} {
-  const [call] = resolveProviderUsageSnapshotWithPluginMock.mock.calls;
-  if (!call) {
-    throw new Error("expected provider usage plugin call");
-  }
-  const [pluginCall] = call;
-  if (!pluginCall || typeof pluginCall !== "object" || Array.isArray(pluginCall)) {
-    throw new Error("expected provider usage plugin call");
-  }
-  return pluginCall as {
-    provider?: unknown;
-    context?: {
-      provider?: unknown;
-      token?: unknown;
-      timeoutMs?: unknown;
-    };
-  };
-}
-
-describe("provider-usage.load plugin boundary", () => {
-  beforeAll(async () => {
-    ({ loadProviderUsageSummary } = await import("./provider-usage.load.js"));
+it("routes synthetic usage to the Codex hook with the original OpenAI account context", async () => {
+  mocks.resolve.mockResolvedValueOnce(snapshot);
+  const auth = { provider: "openai", token: "codex-app-server", authProfileId: "openai:work" };
+  const result = await loadProviderUsageSummary({
+    env: {},
+    auth: [{ ...auth, hookProvider: "codex" }],
   });
+  expect(result).toEqual(expected);
+  expect(mocks.resolve.mock.calls).toMatchObject([[{ provider: "codex", context: auth }]]);
+});
 
-  beforeEach(() => {
-    resolveProviderUsageSnapshotWithPluginMock.mockReset();
-    resolveProviderUsageSnapshotWithPluginMock.mockResolvedValue(null);
+it("routes plugin fetch through the configured proxy", async () => {
+  mocks.fetch.mockResolvedValueOnce(new Response("{}"));
+  mocks.resolve.mockImplementationOnce(async ({ context }) => {
+    await context.fetchFn(url);
+    return snapshot;
   });
-
-  it("prefers plugin-owned usage snapshots", async () => {
-    resolveProviderUsageSnapshotWithPluginMock.mockResolvedValueOnce({
-      provider: "github-copilot",
-      displayName: "Copilot",
-      windows: [{ label: "Plugin", usedPercent: 11 }],
-    });
-    const mockFetch = createProviderUsageFetch(async () => {
-      throw new Error("legacy fetch should not run");
-    });
-
-    await expect(
-      loadProviderUsageSummary({
-        now: usageNow,
-        auth: [{ provider: "github-copilot", token: "copilot-token" }],
-        fetch: mockFetch as unknown as typeof fetch,
-      }),
-    ).resolves.toEqual({
-      updatedAt: usageNow,
-      providers: [
-        {
-          provider: "github-copilot",
-          displayName: "Copilot",
-          windows: [{ label: "Plugin", usedPercent: 11 }],
-        },
-      ],
-    });
-
-    expect(mockFetch).not.toHaveBeenCalled();
-    expect(resolveProviderUsageSnapshotWithPluginMock).toHaveBeenCalledOnce();
-    const pluginCall = requireFirstPluginUsageCall();
-    expect(pluginCall.provider).toBe("github-copilot");
-    expect(pluginCall.context?.provider).toBe("github-copilot");
-    expect(pluginCall.context?.token).toBe("copilot-token");
-    expect(pluginCall.context?.timeoutMs).toBe(5_000);
-  });
+  expect(await loadProviderUsageSummary(options)).toEqual(expected);
+  expect(mocks.proxyAgent.mock.calls).toEqual([
+    [{ httpsProxy: "http://proxy.test:8080" }, undefined, env],
+  ]);
+  expect(mocks.fetch.mock.calls).toMatchObject([[url, { dispatcher: mocks.dispatcher }]]);
 });

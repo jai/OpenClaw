@@ -1,49 +1,115 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import type {
+  ChannelAccountSnapshot,
+  ChannelPlugin,
+  ChannelStatusIssue,
+} from "../channels/plugins/types.public.js";
 
-const listChannelPluginsMock = vi.hoisted(() => vi.fn());
+const mocks = vi.hoisted(() => ({ listChannelPlugins: vi.fn() }));
 
 vi.mock("../channels/plugins/index.js", () => ({
-  listChannelPlugins: () => listChannelPluginsMock(),
+  listChannelPlugins: mocks.listChannelPlugins,
 }));
 
 import { collectChannelStatusIssues } from "./channels-status-issues.js";
 
-describe("collectChannelStatusIssues", () => {
-  it("returns no issues when payload accounts are missing or not arrays", () => {
-    const collectTelegramIssues = vi.fn(() => [{ code: "telegram" }]);
-    listChannelPluginsMock.mockReturnValue([
-      { id: "telegram", status: { collectStatusIssues: collectTelegramIssues } },
-    ]);
+function createPlugin(
+  id: string,
+  collectStatusIssues?: NonNullable<ChannelPlugin["status"]>["collectStatusIssues"],
+) {
+  return {
+    id,
+    status: collectStatusIssues ? { collectStatusIssues } : undefined,
+  } as ChannelPlugin;
+}
 
-    expect(collectChannelStatusIssues({})).toStrictEqual([]);
-    expect(collectChannelStatusIssues({ channelAccounts: { telegram: { bad: true } } })).toEqual(
-      [],
-    );
-    expect(collectTelegramIssues).not.toHaveBeenCalled();
-  });
+function account(overrides: Partial<ChannelAccountSnapshot> = {}): ChannelAccountSnapshot {
+  return {
+    accountId: "default",
+    enabled: true,
+    configured: true,
+    running: true,
+    connected: true,
+    ...overrides,
+  };
+}
 
-  it("skips plugins without collectors and concatenates collector output in plugin order", () => {
-    const collectTelegramIssues = vi.fn(() => [{ code: "telegram.down" }]);
-    const collectSlackIssues = vi.fn(() => [{ code: "slack.warn" }, { code: "slack.auth" }]);
-    const telegramAccounts = [{ id: "tg-1" }];
-    const slackAccounts = [{ id: "sl-1" }];
-    listChannelPluginsMock.mockReturnValueOnce([
-      { id: "discord" },
-      { id: "telegram", status: { collectStatusIssues: collectTelegramIssues } },
-      { id: "slack", status: { collectStatusIssues: collectSlackIssues } },
-    ]);
+function collect(accounts: ChannelAccountSnapshot[]) {
+  return collectChannelStatusIssues({ channelAccounts: { example: accounts } });
+}
 
-    expect(
-      collectChannelStatusIssues({
-        channelAccounts: {
-          discord: [{ id: "dc-1" }],
-          telegram: telegramAccounts,
-          slack: slackAccounts,
-        },
-      }),
-    ).toEqual([{ code: "telegram.down" }, { code: "slack.warn" }, { code: "slack.auth" }]);
+function issue(
+  channel: string,
+  kind: ChannelStatusIssue["kind"],
+  message: string,
+  extra: Partial<Pick<ChannelStatusIssue, "accountId" | "fix">> = {},
+): ChannelStatusIssue {
+  return { channel, accountId: "default", kind, message, ...extra };
+}
 
-    expect(collectTelegramIssues).toHaveBeenCalledWith(telegramAccounts);
-    expect(collectSlackIssues).toHaveBeenCalledWith(slackAccounts);
-  });
+afterEach(() => vi.clearAllMocks());
+
+it("returns no issues when payload accounts are missing or not arrays", () => {
+  const collectTelegramIssues = vi.fn(() => [issue("telegram", "runtime", "telegram down")]);
+  mocks.listChannelPlugins.mockReturnValue([createPlugin("telegram", collectTelegramIssues)]);
+
+  expect(collectChannelStatusIssues({})).toStrictEqual([]);
+  expect(collectChannelStatusIssues({ channelAccounts: { telegram: { bad: true } } })).toEqual([]);
+  expect(collectTelegramIssues).not.toHaveBeenCalled();
+});
+
+it("uses Gateway-owned diagnostics without loading local plugins or duplicating issues", () => {
+  const statusIssues = [
+    issue("guildchat", "config", "Configuration reload is deferred.", { accountId: "work" }),
+  ];
+  expect(collectChannelStatusIssues({ statusIssues })).toEqual(statusIssues);
+  expect(collectChannelStatusIssues({ statusIssues: [] })).toEqual([]);
+  expect(mocks.listChannelPlugins).not.toHaveBeenCalled();
+});
+
+it.each<[Partial<ChannelAccountSnapshot>, string, string]>([
+  [
+    { lifecycle: "blocked" },
+    "Channel runtime is blocked and needs operator action.",
+    "resolve the reported channel error, then restart the channel",
+  ],
+  [
+    { restartPending: true, ingressUnavailable: true },
+    "Channel cannot admit inbound events; its durable ingress queue is unavailable. Outbound may still work.",
+    "check openclaw logs for the ingress failure, then rerun openclaw doctor",
+  ],
+])("reports generic runtime diagnostics for %j", (state, message, fix) => {
+  mocks.listChannelPlugins.mockReturnValue([createPlugin("example")]);
+  expect(collect([account(state)])).toEqual([issue("example", "runtime", message, { fix })]);
+});
+
+it("reports stopped configured accounts without treating unknown runtime state as stopped", () => {
+  mocks.listChannelPlugins.mockReturnValue([createPlugin("example")]);
+
+  expect(
+    collect([
+      { accountId: "stopped", enabled: true, configured: true, running: false },
+      { accountId: "unknown", enabled: true, configured: true },
+      { accountId: "disabled", enabled: false, configured: true, running: false },
+      { accountId: "unconfigured", enabled: true, configured: false, running: false },
+    ]),
+  ).toEqual([
+    issue(
+      "example",
+      "runtime",
+      "Channel is enabled and configured, but its runtime is not running.",
+      { accountId: "stopped", fix: "restart the channel or gateway" },
+    ),
+  ]);
+});
+
+it("keeps plugin-specific status issues while adding generic runtime issues", () => {
+  const authIssue = issue("example", "auth", "Linked device credentials are invalid.");
+  mocks.listChannelPlugins.mockReturnValue([createPlugin("example", () => [authIssue])]);
+  expect(collect([account({ connected: false })])).toEqual([
+    issue("example", "runtime", "Channel reports running, but the runtime is disconnected.", {
+      fix: "restart the channel or gateway",
+    }),
+    authIssue,
+  ]);
 });

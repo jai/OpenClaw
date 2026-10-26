@@ -4,31 +4,27 @@ import { resolveMcpTransportConfig } from "./mcp-transport-config.js";
 
 vi.mock("../logger.js", () => ({ logWarn: vi.fn() }));
 
+const defaults = {
+  connectionTimeoutMs: 30_000,
+  requestTimeoutMs: 60_000,
+  supportsParallelToolCalls: false,
+};
+const warning = (server: string, key: string) =>
+  `bundle-mcp: server "${server}": env "${key}" is blocked for stdio startup safety and was ignored.`;
+
 describe("resolveMcpTransportConfig", () => {
   beforeEach(() => {
     vi.mocked(logWarn).mockClear();
   });
 
-  it("resolves stdio config with connection timeout", () => {
-    const resolved = resolveMcpTransportConfig("probe", {
-      command: "node",
-      args: ["./server.mjs"],
-      connectionTimeoutMs: 12_345,
-    });
-
-    expect(resolved).toEqual({
-      kind: "stdio",
-      transportType: "stdio",
-      command: "node",
-      args: ["./server.mjs"],
-      env: undefined,
-      cwd: undefined,
-      description: "node ./server.mjs",
-      connectionTimeoutMs: 12_345,
-    });
-  });
-
   it("drops dangerous env overrides from stdio config", () => {
+    const blocked = {
+      NODE_OPTIONS: "--require=./evil.js",
+      LD_PRELOAD: "/tmp/pwn.so",
+      BASH_ENV: "/tmp/pwn.sh",
+      ANSIBLE_CONFIG: "/tmp/evil-ansible.cfg",
+      TF_CLI_CONFIG_FILE: "/tmp/evil-terraform.rc",
+    };
     const resolved = resolveMcpTransportConfig("probe", {
       command: "node",
       env: {
@@ -37,9 +33,7 @@ describe("resolveMcpTransportConfig", () => {
         ENABLED: true,
         GITHUB_TOKEN: "token",
         HTTP_PROXY: "http://proxy.example",
-        NODE_OPTIONS: "--require=./evil.js",
-        LD_PRELOAD: "/tmp/pwn.so",
-        BASH_ENV: "/tmp/pwn.sh",
+        ...blocked,
       },
     });
 
@@ -48,6 +42,9 @@ describe("resolveMcpTransportConfig", () => {
       transportType: "stdio",
       command: "node",
       args: undefined,
+      cwd: undefined,
+      description: "node",
+      ...defaults,
       env: {
         SAFE_VALUE: "ok",
         PORT: "3000",
@@ -55,40 +52,29 @@ describe("resolveMcpTransportConfig", () => {
         GITHUB_TOKEN: "token",
         HTTP_PROXY: "http://proxy.example",
       },
-      cwd: undefined,
-      description: "node",
-      connectionTimeoutMs: 30_000,
     });
-    expect(logWarn).toHaveBeenCalledWith(
-      'bundle-mcp: server "probe": env "NODE_OPTIONS" is blocked for stdio startup safety and was ignored.',
-    );
-    expect(logWarn).toHaveBeenCalledWith(
-      'bundle-mcp: server "probe": env "LD_PRELOAD" is blocked for stdio startup safety and was ignored.',
-    );
-    expect(logWarn).toHaveBeenCalledWith(
-      'bundle-mcp: server "probe": env "BASH_ENV" is blocked for stdio startup safety and was ignored.',
-    );
+    for (const key of Object.keys(blocked)) {
+      expect(logWarn).toHaveBeenCalledWith(warning("probe", key));
+    }
   });
 
-  it("uses an explicit empty stdio env when all configured env keys are blocked", () => {
-    const resolved = resolveMcpTransportConfig("probe", {
-      command: "node",
-      env: {
-        NODE_OPTIONS: "--require=./evil.js",
-        BASH_ENV: "/tmp/pwn.sh",
-      },
-    });
-
-    expect(resolved).toEqual({
-      kind: "stdio",
-      transportType: "stdio",
-      command: "node",
-      args: undefined,
-      env: {},
-      cwd: undefined,
-      description: "node",
-      connectionTimeoutMs: 30_000,
-    });
+  it("warns once per blocked stdio env key and server", () => {
+    const warnings = [
+      ["repeat-server", "PYTHONPATH"],
+      ["other-server", "PYTHONPATH"],
+      ["repeat-server", "NODE_OPTIONS"],
+      ["svc", "LD_A:LD_B"],
+      ["svc:LD_A", "LD_B"],
+    ] as const;
+    for (const [server, key] of [warnings[0], warnings[0], ...warnings]) {
+      expect(
+        resolveMcpTransportConfig(server, { command: "node", env: { [key]: "/tmp/unsafe" } }),
+      ).toEqual(expect.objectContaining({ env: {} }));
+    }
+    expect(logWarn).toHaveBeenCalledTimes(5);
+    expect(vi.mocked(logWarn).mock.calls).toEqual(
+      warnings.map(([server, key]) => [warning(server, key)]),
+    );
   });
 
   it("sanitizes config-controlled names in stdio env warnings", () => {
@@ -116,65 +102,26 @@ describe("resolveMcpTransportConfig", () => {
     expect(resolved).toEqual({
       kind: "http",
       transportType: "sse",
+      ...defaults,
       url: "https://mcp.example.com/sse",
       headers: {
         Authorization: "Bearer token",
         "X-Count": "42",
       },
       description: "https://mcp.example.com/sse",
-      connectionTimeoutMs: 30_000,
     });
   });
 
-  it("keeps HTTP header parsing unchanged for env-like names", () => {
-    const resolved = resolveMcpTransportConfig("probe", {
-      url: "https://mcp.example.com/sse",
-      headers: {
-        NODE_OPTIONS: "allowed-header",
-      },
-    });
-
-    expect(resolved).toEqual({
-      kind: "http",
-      transportType: "sse",
-      url: "https://mcp.example.com/sse",
-      headers: {
-        NODE_OPTIONS: "allowed-header",
-      },
-      description: "https://mcp.example.com/sse",
-      connectionTimeoutMs: 30_000,
-    });
-  });
-
-  it("resolves explicit streamable HTTP config", () => {
-    const resolved = resolveMcpTransportConfig("probe", {
-      url: "https://mcp.example.com/http",
-      transport: "streamable-http",
-    });
-
-    expect(resolved).toEqual({
-      kind: "http",
-      transportType: "streamable-http",
-      url: "https://mcp.example.com/http",
-      headers: undefined,
-      description: "https://mcp.example.com/http",
-      connectionTimeoutMs: 30_000,
-    });
-  });
-
-  it("treats CLI-native http type as streamable HTTP for compatibility", () => {
-    const resolved = resolveMcpTransportConfig("probe", {
-      url: "https://mcp.example.com/http",
-      type: "http",
-    });
-
-    expect(resolved).toEqual({
-      kind: "http",
-      transportType: "streamable-http",
-      url: "https://mcp.example.com/http",
-      headers: undefined,
-      description: "https://mcp.example.com/http",
-      connectionTimeoutMs: 30_000,
-    });
+  it.each([
+    {
+      name: "rejects non-HTTP URL schemes",
+      server: { url: "ftp://mcp.example.com/tools", transport: "streamable-http" },
+    },
+    {
+      name: "rejects http as a canonical transport",
+      server: { url: "https://mcp.example.com/http", transport: "http" },
+    },
+  ])("$name", ({ server }) => {
+    expect(resolveMcpTransportConfig("probe", server)).toBeNull();
   });
 });

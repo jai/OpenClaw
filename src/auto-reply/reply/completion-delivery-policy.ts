@@ -1,86 +1,60 @@
+// Resolves whether completed replies should send visibly or stay tool-only.
 import { normalizeChatType, type ChatType } from "../../channels/chat-type.js";
+import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { deriveSessionChatType } from "../../sessions/session-chat-type.js";
+import { deriveSessionChatTypeFromKey } from "../../sessions/session-chat-type-shared.js";
+import { sessionDeliveryOrigin } from "../../utils/delivery-context.read.js";
 import type { DeliveryContext } from "../../utils/delivery-context.types.js";
 import { resolveSourceReplyDeliveryMode } from "./source-reply-delivery-mode.js";
 
-export type CompletionChatType = ChatType | "unknown";
+type CompletionChatType = ChatType | "unknown";
+const COMPLETION_TARGET_CHAT_TYPES = new Map<string, CompletionChatType>([
+  ["group:", "group"],
+  ["channel:", "channel"],
+  ["thread:", "channel"],
+  ["dm:", "direct"],
+  ["direct:", "direct"],
+  ["user:", "direct"],
+]);
 
-export type CompletionDeliverySessionEntry = {
-  chatType?: string | null;
-  origin?: { chatType?: string | null } | null;
-};
-
-export function resolveCompletionChatType(params: {
+function resolveCompletionChatType(params: {
   requesterSessionKey?: string | null;
   targetRequesterSessionKey?: string | null;
-  requesterEntry?: CompletionDeliverySessionEntry;
+  requesterEntry?: Pick<SessionEntry, "chatType" | "delivery">;
   directOrigin?: DeliveryContext;
   requesterSessionOrigin?: DeliveryContext;
 }): CompletionChatType {
   const explicit = normalizeChatType(
-    params.requesterEntry?.chatType ?? params.requesterEntry?.origin?.chatType ?? undefined,
+    params.requesterEntry?.chatType ?? sessionDeliveryOrigin(params.requesterEntry)?.chatType,
   );
   if (explicit) {
     return explicit;
   }
 
   for (const key of [params.targetRequesterSessionKey, params.requesterSessionKey]) {
-    const derived = deriveSessionChatType(key);
+    const derived = deriveSessionChatTypeFromKey(key);
     if (derived !== "unknown") {
       return derived;
     }
   }
 
-  return inferCompletionChatTypeFromTarget(
-    params.directOrigin?.to ?? params.requesterSessionOrigin?.to,
-  );
+  const target =
+    (params.directOrigin?.to ?? params.requesterSessionOrigin?.to)?.trim().toLowerCase() ?? "";
+  const prefix = target.slice(0, target.indexOf(":") + 1);
+  return COMPLETION_TARGET_CHAT_TYPES.get(prefix) ?? "unknown";
 }
 
-export function completionRequiresMessageToolDelivery(params: {
-  cfg: OpenClawConfig;
-  requesterSessionKey?: string | null;
-  targetRequesterSessionKey?: string | null;
-  requesterEntry?: CompletionDeliverySessionEntry;
-  directOrigin?: DeliveryContext;
-  requesterSessionOrigin?: DeliveryContext;
-  messageToolAvailable?: boolean;
-}): boolean {
+export function completionRequiresMessageToolDelivery(
+  params: Parameters<typeof resolveCompletionChatType>[0] & {
+    cfg: OpenClawConfig;
+  },
+): boolean {
   return (
     resolveSourceReplyDeliveryMode({
       cfg: params.cfg,
       ctx: {
         ChatType: resolveCompletionChatType(params),
       },
-      messageToolAvailable: params.messageToolAvailable,
     }) === "message_tool_only"
   );
-}
-
-export function shouldRouteCompletionThroughRequesterSession(
-  sessionKey: string | undefined | null,
-): boolean {
-  const chatType = deriveSessionChatType(sessionKey);
-  return chatType === "group" || chatType === "channel";
-}
-
-function inferCompletionChatTypeFromTarget(to: string | undefined): CompletionChatType {
-  const normalized = to?.trim().toLowerCase();
-  if (!normalized) {
-    return "unknown";
-  }
-  if (normalized.startsWith("group:")) {
-    return "group";
-  }
-  if (normalized.startsWith("channel:") || normalized.startsWith("thread:")) {
-    return "channel";
-  }
-  if (
-    normalized.startsWith("dm:") ||
-    normalized.startsWith("direct:") ||
-    normalized.startsWith("user:")
-  ) {
-    return "direct";
-  }
-  return "unknown";
 }

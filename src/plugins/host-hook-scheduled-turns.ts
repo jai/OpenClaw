@@ -1,9 +1,18 @@
 import { randomUUID } from "node:crypto";
+import {
+  resolveExpiresAtMsFromDurationMs,
+  timestampMsToIsoString,
+} from "@openclaw/normalization-core/number-coercion";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { CronServiceContract } from "../cron/service-contract.js";
+import {
+  readCanonicalCronListPage,
+  resolveCronListPageNextOffset,
+} from "../cron/service/list-page-validation.js";
 import type { CronJob, CronJobCreate } from "../cron/types.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
-import { normalizeOptionalString } from "../shared/string-coerce.js";
 import {
   deletePluginSessionSchedulerJob,
   registerPluginSessionSchedulerJob,
@@ -20,17 +29,10 @@ import type { PluginRegistry } from "./registry-types.js";
 const log = createSubsystemLogger("plugins/host-scheduled-turns");
 const PLUGIN_CRON_NAME_PREFIX = "plugin:";
 const PLUGIN_CRON_TAG_MARKER = ":tag:";
+const PLUGIN_CRON_CLEANUP_PAGE_SIZE = 200;
+const PLUGIN_CRON_CLEANUP_MAX_PAGES = 50;
 
-type ResolvedSessionTurnSchedule =
-  | {
-      kind: "cron";
-      expr: string;
-      tz?: string;
-    }
-  | {
-      kind: "at";
-      at: string;
-    };
+type ResolvedSessionTurnSchedule = Extract<CronJob["schedule"], { kind: "cron" | "at" }>;
 
 function resolveSchedule(
   params: PluginSessionTurnScheduleParams,
@@ -48,15 +50,12 @@ function resolveSchedule(
     if (!Number.isFinite(params.delayMs) || params.delayMs < 0) {
       return undefined;
     }
-    const timestamp = Date.now() + Math.max(1, Math.floor(params.delayMs));
-    if (!Number.isFinite(timestamp)) {
+    const timestamp = resolveExpiresAtMsFromDurationMs(Math.max(1, Math.floor(params.delayMs)));
+    const at = timestampMsToIsoString(timestamp);
+    if (!at) {
       return undefined;
     }
-    const at = new Date(timestamp);
-    if (!Number.isFinite(at.getTime())) {
-      return undefined;
-    }
-    return { kind: "at", at: at.toISOString() };
+    return { kind: "at", at };
   }
   const rawAt = (params as { at?: unknown }).at;
   const at = rawAt instanceof Date ? rawAt : new Date(rawAt as string | number | Date);
@@ -66,33 +65,15 @@ function resolveSchedule(
   return { kind: "at", at: at.toISOString() };
 }
 
-function resolveSessionEventDeliveryMode(deliveryMode: unknown): "none" | "announce" | undefined {
-  if (deliveryMode === undefined) {
-    return undefined;
-  }
-  if (deliveryMode === "none" || deliveryMode === "announce") {
-    return deliveryMode;
-  }
-  return undefined;
-}
-
 function formatScheduleLogContext(params: {
   pluginId: string;
   sessionKey?: string;
   name?: string;
   jobId?: string;
 }): string {
-  const parts = [`pluginId=${params.pluginId}`];
-  if (params.sessionKey) {
-    parts.push(`sessionKey=${params.sessionKey}`);
-  }
-  if (params.name) {
-    parts.push(`name=${params.name}`);
-  }
-  if (params.jobId) {
-    parts.push(`jobId=${params.jobId}`);
-  }
-  return parts.join(" ");
+  return (["pluginId", "sessionKey", "name", "jobId"] as const)
+    .flatMap((key) => (key === "pluginId" || params[key] ? [`${key}=${params[key]}`] : []))
+    .join(" ");
 }
 
 async function removeScheduledSessionTurn(params: {
@@ -104,21 +85,13 @@ async function removeScheduledSessionTurn(params: {
 }): Promise<boolean> {
   try {
     const result = await params.cron.remove(params.jobId);
-    return didCronCleanupJob(result);
+    return isCronRemoveResult(result) && result.ok;
   } catch (error) {
     log.warn(
       `plugin session turn cleanup failed (${formatScheduleLogContext(params)}): ${formatErrorMessage(error)}`,
     );
     return false;
   }
-}
-
-function didCronRemoveJob(value: unknown): boolean {
-  return isCronRemoveResult(value) && value.ok && value.removed;
-}
-
-function didCronCleanupJob(value: unknown): boolean {
-  return isCronRemoveResult(value) && value.ok;
 }
 
 const PLUGIN_CRON_RESERVED_DELIMITER = ":";
@@ -137,7 +110,7 @@ function resolvePluginSessionTurnTag(value: unknown): {
   return { tag, invalid: false };
 }
 
-export function buildPluginSchedulerCronName(params: {
+function buildPluginSchedulerCronName(params: {
   pluginId: string;
   sessionKey: string;
   tag?: string;
@@ -161,13 +134,7 @@ function buildPluginSchedulerTagPrefix(params: {
 function isCronRemoveResult(
   value: unknown,
 ): value is Awaited<ReturnType<CronServiceContract["remove"]>> {
-  return (
-    Boolean(value) &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    typeof (value as { ok?: unknown }).ok === "boolean" &&
-    typeof (value as { removed?: unknown }).removed === "boolean"
-  );
+  return isRecord(value) && typeof value.ok === "boolean" && typeof value.removed === "boolean";
 }
 
 async function listAllCronJobsForPluginTagCleanup(
@@ -176,24 +143,27 @@ async function listAllCronJobsForPluginTagCleanup(
 ): Promise<CronJob[]> {
   const jobs: CronJob[] = [];
   let offset = 0;
-  for (;;) {
-    const listResult = await cron.listPage({
-      includeDisabled: true,
-      limit: 200,
-      query,
-      sortBy: "name",
-      sortDir: "asc",
-      ...(offset > 0 ? { offset } : {}),
-    });
-    jobs.push(...listResult.jobs);
-    if (!listResult.hasMore) {
+  // Concurrent inventory churn is best effort; a later cleanup can catch moved jobs.
+  for (let pageNumber = 0; pageNumber < PLUGIN_CRON_CLEANUP_MAX_PAGES; pageNumber += 1) {
+    const page = readCanonicalCronListPage<CronJob>(
+      await cron.listPage({
+        includeDisabled: true,
+        limit: PLUGIN_CRON_CLEANUP_PAGE_SIZE,
+        offset,
+        query,
+        sortBy: "name",
+        sortDir: "asc",
+      }),
+      PLUGIN_CRON_CLEANUP_PAGE_SIZE,
+    );
+    const nextOffset = resolveCronListPageNextOffset(page, offset);
+    jobs.push(...page.jobs);
+    if (nextOffset === null) {
       return jobs;
     }
-    if (listResult.nextOffset === null || listResult.nextOffset <= offset) {
-      return jobs;
-    }
-    offset = listResult.nextOffset;
+    offset = nextOffset;
   }
+  throw new Error("cron.list pagination exceeded maximum pages");
 }
 
 export async function schedulePluginSessionTurn(params: {
@@ -217,38 +187,28 @@ export async function schedulePluginSessionTurn(params: {
   if (!cronSchedule) {
     return undefined;
   }
-  const rawDeliveryMode = (params.schedule as { deliveryMode?: unknown }).deliveryMode;
-  const deliveryMode = resolveSessionEventDeliveryMode(rawDeliveryMode);
+  const deliveryMode: unknown = params.schedule.deliveryMode;
   const scheduleName = normalizeOptionalString(params.schedule.name);
-  if (rawDeliveryMode !== undefined && !deliveryMode) {
+  const logSchedulingFailure = (reason: string, name = scheduleName) => {
     log.warn(
       `plugin session turn scheduling failed (${formatScheduleLogContext({
         pluginId: params.pluginId,
         sessionKey,
-        ...(scheduleName ? { name: scheduleName } : {}),
-      })}): unsupported deliveryMode`,
+        ...(name ? { name } : {}),
+      })}): ${reason}`,
     );
+  };
+  if (deliveryMode !== undefined && deliveryMode !== "none" && deliveryMode !== "announce") {
+    logSchedulingFailure("unsupported deliveryMode");
     return undefined;
   }
   if (cronSchedule.kind === "cron" && params.schedule.deleteAfterRun === true) {
-    log.warn(
-      `plugin session turn scheduling failed (${formatScheduleLogContext({
-        pluginId: params.pluginId,
-        sessionKey,
-        ...(scheduleName ? { name: scheduleName } : {}),
-      })}): deleteAfterRun requires a one-shot schedule`,
-    );
+    logSchedulingFailure("deleteAfterRun requires a one-shot schedule");
     return undefined;
   }
   const { tag, invalid: invalidTag } = resolvePluginSessionTurnTag(params.schedule.tag);
   if (invalidTag) {
-    log.warn(
-      `plugin session turn scheduling failed (${formatScheduleLogContext({
-        pluginId: params.pluginId,
-        sessionKey,
-        ...(scheduleName ? { name: scheduleName } : {}),
-      })}): tag contains reserved delimiter ":"`,
-    );
+    logSchedulingFailure('tag contains reserved delimiter ":"');
     return undefined;
   }
   const cronDeliveryMode = deliveryMode ?? "announce";
@@ -256,13 +216,7 @@ export async function schedulePluginSessionTurn(params: {
     return undefined;
   }
   if (!params.cron) {
-    log.warn(
-      `plugin session turn scheduling failed (${formatScheduleLogContext({
-        pluginId: params.pluginId,
-        sessionKey,
-        ...(scheduleName ? { name: scheduleName } : {}),
-      })}): cron service unavailable`,
-    );
+    logSchedulingFailure("cron service unavailable");
     return undefined;
   }
   const cron = params.cron;
@@ -293,13 +247,7 @@ export async function schedulePluginSessionTurn(params: {
       },
     });
   } catch (error) {
-    log.warn(
-      `plugin session turn scheduling failed (${formatScheduleLogContext({
-        pluginId: params.pluginId,
-        sessionKey,
-        name: cronJobName,
-      })}): ${formatErrorMessage(error)}`,
-    );
+    logSchedulingFailure(formatErrorMessage(error), cronJobName);
     return undefined;
   }
   const jobId = result.id;
@@ -326,7 +274,7 @@ export async function schedulePluginSessionTurn(params: {
     }
     return undefined;
   }
-  const handle = registerPluginSessionSchedulerJob({
+  return registerPluginSessionSchedulerJob({
     pluginId: params.pluginId,
     pluginName: params.pluginName,
     ownerRegistry: params.ownerRegistry,
@@ -348,7 +296,6 @@ export async function schedulePluginSessionTurn(params: {
       },
     },
   });
-  return handle;
 }
 
 export async function unschedulePluginSessionTurnsByTag(params: {
@@ -382,9 +329,9 @@ export async function unschedulePluginSessionTurnsByTag(params: {
     log.warn(`plugin session turn untag-list failed: ${formatErrorMessage(error)}`);
     return { removed: 0, failed: 1 };
   }
-  const candidates = jobs.filter((job) => {
-    return job.name.startsWith(namePrefix) && job.sessionTarget === `session:${sessionKey}`;
-  });
+  const candidates = jobs.filter(
+    (job) => job.name.startsWith(namePrefix) && job.sessionTarget === `session:${sessionKey}`,
+  );
   let removed = 0;
   let failed = 0;
   for (const job of candidates) {
@@ -394,7 +341,7 @@ export async function unschedulePluginSessionTurnsByTag(params: {
     }
     try {
       const result = await cron.remove(id);
-      if (didCronRemoveJob(result)) {
+      if (isCronRemoveResult(result) && result.ok && result.removed) {
         removed += 1;
         deletePluginSessionSchedulerJob({
           pluginId: params.pluginId,

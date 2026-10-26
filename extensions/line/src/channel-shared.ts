@@ -1,8 +1,9 @@
 import { describeWebhookAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
+import type { ChannelPlugin } from "openclaw/plugin-sdk/core";
 import { hasLineCredentials } from "./account-helpers.js";
-import { type ChannelPlugin, type ResolvedLineAccount } from "./channel-api.js";
 import { lineConfigAdapter } from "./config-adapter.js";
 import { LineChannelConfigSchema } from "./config-schema.js";
+import type { ResolvedLineAccount } from "./types.js";
 
 const lineChannelMeta = {
   id: "line",
@@ -38,7 +39,10 @@ export const lineChannelPluginCommon = {
         account,
         configured: hasLineCredentials(account),
         extra: {
-          tokenSource: account.tokenSource ?? undefined,
+          tokenSource: account.tokenSource,
+          signingSecretSource: account.signingSecretSource,
+          tokenStatus: account.tokenStatus,
+          signingSecretStatus: account.signingSecretStatus,
         },
       }),
   },

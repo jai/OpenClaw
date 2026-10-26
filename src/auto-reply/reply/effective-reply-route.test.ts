@@ -1,160 +1,100 @@
-import { describe, expect, it } from "vitest";
-import {
-  isSystemEventProvider,
-  resolveEffectiveReplyRoute,
-  type EffectiveReplyRouteContext,
-  type EffectiveReplyRouteEntry,
-} from "./effective-reply-route.js";
+import { expect, it } from "vitest";
+import type { ChannelRouteRef } from "../../plugin-sdk/channel-route.js";
+import { normalizeSessionDeliveryState } from "../../utils/delivery-context.shared.js";
+import type { DeliveryContext } from "../../utils/delivery-context.types.js";
+import { resolveEffectiveReplyRoute } from "./effective-reply-route.js";
 
-const ctx = (params: EffectiveReplyRouteContext): EffectiveReplyRouteContext => params;
-const entry = (params: EffectiveReplyRouteEntry): EffectiveReplyRouteEntry => params;
-
-describe("resolveEffectiveReplyRoute", () => {
-  it("uses live origin context for normal providers", () => {
-    expect(
-      resolveEffectiveReplyRoute({
-        ctx: ctx({
-          Provider: "slack",
-          OriginatingChannel: "discord",
-          OriginatingTo: "channel:live",
-          AccountId: "live-account",
-        }),
-        entry: entry({
-          deliveryContext: {
-            channel: "telegram",
-            to: "chat:persisted",
-            accountId: "persisted-account",
-          },
-          lastChannel: "whatsapp",
-          lastTo: "last-to",
-          lastAccountId: "last-account",
-        }),
-      }),
-    ).toEqual({
-      channel: "discord",
-      to: "channel:live",
-      accountId: "live-account",
-    });
-  });
-
-  it("does not use persisted fallbacks for normal providers", () => {
-    expect(
-      resolveEffectiveReplyRoute({
-        ctx: ctx({ Provider: "slack" }),
-        entry: entry({
-          deliveryContext: {
-            channel: "telegram",
-            to: "chat:persisted",
-            accountId: "persisted-account",
-          },
-          lastChannel: "whatsapp",
-          lastTo: "last-to",
-          lastAccountId: "last-account",
-        }),
-      }),
-    ).toEqual({
-      channel: undefined,
-      to: undefined,
-      accountId: undefined,
-    });
-  });
-
-  it("prefers live origin context for exec-event replies", () => {
-    expect(
-      resolveEffectiveReplyRoute({
-        ctx: ctx({
-          Provider: "exec-event",
-          OriginatingChannel: "telegram",
-          OriginatingTo: "chat:live",
-          AccountId: "live-account",
-        }),
-        entry: entry({
-          deliveryContext: {
-            channel: "discord",
-            to: "channel:persisted",
-            accountId: "persisted-account",
-          },
-          lastChannel: "slack",
-          lastTo: "last-to",
-          lastAccountId: "last-account",
-        }),
-      }),
-    ).toEqual({
-      channel: "telegram",
-      to: "chat:live",
-      accountId: "live-account",
-    });
-  });
-
-  it("falls back to deliveryContext for exec-event replies", () => {
-    expect(
-      resolveEffectiveReplyRoute({
-        ctx: ctx({ Provider: "exec-event" }),
-        entry: entry({
-          deliveryContext: {
-            channel: "telegram",
-            to: "chat:persisted",
-            accountId: "persisted-account",
-          },
-          lastChannel: "slack",
-          lastTo: "last-to",
-          lastAccountId: "last-account",
-        }),
-      }),
-    ).toEqual({
-      channel: "telegram",
-      to: "chat:persisted",
-      accountId: "persisted-account",
-    });
-  });
-
-  it("falls back to legacy last route fields for exec-event replies", () => {
-    expect(
-      resolveEffectiveReplyRoute({
-        ctx: ctx({ Provider: "exec-event" }),
-        entry: entry({
-          lastChannel: "slack",
-          lastTo: "last-to",
-          lastAccountId: "last-account",
-        }),
-      }),
-    ).toEqual({
-      channel: "slack",
-      to: "last-to",
-      accountId: "last-account",
-    });
-  });
-
-  it("fills partial exec-event route from persisted context", () => {
-    expect(
-      resolveEffectiveReplyRoute({
-        ctx: ctx({
-          Provider: "exec-event",
-          OriginatingChannel: "telegram",
-          OriginatingTo: "chat:live",
-        }),
-        entry: entry({
-          deliveryContext: {
-            channel: "discord",
-            to: "channel:persisted",
-            accountId: "persisted-account",
-          },
-        }),
-      }),
-    ).toEqual({
-      channel: "telegram",
-      to: "chat:live",
-      accountId: "persisted-account",
-    });
-  });
+type Params = Parameters<typeof resolveEffectiveReplyRoute>[0];
+const telegram = { channel: "telegram", to: "chat:persisted", accountId: "persisted-account" };
+const discord = { channel: "discord", to: "channel:persisted", accountId: "persisted-account" };
+const external = { channel: "customer-chat", to: "conversation:123", accountId: "workspace-a" };
+const webchat = { Provider: "webchat", OriginatingChannel: "webchat", OriginatingTo: "dashboard" };
+const handoff = {
+  ...webchat,
+  InputProvenance: { kind: "inter_session", sourceTool: "sessions_send" },
+} as const;
+const live = {
+  InternalTurnSource: "exec",
+  OriginatingChannel: "telegram",
+  OriginatingTo: "chat:live",
+} as const;
+const entry = (
+  context: DeliveryContext,
+  route?: ChannelRouteRef,
+): NonNullable<Params["entry"]> => ({
+  delivery: normalizeSessionDeliveryState({ context, route }),
 });
 
-describe("isSystemEventProvider", () => {
-  it("recognizes persisted-delivery event providers", () => {
-    expect(isSystemEventProvider("heartbeat")).toBe(true);
-    expect(isSystemEventProvider("cron-event")).toBe(true);
-    expect(isSystemEventProvider("exec-event")).toBe(true);
-    expect(isSystemEventProvider("slack")).toBe(false);
-    expect(isSystemEventProvider(undefined)).toBe(false);
+it.each<
+  [
+    string,
+    Params["ctx"],
+    NonNullable<Params["entry"]>,
+    ReturnType<typeof resolveEffectiveReplyRoute>,
+  ]
+>([
+  [
+    "no internal wake",
+    { InputProvenance: { kind: "internal_system", sourceTool: "restart-sentinel" } },
+    entry(telegram),
+    { channel: undefined, to: undefined, accountId: undefined },
+  ],
+  [
+    "handoff keeps plugin-owned external route",
+    { ...handoff, AccountId: "webchat-account" },
+    entry(external),
+    { ...external, inheritedExternalRoute: true },
+  ],
+  [
+    "normal webchat stays live",
+    webchat,
+    entry(external),
+    { channel: "webchat", to: "dashboard", accountId: undefined },
+  ],
+  [
+    "live exec route wins",
+    { ...live, MessageThreadId: 43, AccountId: "live-account" },
+    entry(discord),
+    { channel: "telegram", to: "chat:live", accountId: "live-account", threadId: 43 },
+  ],
+  [
+    "different channel cannot donate account",
+    live,
+    entry(discord),
+    { channel: "telegram", to: "chat:live", accountId: undefined },
+  ],
+  [
+    "same channel fills missing account and chat type",
+    live,
+    { ...entry(telegram), chatType: "direct" },
+    { channel: "telegram", to: "chat:live", accountId: "persisted-account", chatType: "direct" },
+  ],
+  ["wake inherits whole tuple", { InternalTurnSource: "exec" }, entry(telegram), telegram],
+])("%s", (_name, ctx, stored, expected) => {
+  expect(resolveEffectiveReplyRoute({ ctx, entry: stored })).toEqual(expected);
+});
+
+it.each(["explicit", "session"] as const)("inherits only trusted thread metadata: %s", (source) => {
+  const context = {
+    channel: "feishu",
+    to: "user:ou_123",
+    accountId: "work",
+    threadId: "thread:123",
+  };
+  const route: ChannelRouteRef = {
+    channel: "feishu",
+    accountId: "work",
+    target: {
+      to: "user:ou_123",
+      ...(source === "explicit" ? { chatType: "channel" as const } : {}),
+    },
+    thread: { id: "thread:123", source },
+  };
+  expect(resolveEffectiveReplyRoute({ ctx: handoff, entry: entry(context, route) })).toEqual({
+    channel: "feishu",
+    to: "user:ou_123",
+    accountId: "work",
+    inheritedExternalRoute: true,
+    ...(source === "explicit" ? { threadId: "thread:123", chatType: "channel" } : {}),
   });
 });

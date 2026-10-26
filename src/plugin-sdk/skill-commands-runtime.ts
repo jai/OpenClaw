@@ -1,4 +1,6 @@
 export {
   listSkillCommandsForAgents,
   listSkillCommandsForWorkspace,
-} from "../auto-reply/skill-commands.js";
+  prepareSkillCommandsForAgents,
+  prepareSkillCommandsForWorkspace,
+} from "../skills/discovery/chat-commands.js";

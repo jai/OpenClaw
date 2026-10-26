@@ -1,15 +1,37 @@
 import path from "node:path";
-import { clearCurrentPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-snapshot.js";
-import { type PluginManifestRegistry } from "../plugins/manifest-registry.js";
-import { type PluginOrigin } from "../plugins/plugin-origin.types.js";
-import { clearPluginSetupRegistryCache } from "../plugins/setup-registry.js";
+import { makePluginMetadataIndex } from "../plugins/current-plugin-metadata.test-support.js";
+import type { PluginCandidate } from "../plugins/discovery.js";
+import { resolveInstalledPluginIndexPolicyHash } from "../plugins/installed-plugin-index-policy.js";
+import type { PluginManifestRecord, PluginManifestRegistry } from "../plugins/manifest-registry.js";
+import { createEmptyPluginMetadataSnapshot } from "../plugins/plugin-metadata-empty.test-support.js";
+import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
+import { buildPluginMetadataProviderFacts } from "../plugins/plugin-metadata-provider-facts.js";
+import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
+import { buildDeclaredProviderOwnerIndex } from "../plugins/provider-owner-index.js";
 import { cleanupTrackedTempDirs, makeTrackedTempDir } from "../plugins/test-helpers/fs-fixtures.js";
+import type { OpenClawConfig } from "./types.openclaw.js";
 
 const tempDirs: string[] = [];
 
+export function makeBundledChannelCandidate(params: {
+  pluginId: string;
+  channelId: string;
+}): PluginCandidate {
+  return {
+    idHint: params.pluginId,
+    source: `/fake/${params.pluginId}/index.js`,
+    rootDir: `/fake/${params.pluginId}`,
+    origin: "bundled",
+    packageManifest: {
+      plugin: { id: params.pluginId },
+      channel: { id: params.channelId },
+    },
+  };
+}
+
+/** Clears auto-enable plugin caches and temp dirs between tests. */
 export function resetPluginAutoEnableTestState(): void {
-  clearCurrentPluginMetadataSnapshot();
-  clearPluginSetupRegistryCache();
+  clearPluginMetadataLifecycleCaches();
   cleanupTrackedTempDirs(tempDirs);
 }
 
@@ -28,24 +50,20 @@ export function makeIsolatedEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.Proce
   };
 }
 
-export function makeRegistry(
-  plugins: Array<{
-    id: string;
-    channels: string[];
-    activation?: { onAgentHarnesses?: string[] };
-    autoEnableWhenConfiguredProviders?: string[];
-    modelSupport?: { modelPrefixes?: string[]; modelPatterns?: string[] };
-    contracts?: { webSearchProviders?: string[]; webFetchProviders?: string[]; tools?: string[] };
-    providers?: string[];
-    cliBackends?: string[];
-    origin?: PluginOrigin;
-    configSchema?: Record<string, unknown>;
-    channelConfigs?: Record<
-      string,
-      { schema: Record<string, unknown>; label?: string; preferOver?: string[] }
-    >;
-  }>,
-): PluginManifestRegistry {
+type RegistryPlugin = Pick<
+  PluginManifestRecord,
+  | "id"
+  | "channels"
+  | "activation"
+  | "autoEnableWhenConfiguredProviders"
+  | "modelSupport"
+  | "contracts"
+  | "configSchema"
+  | "channelConfigs"
+> &
+  Partial<Pick<PluginManifestRecord, "providers" | "cliBackends" | "origin">>;
+
+export function makeRegistry(plugins: RegistryPlugin[]): PluginManifestRegistry {
   return {
     plugins: plugins.map((plugin) => ({
       id: plugin.id,
@@ -66,6 +84,46 @@ export function makeRegistry(
       manifestPath: `/fake/${plugin.id}/openclaw.plugin.json`,
     })),
     diagnostics: [],
+  };
+}
+
+export function createPluginMetadataSnapshot({
+  config,
+  manifestRegistry,
+  workspaceDir,
+}: {
+  config?: OpenClawConfig;
+  manifestRegistry: PluginManifestRegistry;
+  workspaceDir?: string;
+}): PluginMetadataSnapshot {
+  const policyHash = resolveInstalledPluginIndexPolicyHash(config);
+  const { plugins, diagnostics } = manifestRegistry;
+  const empty = createEmptyPluginMetadataSnapshot();
+  const index: PluginMetadataSnapshot["index"] = {
+    ...makePluginMetadataIndex(),
+    policyHash,
+    plugins: [],
+  };
+  return {
+    ...empty,
+    policyHash,
+    ...(workspaceDir ? { workspaceDir } : {}),
+    index,
+    registryIndex: index,
+    manifestRegistry,
+    plugins,
+    diagnostics,
+    byPluginId: new Map(plugins.map((plugin) => [plugin.id, plugin])),
+    declaredProviderOwners: buildDeclaredProviderOwnerIndex(plugins),
+    owners: {
+      ...empty.owners,
+      providerAuthContributions:
+        buildPluginMetadataProviderFacts(plugins).providerAuthContributions,
+    },
+    metrics: {
+      ...empty.metrics,
+      manifestPluginCount: plugins.length,
+    },
   };
 }
 

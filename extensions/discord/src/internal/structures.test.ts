@@ -1,12 +1,10 @@
+// Discord tests cover structures plugin behavior.
 import { ChannelType } from "discord-api-types/v10";
 import { describe, expect, it } from "vitest";
 import { channelFactory, type StructureClient } from "./structures.js";
 
 const client: StructureClient = {
   rest: {} as StructureClient["rest"],
-  async fetchUser() {
-    throw new Error("not used");
-  },
 };
 
 describe("channelFactory", () => {

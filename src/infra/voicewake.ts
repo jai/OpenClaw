@@ -1,45 +1,43 @@
-import path from "node:path";
-import { resolveStateDir } from "../config/paths.js";
-import { normalizeOptionalString } from "../shared/string-coerce.js";
-import { createAsyncLock, tryReadJson, writeJson } from "./json-files.js";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import {
+  readVoiceWakeMachineState,
+  writeConfigMachineStateAsync,
+} from "../state/config-machine-state-async.js";
 
+// Voice wake config stores trigger words used by local voice integrations.
 type VoiceWakeConfig = {
   triggers: string[];
-  updatedAtMs: number;
 };
 
 const DEFAULT_TRIGGERS = ["openclaw", "claude", "computer"];
+const VOICEWAKE_TRIGGERS_STATE_KEY = "voicewake.triggers";
 
-function resolvePath(baseDir?: string) {
-  const root = baseDir ?? resolveStateDir();
-  return path.join(root, "settings", "voicewake.json");
-}
-
-function sanitizeTriggers(triggers: string[] | undefined | null): string[] {
-  const cleaned = (triggers ?? [])
+function sanitizeTriggers(triggers: unknown): string[] {
+  const cleaned = (Array.isArray(triggers) ? triggers : [])
     .map((w) => normalizeOptionalString(w) ?? "")
     .filter((w) => w.length > 0);
   return cleaned.length > 0 ? cleaned : DEFAULT_TRIGGERS;
 }
 
-const withLock = createAsyncLock();
+function stateDatabaseOptions(stateDir?: string) {
+  return stateDir ? { env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } } : {};
+}
 
 export function defaultVoiceWakeTriggers() {
   return [...DEFAULT_TRIGGERS];
 }
 
+/** Load persisted voice wake triggers, falling back to defaults. */
 export async function loadVoiceWakeConfig(baseDir?: string): Promise<VoiceWakeConfig> {
-  const filePath = resolvePath(baseDir);
-  const existing = await tryReadJson<VoiceWakeConfig>(filePath);
-  if (!existing) {
-    return { triggers: defaultVoiceWakeTriggers(), updatedAtMs: 0 };
+  const state = await readVoiceWakeMachineState(
+    VOICEWAKE_TRIGGERS_STATE_KEY,
+    stateDatabaseOptions(baseDir),
+  );
+  if (!state) {
+    return { triggers: defaultVoiceWakeTriggers() };
   }
   return {
-    triggers: sanitizeTriggers(existing.triggers),
-    updatedAtMs:
-      typeof existing.updatedAtMs === "number" && existing.updatedAtMs > 0
-        ? existing.updatedAtMs
-        : 0,
+    triggers: sanitizeTriggers(state.value),
   };
 }
 
@@ -48,13 +46,10 @@ export async function setVoiceWakeTriggers(
   baseDir?: string,
 ): Promise<VoiceWakeConfig> {
   const sanitized = sanitizeTriggers(triggers);
-  const filePath = resolvePath(baseDir);
-  return await withLock(async () => {
-    const next: VoiceWakeConfig = {
-      triggers: sanitized,
-      updatedAtMs: Date.now(),
-    };
-    await writeJson(filePath, next);
-    return next;
-  });
+  await writeConfigMachineStateAsync(
+    VOICEWAKE_TRIGGERS_STATE_KEY,
+    sanitized,
+    stateDatabaseOptions(baseDir),
+  );
+  return { triggers: sanitized };
 }

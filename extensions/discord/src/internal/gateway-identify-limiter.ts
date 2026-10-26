@@ -1,25 +1,22 @@
 const IDENTIFY_WINDOW_MS = 5_000;
 
 class GatewayIdentifyLimiter {
-  private nextAllowedAtByKey = new Map<number, number>();
+  private nextAllowedAt: number | undefined;
 
-  async wait(params: { shardId?: number; maxConcurrency?: number }): Promise<void> {
-    const maxConcurrency = Math.max(1, Math.floor(params.maxConcurrency ?? 1));
-    const rateKey = (params.shardId ?? 0) % maxConcurrency;
+  async wait(): Promise<void> {
     const now = Date.now();
-    const nextAllowedAt = this.nextAllowedAtByKey.get(rateKey) ?? now;
+    const nextAllowedAt = this.nextAllowedAt ?? now;
     const waitMs = Math.max(0, nextAllowedAt - now);
-    this.nextAllowedAtByKey.set(rateKey, Math.max(now, nextAllowedAt) + IDENTIFY_WINDOW_MS);
+    this.nextAllowedAt = Math.max(now, nextAllowedAt) + IDENTIFY_WINDOW_MS;
     if (waitMs > 0) {
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, waitMs);
-        timer.unref?.();
+        setTimeout(resolve, waitMs).unref();
       });
     }
   }
 
   reset(): void {
-    this.nextAllowedAtByKey.clear();
+    this.nextAllowedAt = undefined;
   }
 }
 

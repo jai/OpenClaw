@@ -1,34 +1,121 @@
-import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
-import { execNodeEvalSync } from "../test-utils/node-process.js";
+import { setImmediate } from "node:timers/promises";
+import { expect, it, vi } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
+import { responseWithRelease } from "./fetch-runtime.js";
 
-describe("plugin SDK fetch runtime", () => {
-  it("does not initialize the undici global dispatcher on import", () => {
-    const moduleUrl = pathToFileURL(path.resolve("src/plugin-sdk/fetch-runtime.ts")).href;
-    const source = `
-      const dispatcherKey = Symbol.for("undici.globalDispatcher.1");
-      await import(${JSON.stringify(moduleUrl)});
-      if (globalThis[dispatcherKey] !== undefined) {
-        throw new Error("undici global dispatcher was initialized");
+function readerWithRelease(body: BodyInit, release: () => Promise<void>) {
+  return responseWithRelease(new Response(body), release).body!.getReader();
+}
+
+function settlement(promise: Promise<unknown>) {
+  return Promise.race([promise.then(() => "settled"), setImmediate("pending")]);
+}
+
+it.for(["throw", "reject"] as const)(
+  "reports null-body response release failures (%s) without an unhandled rejection",
+  async (failureMode, { onTestFinished }) => {
+    const failure = new Error("request ownership release failed");
+    const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    onTestFinished(() => warning.mockRestore());
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (error: unknown) => unhandled.push(error);
+    process.on("unhandledRejection", onUnhandledRejection);
+    onTestFinished(() => {
+      process.off("unhandledRejection", onUnhandledRejection);
+    });
+    const release = vi.fn(() => {
+      if (failureMode === "throw") {
+        throw failure;
       }
-      console.log("ok");
-    `;
-    const env = { ...process.env };
-    for (const key of [
-      "HTTP_PROXY",
-      "HTTPS_PROXY",
-      "ALL_PROXY",
-      "http_proxy",
-      "https_proxy",
-      "all_proxy",
-      "OPENCLAW_DEBUG_PROXY_ENABLED",
-    ]) {
-      delete env[key];
-    }
+      return Promise.reject(failure);
+    });
+    const response = new Response(null, { status: 204 });
 
-    const output = execNodeEvalSync(source, { env, imports: ["tsx"] });
+    expect(responseWithRelease(response, release)).toBe(response);
+    await setImmediate();
 
-    expect(output.trim()).toBe("ok");
+    expect(release).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(unhandled).toEqual([]);
+  },
+);
+
+it("closes downstream EOF before awaiting release", async () => {
+  const releaseGate = createDeferred();
+  const releaseFinished = createDeferred();
+  const reader = readerWithRelease("complete", async () => {
+    await releaseGate.promise;
+    releaseFinished.resolve();
   });
+
+  await expect(reader.read()).resolves.toMatchObject({ done: false });
+  const eof = reader.read();
+  await expect(settlement(eof)).resolves.toBe("settled");
+  await expect(eof).resolves.toEqual({ done: true, value: undefined });
+  releaseGate.resolve();
+  await releaseFinished.promise;
+});
+
+it("awaits both upstream cancellation and owner release", async () => {
+  const pullStarted = createDeferred();
+  const cancelGate = createDeferred();
+  const releaseGate = createDeferred();
+  const release = vi.fn(async () => await releaseGate.promise);
+  const reason = new Error("consumer stopped");
+  const upstreamCancel = vi.fn(async () => await cancelGate.promise);
+  const reader = readerWithRelease(
+    new ReadableStream<Uint8Array>({
+      pull: () => pullStarted.resolve(),
+      cancel: upstreamCancel,
+    }),
+    release,
+  );
+  const read = reader.read();
+  await pullStarted.promise;
+
+  const cancellation = reader.cancel(reason);
+  try {
+    await expect(settlement(cancellation)).resolves.toBe("pending");
+    expect(upstreamCancel).toHaveBeenCalledWith(reason);
+    expect(release).toHaveBeenCalledTimes(1);
+    cancelGate.resolve();
+    await expect(settlement(cancellation)).resolves.toBe("pending");
+  } finally {
+    cancelGate.resolve();
+    releaseGate.resolve();
+    await cancellation;
+    reader.releaseLock();
+  }
+  await expect(read).resolves.toEqual({ done: true, value: undefined });
+});
+
+it("releases a cancelled response before its capture tee settles", async () => {
+  const sourceCancel = vi.fn();
+  const response = new Response(new ReadableStream<Uint8Array>({ cancel: sourceCancel }));
+  const capture = response.clone();
+  const release = vi.fn(async () => await capture.body?.cancel("capture stopped"));
+  const wrapped = responseWithRelease(response, release);
+  const cancellation = wrapped.body!.cancel("consumer stopped");
+  try {
+    await expect(settlement(cancellation)).resolves.toBe("settled");
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(sourceCancel).toHaveBeenCalledTimes(1);
+    expect(response.body?.locked).toBe(false);
+  } finally {
+    await capture.body?.cancel("test cleanup");
+    await cancellation;
+  }
+});
+
+it("settles cancellation after release when upstream cancellation fails", async () => {
+  const source = new ReadableStream<Uint8Array>({
+    cancel() {
+      throw new Error("upstream cancellation failed");
+    },
+  });
+  const release = vi.fn(async () => {});
+  const wrapped = responseWithRelease(new Response(source), release);
+
+  await expect(wrapped.body?.cancel()).resolves.toBeUndefined();
+  expect(release).toHaveBeenCalledTimes(1);
 });

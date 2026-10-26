@@ -1,143 +1,86 @@
-import { afterEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const execFileSyncMock = vi.hoisted(() => vi.fn());
+const installRoots = {
+  systemRoot: "D:\\Windows",
+  programFiles: "E:\\Programs",
+  programFilesX86: "F:\\Programs (x86)",
+  programW6432: "E:\\Programs",
+};
+
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  return { ...actual, execFileSync: execFileSyncMock };
+});
 import {
-  _private,
-  _resetWindowsInstallRootsForTests,
   getWindowsInstallRoots,
+  getWindowsPowerShellExePath,
   getWindowsProgramFilesRoots,
-  normalizeWindowsInstallRoot,
+  getWindowsSystem32ExePath,
+  getWindowsWmicExePath,
 } from "./windows-install-roots.js";
 
 afterEach(() => {
-  _resetWindowsInstallRootsForTests();
-});
-
-describe("normalizeWindowsInstallRoot", () => {
-  it("normalizes validated local Windows roots", () => {
-    expect(normalizeWindowsInstallRoot(" D:/Apps/Program Files/ ")).toBe("D:\\Apps\\Program Files");
-  });
-
-  it("rejects invalid or overly broad values", () => {
-    expect(normalizeWindowsInstallRoot("relative\\path")).toBeNull();
-    expect(normalizeWindowsInstallRoot("\\\\server\\share\\Program Files")).toBeNull();
-    expect(normalizeWindowsInstallRoot("D:\\")).toBeNull();
-    expect(normalizeWindowsInstallRoot("D:\\Apps;E:\\Other")).toBeNull();
-  });
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+  execFileSyncMock.mockReset();
 });
 
 describe("getWindowsInstallRoots", () => {
   it("prefers HKLM registry roots over process environment values", () => {
-    _resetWindowsInstallRootsForTests({
-      queryRegistryValue: (key, valueName) => {
-        if (
-          key === "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion" &&
-          valueName === "SystemRoot"
-        ) {
-          return "D:\\Windows";
-        }
-        if (
-          key === "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion" &&
-          valueName === "ProgramFilesDir"
-        ) {
-          return "E:\\Programs";
-        }
-        if (
-          key === "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion" &&
-          valueName === "ProgramFilesDir (x86)"
-        ) {
-          return "F:\\Programs (x86)";
-        }
-        if (
-          key === "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion" &&
-          valueName === "ProgramW6432Dir"
-        ) {
-          return "E:\\Programs";
-        }
-        return null;
-      },
-    });
-
-    const originalEnv = process.env;
-    let roots;
-    try {
-      process.env = {
-        ...originalEnv,
-        SystemRoot: "C:\\PoisonedWindows",
-        ProgramFiles: "C:\\Poisoned Programs",
-        "ProgramFiles(x86)": "C:\\Poisoned Programs (x86)",
-        ProgramW6432: "C:\\Poisoned Programs",
+    vi.spyOn(fs, "accessSync").mockImplementation(() => undefined);
+    execFileSyncMock.mockImplementation((_file, args: string[]) => {
+      const valueName = args[3];
+      const values: Record<string, string> = {
+        SystemRoot: installRoots.systemRoot,
+        ProgramFilesDir: installRoots.programFiles,
+        "ProgramFilesDir (x86)": installRoots.programFilesX86,
+        ProgramW6432Dir: installRoots.programW6432,
       };
-      roots = getWindowsInstallRoots();
-    } finally {
-      process.env = originalEnv;
+      const value = valueName ? values[valueName] : undefined;
+      return value ? `${valueName}    REG_SZ    ${value}\r\n` : "";
+    });
+    vi.stubEnv("SystemRoot", "C:\\PoisonedWindows");
+    vi.stubEnv("ProgramFiles", "C:\\Poisoned Programs");
+    vi.stubEnv("ProgramFiles(x86)", "C:\\Poisoned Programs (x86)");
+    vi.stubEnv("ProgramW6432", "C:\\Poisoned Programs");
+    const roots = getWindowsInstallRoots();
+
+    expect(roots).toEqual(installRoots);
+    expect(execFileSyncMock).toHaveBeenCalled();
+    for (const [file] of execFileSyncMock.mock.calls) {
+      expect(file).toBe("C:\\Windows\\System32\\reg.exe");
     }
-
-    expect(roots).toEqual({
-      systemRoot: "D:\\Windows",
-      programFiles: "E:\\Programs",
-      programFilesX86: "F:\\Programs (x86)",
-      programW6432: "E:\\Programs",
-    });
   });
 
-  it("uses explicit env roots without consulting HKLM", () => {
-    _resetWindowsInstallRootsForTests({
-      queryRegistryValue: (key, valueName) => {
-        if (
-          key === "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion" &&
-          valueName === "SystemRoot"
-        ) {
-          return "D:\\Windows";
-        }
-        if (
-          key === "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion" &&
-          valueName === "ProgramFilesDir"
-        ) {
-          return "E:\\Programs";
-        }
-        return null;
-      },
-    });
+  it("retains first-lookup environment fallbacks when Program Files is requested later", async () => {
+    vi.resetModules();
+    const roots = await import("./windows-install-roots.js");
+    vi.spyOn(fs, "accessSync").mockImplementation(() => undefined);
+    execFileSyncMock.mockReturnValue("");
+    const env = {
+      SystemRoot: "relative\\Windows",
+      WINDIR: installRoots.systemRoot,
+      ProgramFiles: installRoots.programFiles,
+      "ProgramFiles(x86)": installRoots.programFilesX86,
+      ProgramW6432: "G:\\Programs",
+    };
+    for (const [key, value] of Object.entries(env)) {
+      vi.stubEnv(key, value);
+    }
+    expect(roots.getWindowsCmdExePath()).toBe("D:\\Windows\\System32\\cmd.exe");
 
-    const roots = getWindowsInstallRoots({
-      SystemRoot: "G:\\Windows",
-      ProgramFiles: "H:\\Programs",
-      "ProgramFiles(x86)": "I:\\Programs (x86)",
-      ProgramW6432: "H:\\Programs",
-    });
-
-    expect(roots).toEqual({
-      systemRoot: "G:\\Windows",
-      programFiles: "H:\\Programs",
-      programFilesX86: "I:\\Programs (x86)",
-      programW6432: "H:\\Programs",
-    });
-  });
-
-  it("falls back to validated env roots when registry lookup is unavailable", () => {
-    _resetWindowsInstallRootsForTests({
-      queryRegistryValue: () => null,
-    });
-
-    const roots = getWindowsInstallRoots({
-      systemroot: "D:\\Windows\\",
-      programfiles: "E:\\Programs",
-      "PROGRAMFILES(X86)": "F:\\Programs (x86)\\",
-      programw6432: "E:\\Programs",
-    });
-
-    expect(roots).toEqual({
-      systemRoot: "D:\\Windows",
-      programFiles: "E:\\Programs",
-      programFilesX86: "F:\\Programs (x86)",
-      programW6432: "E:\\Programs",
-    });
+    for (const key of Object.keys(env)) {
+      vi.stubEnv(key, "Z:\\Changed");
+    }
+    const cached = roots.getWindowsInstallRoots();
+    expect(cached).toEqual({ ...installRoots, programW6432: "G:\\Programs" });
+    expect(roots.getWindowsInstallRoots()).toBe(cached);
+    expect(roots.getWindowsCmdExePath()).toBe("D:\\Windows\\System32\\cmd.exe");
   });
 
   it("falls back to defaults when registry and env roots are invalid", () => {
-    _resetWindowsInstallRootsForTests({
-      queryRegistryValue: () => "relative\\path",
-    });
-
     const roots = getWindowsInstallRoots({
       SystemRoot: "relative\\Windows",
       ProgramFiles: "\\\\server\\share\\Program Files",
@@ -156,10 +99,6 @@ describe("getWindowsInstallRoots", () => {
 
 describe("getWindowsProgramFilesRoots", () => {
   it("prefers ProgramW6432 and dedupes roots case-insensitively", () => {
-    _resetWindowsInstallRootsForTests({
-      queryRegistryValue: () => null,
-    });
-
     expect(
       getWindowsProgramFilesRoots({
         ProgramW6432: "D:\\Programs",
@@ -170,26 +109,25 @@ describe("getWindowsProgramFilesRoots", () => {
   });
 });
 
-describe("locateWindowsRegExe", () => {
-  it("uses the fixed Windows system reg.exe candidate", () => {
-    expect(_private.getWindowsRegExeCandidates()).toEqual(["C:\\Windows\\System32\\reg.exe"]);
+describe("Windows system executable helpers", () => {
+  it("resolves trusted Windows process-inspection tools", () => {
+    const env = { SystemRoot: "D:\\Windows" };
+
+    expect(getWindowsSystem32ExePath("netstat.exe", env)).toBe(
+      "D:\\Windows\\System32\\netstat.exe",
+    );
+    expect(getWindowsPowerShellExePath(env)).toBe(
+      "D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    );
+    expect(getWindowsWmicExePath(env)).toBe("D:\\Windows\\System32\\wbem\\wmic.exe");
   });
 
-  it("does not resolve readable reg.exe files from env-derived roots", () => {
-    _resetWindowsInstallRootsForTests({
-      isReadableFile: (filePath) => filePath === "D:\\Windows\\System32\\reg.exe",
-    });
-
-    const originalEnv = process.env;
-    try {
-      process.env = {
-        ...originalEnv,
-        SystemRoot: "D:\\Windows",
-        WINDIR: "E:\\Windows",
-      };
-      expect(_private.locateWindowsRegExe()).toBeNull();
-    } finally {
-      process.env = originalEnv;
-    }
+  it("rejects unsafe System32 executable names", () => {
+    expect(() => getWindowsSystem32ExePath("..\\netstat.exe")).toThrow(
+      /Invalid Windows System32 executable name/u,
+    );
+    expect(() => getWindowsSystem32ExePath("netstat")).toThrow(
+      /Invalid Windows System32 executable name/u,
+    );
   });
 });

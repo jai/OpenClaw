@@ -1,47 +1,57 @@
-import { withRemoteHttpResponse } from "./remote-http.js";
-import type { SsrFPolicy } from "./ssrf-policy.js";
+import { createProviderHttpError, type SsrFPolicy } from "./openclaw-runtime-network.js";
+import { withRemoteHttpResponse, type RemoteEmbeddingRequestAuth } from "./remote-http.js";
+import { readResponseJsonWithLimit } from "./response-snippet.js";
 
+// Shared JSON POST helper for guarded remote memory provider calls.
+
+/** POST JSON, parse bounded response JSON, and preserve provider error metadata. */
 export async function postJson<T>(params: {
   url: string;
   headers: Record<string, string>;
   ssrfPolicy?: SsrFPolicy;
   fetchImpl?: typeof fetch;
+  resolveRequestHeaders?: RemoteEmbeddingRequestAuth;
   signal?: AbortSignal;
   body: unknown;
   errorPrefix: string;
-  attachStatus?: boolean;
+  maxResponseBytes?: number;
+  onResponse?: (response: Response) => void;
+  mapResponseError?: (error: unknown) => unknown;
   parse: (payload: unknown) => T | Promise<T>;
 }): Promise<T> {
   return await withRemoteHttpResponse({
     url: params.url,
     ssrfPolicy: params.ssrfPolicy,
     fetchImpl: params.fetchImpl,
+    resolveRequestHeaders: params.resolveRequestHeaders,
     signal: params.signal,
     init: {
       method: "POST",
       headers: params.headers,
       body: JSON.stringify(params.body),
     },
-    onResponse: async (res) => {
-      if (!res.ok) {
-        const text = await res.text();
-        const err = new Error(`${params.errorPrefix}: ${res.status} ${text}`) as Error & {
-          status?: number;
-        };
-        if (params.attachStatus) {
-          err.status = res.status;
+    onResponse: async (res, requestHeaders) => {
+      params.onResponse?.(res);
+      try {
+        if (!res.ok) {
+          throw await createProviderHttpError(res, params.errorPrefix, {
+            requestHeaders,
+            signal: params.signal,
+            maxBodyBytes: 8 * 1024,
+          });
         }
-        throw err;
+        const payload = await readResponseJsonWithLimit(res, {
+          errorPrefix: params.errorPrefix,
+          maxBytes: params.maxResponseBytes,
+          signal: params.signal,
+        });
+        return await params.parse(payload);
+      } catch (error) {
+        if (params.signal?.aborted) {
+          throw error;
+        }
+        throw params.mapResponseError ? params.mapResponseError(error) : error;
       }
-      return await params.parse(await readJsonResponse(res, params.errorPrefix));
     },
   });
-}
-
-async function readJsonResponse(res: Response, errorPrefix: string): Promise<unknown> {
-  try {
-    return await res.json();
-  } catch (cause) {
-    throw new Error(`${errorPrefix}: malformed JSON response`, { cause });
-  }
 }

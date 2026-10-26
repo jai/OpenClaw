@@ -1,77 +1,38 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
-import type { PluginDiagnostic } from "./manifest-types.js";
+import { safeStatSync } from "@openclaw/fs-safe/path";
+import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
+import { stableStringify } from "@openclaw/normalization-core/stable-stringify";
 
+/** File metadata signature used to skip unchanged installed plugin files. */
 export type InstalledPluginFileSignature = {
   size: number;
   mtimeMs: number;
   ctimeMs?: number;
 };
 
-function hashString(value: string): string {
-  return crypto.createHash("sha256").update(value).digest("hex");
-}
-
+/** Hashes JSON-serializable data with SHA-256. */
 export function hashJson(value: unknown): string {
-  return hashString(JSON.stringify(value));
+  return sha256Hex(JSON.stringify(value));
 }
 
-export function safeHashFile(params: {
-  filePath: string;
-  pluginId?: string;
-  diagnostics: PluginDiagnostic[];
-  required: boolean;
-}): string | undefined {
-  try {
-    return crypto.createHash("sha256").update(fs.readFileSync(params.filePath)).digest("hex");
-  } catch (err) {
-    if (params.required) {
-      params.diagnostics.push({
-        level: "warn",
-        ...(params.pluginId ? { pluginId: params.pluginId } : {}),
-        source: params.filePath,
-        message: `installed plugin index could not hash ${params.filePath}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      });
-    }
-    return undefined;
-  }
+/** Hashes JSON-like data independently of object property insertion order. */
+export function hashStableJson(value: unknown): string {
+  return sha256Hex(stableStringify(value));
 }
 
-export function safeFileSignature(filePath: string): InstalledPluginFileSignature | undefined {
+/** Hashes a file, returning undefined when it cannot be read. */
+export function safeHashFile(filePath: string): string | undefined {
   try {
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile()) {
-      return undefined;
-    }
-    return {
-      size: stat.size,
-      mtimeMs: stat.mtimeMs,
-      ctimeMs: stat.ctimeMs,
-    };
+    return sha256Hex(fs.readFileSync(filePath));
   } catch {
     return undefined;
   }
 }
 
-export function fileSignatureMatches(
-  filePath: string,
-  signature: InstalledPluginFileSignature | undefined,
-): boolean | undefined {
-  if (!signature) {
-    return undefined;
-  }
-  if (typeof signature.ctimeMs !== "number") {
-    return undefined;
-  }
-  const current = safeFileSignature(filePath);
-  if (!current) {
-    return false;
-  }
-  return (
-    current.size === signature.size &&
-    current.mtimeMs === signature.mtimeMs &&
-    current.ctimeMs === signature.ctimeMs
-  );
+/** Reads a safe file signature for installed plugin index freshness checks. */
+export function safeFileSignature(filePath: string): InstalledPluginFileSignature | undefined {
+  const stat = safeStatSync(filePath);
+  return stat?.isFile()
+    ? { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs }
+    : undefined;
 }

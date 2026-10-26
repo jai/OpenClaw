@@ -1,6 +1,7 @@
-export { resolveDeliveryTarget } from "./delivery-target.js";
+// Runtime delivery seam for isolated cron agent run orchestration.
 export {
-  dispatchCronDelivery,
-  matchesMessagingToolDeliveryTarget,
-  resolveCronDeliveryBestEffort,
-} from "./delivery-dispatch.js";
+  buildDeliveryFormatPrompt,
+  resolveMessageToolDeliveryFormatPrompt,
+} from "../../infra/outbound/delivery-format-prompt.js";
+export { resolveDeliveryTarget } from "./delivery-target.js";
+export { dispatchCronDelivery } from "./delivery-dispatch.js";

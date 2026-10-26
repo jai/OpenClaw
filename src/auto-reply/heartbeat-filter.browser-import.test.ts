@@ -1,3 +1,4 @@
+/** Browser-import smoke test for heartbeat filter isolation. */
 import { build } from "esbuild";
 import { describe, expect, it } from "vitest";
 
@@ -21,5 +22,8 @@ describe("heartbeat-filter browser import", () => {
     });
 
     expect(Object.keys(bundled.metafile.inputs)).not.toContain("src/utils.ts");
+    expect(Object.keys(bundled.metafile.inputs)).not.toContain(
+      "src/agents/embedded-agent-runner/message-visibility.ts",
+    );
   });
 });
