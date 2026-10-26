@@ -246,10 +246,6 @@ async function ensurePromptSourceCheckout(params: {
   env: NodeJS.ProcessEnv;
   steps: PromptReconcilerRunStep[];
 }): Promise<void> {
-  if (!params.pull && (await isDirectory(params.checkoutDir))) {
-    return;
-  }
-
   if (!(await pathExists(params.checkoutDir))) {
     if (!params.pull) {
       throw new Error(
@@ -264,6 +260,16 @@ async function ensurePromptSourceCheckout(params: {
 
   if (!(await isDirectory(path.join(params.checkoutDir, ".git")))) {
     throw new Error(`Prompt checkout is not a git repository: ${params.checkoutDir}`);
+  }
+
+  const origin = await runCommand("git", ["remote", "get-url", "origin"], {
+    cwd: params.checkoutDir,
+    env: params.env,
+  });
+  if (origin.stdout.trim() !== params.repository) {
+    throw new Error(
+      `Prompt checkout origin ${origin.stdout.trim()} does not match requested repository ${params.repository}: ${params.checkoutDir}`,
+    );
   }
 
   const status = await runCommand("git", ["status", "--porcelain"], {
@@ -392,10 +398,16 @@ async function planSupportFiles(params: {
   for (const relativePath of sourceFiles) {
     const source = path.join(sourceSupportDir, relativePath);
     const destination = path.join(params.supportDir, relativePath);
-    const [sourceSha, destinationSha, stat] = await Promise.all([
+    const [sourceSha, destinationSha, stat, destinationStat] = await Promise.all([
       readSha256(source),
       readSha256(destination),
       fs.stat(source),
+      fs.stat(destination).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") {
+          return undefined;
+        }
+        throw error;
+      }),
     ]);
     if (!sourceSha) {
       continue;
@@ -406,7 +418,7 @@ async function planSupportFiles(params: {
       action:
         destinationSha === undefined
           ? "create"
-          : destinationSha === sourceSha
+          : destinationSha === sourceSha && (destinationStat!.mode & 0o777) === mode
             ? "unchanged"
             : "update",
       relativePath,

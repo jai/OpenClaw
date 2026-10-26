@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -128,5 +129,48 @@ describe("prompt reconciler", () => {
         supportDir: path.join(tempRoot, "runtime", "jai-work"),
       }),
     ).rejects.toThrow("Missing required prompt files");
+  });
+
+  it("rejects an existing checkout from a different repository even without pulling", async () => {
+    const checkoutDir = path.join(tempRoot, "checkout");
+    await fs.mkdir(checkoutDir);
+    execFileSync("git", ["init", checkoutDir]);
+    execFileSync("git", ["remote", "add", "origin", "https://example.com/old.git"], {
+      cwd: checkoutDir,
+    });
+
+    await expect(
+      reconcilePromptFiles({
+        config: {},
+        repository: "https://example.com/new.git",
+        checkoutDir,
+        pull: false,
+      }),
+    ).rejects.toThrow("does not match requested repository");
+  });
+
+  it("updates a support file when only its executable permission changes", async () => {
+    const sourceDir = path.join(tempRoot, "source");
+    const supportDir = path.join(tempRoot, "support");
+    await createPromptSource(sourceDir);
+    const source = path.join(sourceDir, "support", "check.sh");
+    const destination = path.join(supportDir, "check.sh");
+    await writeFile(source, "#!/bin/sh\nexit 0\n");
+    await writeFile(destination, "#!/bin/sh\nexit 0\n");
+    await fs.chmod(source, 0o755);
+    await fs.chmod(destination, 0o644);
+
+    const result = await reconcilePromptFiles({
+      config: {},
+      sourceDir,
+      workspaceDir: path.join(tempRoot, "workspace"),
+      supportDir,
+      apply: true,
+    });
+
+    expect(result.changed).toContainEqual(
+      expect.objectContaining({ kind: "support", action: "update", relativePath: "check.sh" }),
+    );
+    expect((await fs.stat(destination)).mode & 0o777).toBe(0o755);
   });
 });

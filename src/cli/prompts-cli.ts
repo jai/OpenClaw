@@ -96,13 +96,13 @@ export function registerPromptsCli(program: Command) {
       "Prompt bundle runtime/user id (defaults to OPENCLAW_PROMPTS_RUNTIME, OPENCLAW_PROFILE, then OS user)",
     )
     .option("--repo <url>", "Prompt source git repository")
-    .option("--ref <ref>", "Prompt source git ref", "main")
+    .option("--ref <ref>", "Prompt source git ref (defaults to OPENCLAW_PROMPTS_REF, then main)")
     .option("--checkout-dir <path>", "Managed prompt source checkout directory")
     .option(
       "--source-dir <path>",
       "Use an already-rendered prompt bundle directory and skip git/render",
     )
-    .option("--bundle-root <path>", "Rendered prompt bundle root inside checkout", "agent-prompts")
+    .option("--bundle-root <path>", "Rendered prompt bundle root inside checkout")
     .option("--workspace-dir <path>", "Override target agent workspace directory")
     .option("--support-dir <path>", "Override target runtime support directory")
     .option("--apply", "Write changes instead of dry-running", false)
