@@ -1,6 +1,6 @@
 # Jai Work Google Chat overlay
 
-Base: upstream OpenClaw `977d7287c01` (main, 2026-10-26). Keep these layers separate when rebasing onto later upstream main.
+Base: upstream OpenClaw `ebe6623f6db` (main, 2026-10-26). Keep these layers separate when rebasing onto later upstream main.
 
 | Layer                    | Files                                                 | Purpose                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------ | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -10,7 +10,7 @@ Base: upstream OpenClaw `977d7287c01` (main, 2026-10-26). Keep these layers sepa
 
 DM thread routing does not split agent sessions by thread. The status layer and DM layer change no configuration or session schema.
 
-The fork also carries `openclaw prompts reconcile` from its prior main branch. Its CLI registration is adapted to upstream's current descriptor catalog. The fork's August installer workflow edits are superseded by upstream's reusable workflow design; the refreshed tree uses the upstream workflows.
+The fork also carries `openclaw prompts reconcile` from its prior main branch. Its CLI registration is adapted to upstream's current descriptor catalog. The reconciler checks the source repository before using an existing checkout and propagates support-file permission changes. The fork's August installer workflow edits are superseded by upstream's reusable workflow design; the refreshed tree uses the upstream workflows.
 
 ## Refresh and validation
 
