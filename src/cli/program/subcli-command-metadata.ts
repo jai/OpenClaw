@@ -69,6 +69,7 @@ const commands = [
   command("security", "Audit local config and state for common security foot-guns"),
   command("secrets", "Secrets runtime controls"),
   command("skills", "List and inspect available skills"),
+  command("prompts", "Reconcile rendered prompt files into agent workspaces"),
   command("update", "Update OpenClaw and inspect update channel status"),
   command("completion", "Generate shell completion script", { hasSubcommands: false }),
 ] as const;

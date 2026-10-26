@@ -10,6 +10,8 @@ Base: upstream OpenClaw `2499f2be3e88e025735268fb622e569d69fcd369` (main, 2026-1
 
 DM thread routing does not split agent sessions by thread. The status layer and DM layer change no configuration or session schema.
 
+The fork also carries `openclaw prompts reconcile` from its prior main branch. Its CLI registration is adapted to upstream's current descriptor catalog. The fork's August installer workflow edits are superseded by upstream's reusable workflow design; the refreshed tree uses the upstream workflows.
+
 ## Refresh and validation
 
 1. Fetch upstream main, start a full sibling clone from its exact commit, then adapt the two local layers. Do not replay the old formatting backport or old monitor file wholesale; upstream delivery changed after those commits.
