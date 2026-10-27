@@ -107,6 +107,37 @@ it("keeps an explicit send in its originating DM thread when the model omits thr
   });
 });
 
+it("renders bold text and links in an explicit message send", async () => {
+  await send({
+    to: "spaces/AAA",
+    message: "**Completed ✅**\n\nThe [GitHub UAM item](https://example.com/uam) is updated.",
+    threadId: originThread,
+  });
+
+  expect(sendGoogleChatMessage.mock.lastCall?.[0]).toMatchObject({
+    text: "*Completed ✅*\n\nThe <https://example.com/uam|GitHub UAM item> is updated.",
+    thread: originThread,
+  });
+});
+
+it("keeps every chunk of a long explicit send in the first message's thread", async () => {
+  sendGoogleChatMessage
+    .mockResolvedValueOnce({
+      messageName: "spaces/AAA/messages/first",
+      threadName: "spaces/AAA/threads/new",
+    })
+    .mockResolvedValueOnce({
+      messageName: "spaces/AAA/messages/second",
+      threadName: "spaces/AAA/threads/new",
+    });
+
+  await send({ to: "spaces/AAA", message: "x".repeat(33_000) });
+
+  expect(sendGoogleChatMessage).toHaveBeenCalledTimes(2);
+  expect(sendGoogleChatMessage.mock.calls[0]?.[0].thread).toBeUndefined();
+  expect(sendGoogleChatMessage.mock.calls[1]?.[0].thread).toBe("spaces/AAA/threads/new");
+});
+
 it("honors an explicit thread even when the current DM has a different thread", async () => {
   await send(
     { to: "spaces/AAA", message: "New thread", threadId: "spaces/AAA/threads/explicit" },
