@@ -535,6 +535,13 @@ async function processGoogleChatEvent(
                       text: chunk,
                     });
                   } catch (error) {
+                    if (
+                      error instanceof GoogleChatApiError &&
+                      [400, 401, 403].includes(error.status)
+                    ) {
+                      // The server rejected the edit, so the placeholder is still safe to remove.
+                      typingMessage = deliveryTypingMessage;
+                    }
                     if (!(error instanceof GoogleChatApiError) || error.status !== 404) {
                       throw error;
                     }
