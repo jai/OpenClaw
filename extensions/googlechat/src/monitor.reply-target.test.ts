@@ -2,6 +2,7 @@ import type { ChannelInboundTurnPlan } from "openclaw/plugin-sdk/channel-inbound
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
+import { GoogleChatApiError } from "./api.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
 import "./monitor.js";
 import type { GoogleChatEvent } from "./types.js";
@@ -38,7 +39,10 @@ vi.mock("openclaw/plugin-sdk/routing", async (importOriginal) => ({
 }));
 
 // mock-isolation: capture delivery without issuing Google Chat API requests.
-vi.mock("./api.js", () => apiMocks);
+vi.mock("./api.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api.js")>()),
+  ...apiMocks,
+}));
 // mock-isolation: this routing fixture supplies its admitted access result.
 vi.mock("./monitor-access.js", () => accessMocks);
 
@@ -155,6 +159,62 @@ const updated = (account: ResolvedGoogleChatAccount, text: string) => ({
 });
 
 describe("Google Chat automatic reply target reconciliation", () => {
+  it.each([
+    { label: "rejected edit", error: new GoogleChatApiError(403, "edit forbidden"), deletes: true },
+    { label: "lost response", error: new Error("response lost"), deletes: false },
+    { label: "timed-out edit", error: new GoogleChatApiError(408, "timeout"), deletes: false },
+  ])("handles placeholder cleanup after a $label", async ({ error, deletes }) => {
+    const account = createAccount({ replyToMode: "all" });
+    apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+      messageName: TYPING,
+      threadName: THREAD,
+    });
+    apiMocks.updateGoogleChatMessage.mockRejectedValueOnce(error);
+
+    await processEvent({
+      account,
+      run: async (delivery) => {
+        await expect(delivery.deliver({ text: "answer", replyToId: SOURCE })).rejects.toBe(error);
+      },
+    });
+
+    if (deletes) {
+      expect(apiMocks.deleteGoogleChatMessage).toHaveBeenCalledExactlyOnceWith({
+        account,
+        messageName: TYPING,
+      });
+    } else {
+      expect(apiMocks.deleteGoogleChatMessage).not.toHaveBeenCalled();
+    }
+  });
+
+  it("threads requested batched replies and leaves other output top-level", async () => {
+    const account = createAccount({ replyToMode: "batched", typingIndicator: "none" });
+    await processEvent({
+      account,
+      run: async (delivery) => {
+        const standalone = { text: "tool output" };
+        expect(delivery.durable(standalone, { kind: "final" })).toEqual({
+          to: SPACE,
+          replyToId: null,
+        });
+        await delivery.deliver(standalone);
+        const reply = { text: "batched answer", replyToId: SOURCE };
+        expect(delivery.durable(reply, { kind: "final" })).toEqual({
+          to: SPACE,
+          replyToId: THREAD,
+          threadId: THREAD,
+        });
+        await delivery.deliver(reply);
+      },
+    });
+    expect(apiMocks.sendGoogleChatMessage).toHaveBeenNthCalledWith(1, sent(account, "tool output"));
+    expect(apiMocks.sendGoogleChatMessage).toHaveBeenNthCalledWith(
+      2,
+      sent(account, "batched answer", THREAD),
+    );
+  });
+
   it("updates the typing message with agent activity and then clears it on a silent turn", async () => {
     vi.useFakeTimers();
     try {
