@@ -8,7 +8,7 @@ import type { ChannelMessageActionContext } from "openclaw/plugin-sdk/channel-co
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveGoogleChatAccount } from "./accounts.js";
 import { sendGoogleChatMessage } from "./api.js";
-import { formatGoogleChatMediaText } from "./format.js";
+import { formatGoogleChatMediaText, formatGoogleChatTextChunks } from "./format.js";
 import { normalizeGoogleChatTarget, resolveGoogleChatOutboundSpace } from "./targets.js";
 
 const OUTBOUND_MEDIA_KEYS = ["media", "mediaUrl", "path", "filePath", "fileUrl"] as const;
@@ -112,14 +112,20 @@ export async function handleGoogleChatAction({
             space,
           }));
 
-    const sent = await sendGoogleChatMessage({
-      account,
-      space,
-      text: content,
-      thread: threadId,
-      assertDirectAdapterHandoff,
-      onPlatformSendDispatch,
-    });
+    const chunks = formatGoogleChatTextChunks(content);
+    let thread = threadId;
+    let sent: Awaited<ReturnType<typeof sendGoogleChatMessage>> = null;
+    for (const text of chunks.length > 0 ? chunks : [""]) {
+      sent = await sendGoogleChatMessage({
+        account,
+        space,
+        text,
+        thread,
+        assertDirectAdapterHandoff,
+        onPlatformSendDispatch,
+      });
+      thread = sent?.threadName ?? thread;
+    }
     return jsonResult({ ok: true, to: space, ...sent });
   }
 
