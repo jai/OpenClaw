@@ -218,6 +218,9 @@ const registrations = {
     register: async (program) => (await import("../skills-cli.js")).registerSkillsCli(program),
     machineOutput: ({ argv }) => isSkillsMachineOutput(argv),
   },
+  prompts: {
+    register: async (program) => (await import("../prompts-cli.js")).registerPromptsCli(program),
+  },
   update: {
     register: async (program) => (await import("../update-cli.js")).registerUpdateCli(program),
   },
