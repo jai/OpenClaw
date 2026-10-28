@@ -225,32 +225,38 @@ describe("Google Chat automatic reply target reconciliation", () => {
     expect(apiMocks.sendGoogleChatMessage).toHaveBeenCalledOnce();
   });
 
-  it("keeps the typing thread when automatic delivery supplies the source message name", async () => {
-    const deliveredThread = `${SPACE}/threads/fallback`;
-    const account = createAccount({ replyToMode: "all" });
-    apiMocks.sendGoogleChatMessage
-      .mockResolvedValueOnce({ messageName: TYPING, threadName: deliveredThread })
-      .mockResolvedValueOnce({
-        messageName: `${SPACE}/messages/second`,
-        threadName: deliveredThread,
+  it.each(["SPACE", "DIRECT_MESSAGE"])(
+    "keeps the %s typing thread when automatic delivery supplies the source message name",
+    async (spaceType) => {
+      const deliveredThread = `${SPACE}/threads/fallback`;
+      const account = createAccount({ replyToMode: "all" });
+      apiMocks.sendGoogleChatMessage
+        .mockResolvedValueOnce({ messageName: TYPING, threadName: deliveredThread })
+        .mockResolvedValueOnce({
+          messageName: `${SPACE}/messages/second`,
+          threadName: deliveredThread,
+        });
+      await processEvent({
+        account,
+        event: createEvent({ spaceType }),
+        chunks: ["first chunk", "second chunk"],
+        run: async (delivery) => {
+          await delivery.deliver(Object.freeze({ text: "two chunks", replyToId: SOURCE }));
+        },
       });
-    await processEvent({
-      account,
-      chunks: ["first chunk", "second chunk"],
-      run: async (delivery) => {
-        await delivery.deliver(Object.freeze({ text: "two chunks", replyToId: SOURCE }));
-      },
-    });
-    expect(apiMocks.updateGoogleChatMessage).toHaveBeenCalledWith(updated(account, "first chunk"));
-    expect(apiMocks.sendGoogleChatMessage).toHaveBeenNthCalledWith(
-      1,
-      sent(account, "_OpenClaw is typing..._", THREAD),
-    );
-    expect(apiMocks.sendGoogleChatMessage).toHaveBeenNthCalledWith(
-      2,
-      sent(account, "second chunk", deliveredThread),
-    );
-  });
+      expect(apiMocks.updateGoogleChatMessage).toHaveBeenCalledWith(
+        updated(account, "first chunk"),
+      );
+      expect(apiMocks.sendGoogleChatMessage).toHaveBeenNthCalledWith(
+        1,
+        sent(account, "_OpenClaw is typing..._", THREAD),
+      );
+      expect(apiMocks.sendGoogleChatMessage).toHaveBeenNthCalledWith(
+        2,
+        sent(account, "second chunk", deliveredThread),
+      );
+    },
+  );
 
   it.each<{
     label: string;
@@ -260,7 +266,11 @@ describe("Google Chat automatic reply target reconciliation", () => {
   }>([
     { label: "threaded after typing fails", thread: THREAD, failTyping: true },
     { label: "unknown source message", event: createEvent({ messageName: null }), thread: SOURCE },
-    { label: "direct message", event: createEvent({ spaceType: "DIRECT_MESSAGE" }) },
+    {
+      label: "direct message",
+      event: createEvent({ spaceType: "DIRECT_MESSAGE" }),
+      thread: THREAD,
+    },
   ])("reconciles delivery and durable metadata: $label", async ({ event, thread, failTyping }) => {
     const account = createAccount({
       replyToMode: "all",
