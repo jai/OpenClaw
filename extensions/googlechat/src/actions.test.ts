@@ -123,7 +123,7 @@ describe("googlechat message actions", () => {
       params: {
         to: "spaces/AAA",
         message: "caption",
-        threadId: "thread-1",
+        replyTo: "spaces/AAA/threads/requested",
       },
       cfg: {},
       accountId: "default",
@@ -137,13 +137,24 @@ describe("googlechat message actions", () => {
       account,
       space: "spaces/AAA",
       text: "caption",
-      thread: "thread-1",
+      thread: "spaces/AAA/threads/requested",
     });
     expectJsonResult(result, {
       ok: true,
       to: "spaces/AAA",
       messageName: "spaces/AAA/messages/msg-1",
       threadName: "spaces/AAA/threads/thread-1",
+    });
+    const send = googlechatMessageActions.extractToolSend({
+      args: { action: "send", to: "spaces/AAA", replyTo: "spaces/AAA/threads/requested" },
+    });
+    if (!send) {
+      throw new Error("Expected Google Chat send evidence");
+    }
+    expect(send.threadId).toBe("spaces/AAA/threads/requested");
+    expect(googlechatMessageActions.extractToolSendResult({ result, send })).toMatchObject({
+      to: "spaces/AAA",
+      threadId: "spaces/AAA/threads/thread-1",
     });
   });
 

@@ -291,6 +291,7 @@ async function processGoogleChatEvent(
     },
     extra: {
       ChatType: isGroup ? "channel" : "direct",
+      TransportThreadId: account.config.replyToMode === "all" ? replyThreadName : undefined,
       WasMentioned: isGroup ? effectiveWasMentioned : undefined,
       CommandAuthorized: commandAuthorized,
       GroupSubject: undefined,
@@ -440,6 +441,7 @@ async function processGoogleChatEvent(
                   payload,
                   sourceMessageName: message.name,
                   replyThreadName: effectiveReplyThreadName,
+                  replyToMode: account.config.replyToMode,
                 }),
                 infoKind: info.kind,
                 spaceId,
@@ -457,6 +459,7 @@ async function processGoogleChatEvent(
                   payload,
                   sourceMessageName: message.name,
                   replyThreadName: effectiveReplyThreadName,
+                  replyToMode: account.config.replyToMode,
                 }),
                 account,
                 spaceId,

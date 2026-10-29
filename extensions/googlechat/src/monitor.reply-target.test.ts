@@ -1,6 +1,10 @@
+import { buildChannelInboundEventContext } from "openclaw/plugin-sdk/channel-inbound";
+import type { MsgContext } from "openclaw/plugin-sdk/reply-runtime";
 // Googlechat tests cover automatic reply target reconciliation at the monitor boundary.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
+import { GoogleChatApiError } from "./api.js";
+import { googlechatOutboundAdapter } from "./channel.adapters.js";
 import type { GoogleChatIngressLifecycle } from "./monitor-ingress.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
 import "./monitor.js";
@@ -36,11 +40,16 @@ vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => ({
   resolveChannelInboundRouteEnvelope: inboundMocks.resolveChannelInboundRouteEnvelope,
 }));
 
-vi.mock("./api.js", () => ({
+vi.mock("./api.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api.js")>()),
   deleteGoogleChatMessage: apiMocks.deleteGoogleChatMessage,
   downloadGoogleChatMedia: apiMocks.downloadGoogleChatMedia,
   sendGoogleChatMessage: apiMocks.sendGoogleChatMessage,
   updateGoogleChatMessage: apiMocks.updateGoogleChatMessage,
+}));
+
+vi.mock("./channel.runtime.js", () => ({
+  googleChatChannelRuntime: { sendGoogleChatMessage: apiMocks.sendGoogleChatMessage },
 }));
 
 vi.mock("./monitor-access.js", () => ({
@@ -65,6 +74,7 @@ vi.mock("./monitor-routing.js", () => ({
 type GoogleChatTestReplyPayload = {
   text: string;
   replyToId?: string;
+  replyToCurrent?: boolean;
   isStatusNotice?: boolean;
   isCommentary?: boolean;
   isCompactionNotice?: boolean;
@@ -80,6 +90,7 @@ type GoogleChatTestDelivery = {
   ) => Promise<void>;
 };
 type GoogleChatTestTurn = {
+  ctxPayload: MsgContext;
   delivery: GoogleChatTestDelivery;
   dispatcherOptions?: { onReplyStart?: () => Promise<void> };
 };
@@ -115,7 +126,7 @@ function createCore(params: {
     logging: { shouldLogVerbose: () => false },
     channel: {
       inbound: {
-        buildContext: vi.fn((payload: unknown) => payload),
+        buildContext: buildChannelInboundEventContext,
         run: vi.fn(async (turn: { adapter: { resolveTurn: () => GoogleChatTestTurn } }) => {
           const resolved = turn.adapter.resolveTurn();
           await params.run(resolved.delivery, resolved);
@@ -184,6 +195,88 @@ async function processEvent(params: {
 }
 
 describe("Google Chat automatic reply target reconciliation", () => {
+  it.each(["none", "message"] as const)(
+    "keeps a stop acknowledgement in its source thread with typing %s",
+    async (typingIndicator) => {
+      const account = createAccount({ replyToMode: "all", typingIndicator });
+      const payload = { text: "⚙️ Agent was aborted." };
+      const core = createCore({
+        run: async (delivery) => {
+          if (typingIndicator === "none") {
+            expect(delivery.durable(payload, { kind: "final" })).toEqual({
+              to: "spaces/CLASSIFY",
+              replyToId: "spaces/CLASSIFY/threads/requested",
+              threadId: "spaces/CLASSIFY/threads/requested",
+            });
+          }
+          await delivery.deliver(payload, { kind: "final" });
+        },
+      });
+      if (typingIndicator === "message") {
+        apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+          messageName: "spaces/CLASSIFY/messages/typing",
+          threadName: "spaces/CLASSIFY/threads/requested",
+        });
+        apiMocks.updateGoogleChatMessage.mockRejectedValueOnce(
+          new GoogleChatApiError(404, "Placeholder removed"),
+        );
+      }
+
+      await processEvent({ account, core });
+
+      expect(apiMocks.sendGoogleChatMessage).toHaveBeenLastCalledWith({
+        account,
+        space: "spaces/CLASSIFY",
+        text: "⚙️ Agent was aborted.",
+        thread: "spaces/CLASSIFY/threads/requested",
+      });
+      expect(apiMocks.deleteGoogleChatMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps a queued terminal reply in the source Google Chat thread", async () => {
+    const core = createCore({
+      run: async (_delivery, { ctxPayload }) => {
+        expect(ctxPayload.MessageThreadId).toBeUndefined();
+        await googlechatOutboundAdapter.attachedResults.sendText({
+          cfg: {
+            channels: { googlechat: { serviceAccount: { client_email: "bot@example.com" } } },
+          },
+          to: "spaces/CLASSIFY",
+          text: "Four roles are open",
+          replyToId: ctxPayload.MessageSid,
+          threadId: ctxPayload.TransportThreadId,
+        });
+      },
+    });
+    await processEvent({
+      account: createAccount({ replyToMode: "all", typingIndicator: "none" }),
+      core,
+    });
+    expect(apiMocks.sendGoogleChatMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        space: "spaces/CLASSIFY",
+        text: "Four roles are open",
+        thread: "spaces/CLASSIFY/threads/requested",
+      }),
+    );
+  });
+
+  it.each([undefined, "off", "first", "batched"] as const)(
+    "retains queued reply placement policy for mode %s",
+    async (replyToMode) => {
+      const core = createCore({
+        run: async (_delivery, { ctxPayload }) => {
+          expect(ctxPayload.TransportThreadId).toBeUndefined();
+        },
+      });
+      await processEvent({
+        account: createAccount({ replyToMode, typingIndicator: "none" }),
+        core,
+      });
+    },
+  );
+
   it.each([undefined, "off"] as const)(
     "keeps automatic replies top-level with reply mode %s",
     async (replyToMode) => {
@@ -215,13 +308,13 @@ describe("Google Chat automatic reply target reconciliation", () => {
     },
   );
 
-  it.each([undefined, "off"] as const)(
-    "keeps automatic replies top-level without typing with reply mode %s",
+  it.each([undefined, "off", "first", "batched"] as const)(
+    "keeps untargeted replies top-level without typing with reply mode %s",
     async (replyToMode) => {
       const account = createAccount({ replyToMode, typingIndicator: "none" });
       const core = createCore({
         run: async (delivery) => {
-          const payload = { text: "top-level reply", replyToId: "spaces/CLASSIFY/messages/1" };
+          const payload = { text: "top-level reply" };
           expect(delivery.durable(payload, { kind: "final" })).toEqual({
             to: "spaces/CLASSIFY",
             replyToId: null,
