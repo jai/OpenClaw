@@ -401,6 +401,7 @@ async function processGoogleChatEvent(
                 payload,
                 sourceMessageName: message.name,
                 replyThreadName: effectiveReplyThreadName,
+                replyToMode: account.config.replyToMode,
               });
               if (info.kind !== "final" || Boolean(typingMessage)) {
                 return false;
@@ -420,6 +421,7 @@ async function processGoogleChatEvent(
                 payload,
                 sourceMessageName: message.name,
                 replyThreadName: effectiveReplyThreadName,
+                replyToMode: account.config.replyToMode,
               });
               // Clear this whenever the typing message is deleted or unavailable; otherwise
               // text delivery can keep retrying a dead message and drop content.

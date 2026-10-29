@@ -166,6 +166,40 @@ const updated = (account: ResolvedGoogleChatAccount, text: string) => ({
 });
 
 describe("Google Chat automatic reply target reconciliation", () => {
+  it.each(["none", "message"] as const)(
+    "keeps a stop acknowledgement in its source thread with typing %s",
+    async (typingIndicator) => {
+      const account = createAccount({ replyToMode: "all", typingIndicator });
+      const payload = { text: "⚙️ Agent was aborted." };
+      if (typingIndicator === "message") {
+        apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+          messageName: TYPING,
+          threadName: THREAD,
+        });
+        apiMocks.updateGoogleChatMessage.mockRejectedValueOnce(
+          new GoogleChatApiError(404, "Placeholder removed"),
+        );
+      }
+      await processEvent({
+        account,
+        run: async (delivery) => {
+          if (typingIndicator === "none") {
+            expect(delivery.durable(payload, { kind: "final" })).toEqual({
+              to: SPACE,
+              replyToId: THREAD,
+              threadId: THREAD,
+            });
+          }
+          await delivery.deliver(payload);
+        },
+      });
+      expect(apiMocks.sendGoogleChatMessage).toHaveBeenLastCalledWith(
+        sent(account, payload.text, THREAD),
+      );
+      expect(apiMocks.deleteGoogleChatMessage).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["SPACE", "DIRECT_MESSAGE"])(
     "preserves the %s source thread when a queued final bypasses monitor delivery",
     async (spaceType) => {
