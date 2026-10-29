@@ -37,6 +37,7 @@ import {
   registerGoogleChatWebhookTarget,
   setGoogleChatWebhookEventProcessor,
 } from "./monitor-routing.js";
+import { createGoogleChatStatusMessage } from "./monitor-status-message.js";
 import type {
   GoogleChatCoreRuntime,
   GoogleChatMonitorOptions,
@@ -238,7 +239,9 @@ async function processGoogleChatEvent(
     body: rawBody,
   });
 
-  const replyThreadName = isGroup ? message.thread?.name : undefined;
+  const inboundThreadName = message.thread?.name?.trim();
+  const replyThreadName =
+    isGroup || inboundThreadName?.startsWith(`${spaceId}/threads/`) ? inboundThreadName : undefined;
   const ctxPayload = core.channel.inbound.buildContext({
     channelIngress: access.channelIngress,
     channel: "googlechat",
@@ -282,6 +285,7 @@ async function processGoogleChatEvent(
     },
     extra: {
       ChatType: isGroup ? "channel" : "direct",
+      TransportThreadId: account.config.replyToMode === "all" ? replyThreadName : undefined,
       WasMentioned: isGroup ? effectiveWasMentioned : undefined,
       CommandAuthorized: commandAuthorized,
       GroupSubject: undefined,
@@ -333,7 +337,16 @@ async function processGoogleChatEvent(
     }
   }
 
+  const activity =
+    typingMessage && config.messages?.statusReactions?.enabled === true
+      ? await createGoogleChatStatusMessage({
+          account,
+          messageName: typingMessage.name,
+          onError: (error) => runtime.error?.(`Google Chat status update failed: ${String(error)}`),
+        })
+      : undefined;
   const cleanupTypingMessage = async () => {
+    await activity?.stop();
     const placeholder = typingMessage;
     typingMessage = undefined;
     if (!placeholder) {
@@ -388,6 +401,7 @@ async function processGoogleChatEvent(
                 payload,
                 sourceMessageName: message.name,
                 replyThreadName: effectiveReplyThreadName,
+                replyToMode: account.config.replyToMode,
               });
               if (info.kind !== "final" || Boolean(typingMessage)) {
                 return false;
@@ -407,10 +421,15 @@ async function processGoogleChatEvent(
                 payload,
                 sourceMessageName: message.name,
                 replyThreadName: effectiveReplyThreadName,
+                replyToMode: account.config.replyToMode,
               });
               // Clear this whenever the typing message is deleted or unavailable; otherwise
               // text delivery can keep retrying a dead message and drop content.
-              let deliveryTypingMessage = typingMessage;
+              const interimNotice = payload.isCompactionNotice || payload.isFallbackNotice;
+              if (!interimNotice) {
+                await activity?.stop();
+              }
+              let deliveryTypingMessage = interimNotice ? undefined : typingMessage;
               const targetThreadName = normalizedPayload.replyToId?.trim() || undefined;
               const reply = resolveSendableOutboundReplyParts(normalizedPayload);
               let deliveryThreadName = targetThreadName;
@@ -519,6 +538,13 @@ async function processGoogleChatEvent(
                       text: chunk,
                     });
                   } catch (error) {
+                    if (
+                      error instanceof GoogleChatApiError &&
+                      [400, 401, 403].includes(error.status)
+                    ) {
+                      // The server rejected the edit, so the placeholder is still safe to remove.
+                      typingMessage = deliveryTypingMessage;
+                    }
                     if (!(error instanceof GoogleChatApiError) || error.status !== 404) {
                       throw error;
                     }
@@ -543,6 +569,33 @@ async function processGoogleChatEvent(
             },
           },
           replyPipeline: {},
+          dispatcherOptions: activity
+            ? {
+                onReplyStart: async () => {
+                  await activity.controller.setThinking();
+                },
+              }
+            : undefined,
+          replyOptions: {
+            commentaryPayloadsEnabled: false,
+            ...(activity
+              ? {
+                  allowToolLifecycleWhenProgressHidden: true,
+                  onToolStart: async (payload) => {
+                    await activity.controller.setTool(payload.name);
+                    return false;
+                  },
+                  onCompactionStart: async () => {
+                    await activity.controller.setCompacting();
+                    return false;
+                  },
+                  onCompactionEnd: async () => {
+                    await activity.controller.setThinking();
+                    return false;
+                  },
+                }
+              : {}),
+          },
           record: {
             onRecordError: (err) => {
               runtime.error?.(`googlechat: failed updating session meta: ${String(err)}`);
