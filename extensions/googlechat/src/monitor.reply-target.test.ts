@@ -1,6 +1,10 @@
+import { buildChannelInboundEventContext } from "openclaw/plugin-sdk/channel-inbound";
 // Googlechat tests cover automatic reply target reconciliation at the monitor boundary.
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveRoutedDeliveryThreadId } from "../../../src/auto-reply/reply/routed-delivery-thread.js";
+import type { MsgContext } from "../../../src/auto-reply/templating.js";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
+import { googlechatOutboundAdapter } from "./channel.adapters.js";
 import type { GoogleChatIngressLifecycle } from "./monitor-ingress.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
 import "./monitor.js";
@@ -43,6 +47,10 @@ vi.mock("./api.js", () => ({
   updateGoogleChatMessage: apiMocks.updateGoogleChatMessage,
 }));
 
+vi.mock("./channel.runtime.js", () => ({
+  googleChatChannelRuntime: { sendGoogleChatMessage: apiMocks.sendGoogleChatMessage },
+}));
+
 vi.mock("./monitor-access.js", () => ({
   applyGoogleChatInboundAccessPolicy: accessMocks.applyGoogleChatInboundAccessPolicy,
 }));
@@ -80,6 +88,7 @@ type GoogleChatTestDelivery = {
   ) => Promise<void>;
 };
 type GoogleChatTestTurn = {
+  ctxPayload: MsgContext;
   delivery: GoogleChatTestDelivery;
   dispatcherOptions?: { onReplyStart?: () => Promise<void> };
 };
@@ -115,7 +124,7 @@ function createCore(params: {
     logging: { shouldLogVerbose: () => false },
     channel: {
       inbound: {
-        buildContext: vi.fn((payload: unknown) => payload),
+        buildContext: buildChannelInboundEventContext,
         run: vi.fn(async (turn: { adapter: { resolveTurn: () => GoogleChatTestTurn } }) => {
           const resolved = turn.adapter.resolveTurn();
           await params.run(resolved.delivery, resolved);
@@ -184,6 +193,48 @@ async function processEvent(params: {
 }
 
 describe("Google Chat automatic reply target reconciliation", () => {
+  it("keeps a queued terminal reply in the source Google Chat thread", async () => {
+    const core = createCore({
+      run: async (_delivery, { ctxPayload }) => {
+        await googlechatOutboundAdapter.attachedResults.sendText({
+          cfg: {
+            channels: { googlechat: { serviceAccount: { client_email: "bot@example.com" } } },
+          },
+          to: "spaces/CLASSIFY",
+          text: "Four roles are open",
+          replyToId: ctxPayload.MessageSid,
+          threadId: resolveRoutedDeliveryThreadId({ ctx: ctxPayload }),
+        });
+      },
+    });
+    await processEvent({
+      account: createAccount({ replyToMode: "all", typingIndicator: "none" }),
+      core,
+    });
+    expect(apiMocks.sendGoogleChatMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        space: "spaces/CLASSIFY",
+        text: "Four roles are open",
+        thread: "spaces/CLASSIFY/threads/requested",
+      }),
+    );
+  });
+
+  it.each([undefined, "off", "first", "batched"] as const)(
+    "retains queued reply placement policy for mode %s",
+    async (replyToMode) => {
+      const core = createCore({
+        run: async (_delivery, { ctxPayload }) => {
+          expect(ctxPayload.MessageThreadId).toBeUndefined();
+        },
+      });
+      await processEvent({
+        account: createAccount({ replyToMode, typingIndicator: "none" }),
+        core,
+      });
+    },
+  );
+
   it.each([undefined, "off"] as const)(
     "keeps automatic replies top-level with reply mode %s",
     async (replyToMode) => {
