@@ -80,6 +80,47 @@ function createGoogleChatCfg(): OpenClawConfig {
 }
 
 describe("googlechatPlugin outbound", () => {
+  it.each([
+    {
+      replyToId: "spaces/AAA/messages/source",
+      explicit: false,
+      current: undefined,
+      thread: "spaces/AAA/threads/source",
+    },
+    {
+      replyToId: "spaces/AAA/threads/other",
+      explicit: true,
+      current: undefined,
+      thread: "spaces/AAA/threads/other",
+    },
+    {
+      replyToId: "spaces/AAA/messages/source",
+      explicit: true,
+      current: true,
+      thread: "spaces/AAA/threads/source",
+    },
+    { replyToId: undefined, explicit: false, current: false, thread: null },
+  ])("honors queued reply placement $thread", async ({ replyToId, explicit, current, thread }) => {
+    const cfg = createGoogleChatCfg();
+    const transport = googlechatThreadingAdapter.resolveReplyTransport({
+      cfg,
+      threadId: "spaces/AAA/threads/source",
+      replyToId,
+      replyToIsExplicit: explicit,
+      replyToCurrent: current,
+    });
+    await googlechatOutboundAdapter.attachedResults.sendText({
+      cfg,
+      to: "spaces/AAA",
+      text: "answer",
+      replyToId: transport.replyToId === null ? undefined : replyToId,
+      threadId: transport.threadId,
+    });
+    expect(sendGoogleChatMessageMock).toHaveBeenCalledWith(
+      expect.objectContaining({ space: "spaces/AAA", text: "answer", thread: thread ?? undefined }),
+    );
+  });
+
   it("declares durable text and thread delivery with receipt proofs", async () => {
     sendGoogleChatMessageMock.mockResolvedValue({
       messageName: "spaces/AAA/messages/msg-1",

@@ -96,6 +96,17 @@ it.each([
     messageName: "spaces/AAA/messages/msg-1",
     threadName: "spaces/AAA/threads/thread-1",
   });
+  const pending = googlechatMessageActions.extractToolSend({
+    args: { action: "send", to: "spaces/AAA", replyTo: thread },
+  });
+  if (!pending) {
+    throw new Error("Expected Google Chat send evidence");
+  }
+  expect(pending.threadId).toBe(thread);
+  expect(googlechatMessageActions.extractToolSendResult({ result, send: pending })).toMatchObject({
+    to: "spaces/AAA",
+    threadId: "spaces/AAA/threads/thread-1",
+  });
 });
 
 it("keeps an explicit send in its originating DM thread when the model omits threadId", async () => {

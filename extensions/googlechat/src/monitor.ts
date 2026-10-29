@@ -285,6 +285,7 @@ async function processGoogleChatEvent(
     },
     extra: {
       ChatType: isGroup ? "channel" : "direct",
+      TransportThreadId: account.config.replyToMode === "all" ? replyThreadName : undefined,
       WasMentioned: isGroup ? effectiveWasMentioned : undefined,
       CommandAuthorized: commandAuthorized,
       GroupSubject: undefined,

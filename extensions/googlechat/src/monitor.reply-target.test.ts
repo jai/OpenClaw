@@ -1,8 +1,12 @@
-import type { ChannelInboundTurnPlan } from "openclaw/plugin-sdk/channel-inbound";
+import {
+  buildChannelInboundEventContext,
+  type ChannelInboundTurnPlan,
+} from "openclaw/plugin-sdk/channel-inbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import { GoogleChatApiError } from "./api.js";
+import { googlechatOutboundAdapter } from "./channel.adapters.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
 import "./monitor.js";
 import type { GoogleChatEvent } from "./types.js";
@@ -45,6 +49,9 @@ vi.mock("./api.js", async (importOriginal) => ({
 }));
 // mock-isolation: this routing fixture supplies its admitted access result.
 vi.mock("./monitor-access.js", () => accessMocks);
+vi.mock("./channel.runtime.js", () => ({
+  googleChatChannelRuntime: { sendGoogleChatMessage: apiMocks.sendGoogleChatMessage },
+}));
 
 // mock-isolation: capture the event processor without registering shared webhook state.
 vi.mock("./monitor-routing.js", () => ({
@@ -118,7 +125,7 @@ async function processEvent(params: {
     logging: { shouldLogVerbose: () => false },
     channel: {
       inbound: {
-        buildContext: (payload: unknown) => payload,
+        buildContext: buildChannelInboundEventContext,
         run: async (turn: { adapter: { resolveTurn: () => ChannelInboundTurnPlan } }) => {
           const plan = turn.adapter.resolveTurn();
           await params.onPlan?.(plan);
@@ -159,6 +166,47 @@ const updated = (account: ResolvedGoogleChatAccount, text: string) => ({
 });
 
 describe("Google Chat automatic reply target reconciliation", () => {
+  it.each(["SPACE", "DIRECT_MESSAGE"])(
+    "preserves the %s source thread when a queued final bypasses monitor delivery",
+    async (spaceType) => {
+      const cfg = {
+        channels: { googlechat: { serviceAccount: { client_email: "bot@example.com" } } },
+      };
+      await processEvent({
+        account: createAccount({ replyToMode: "all", typingIndicator: "none" }),
+        event: createEvent({ spaceType }),
+        onPlan: async ({ ctxPayload }) => {
+          const threadId = ctxPayload.TransportThreadId;
+          expect(ctxPayload.MessageThreadId).toBeUndefined();
+          await googlechatOutboundAdapter.attachedResults.sendText({
+            cfg,
+            to: SPACE,
+            text: "Four roles are open",
+            replyToId: ctxPayload.MessageSid,
+            threadId,
+          });
+        },
+        run: async () => {},
+      });
+      expect(apiMocks.sendGoogleChatMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ space: SPACE, text: "Four roles are open", thread: THREAD }),
+      );
+    },
+  );
+
+  it.each(["off", "first", "batched"] as const)(
+    "keeps %s reply policy in control of queued reply placement",
+    async (replyToMode) => {
+      await processEvent({
+        account: createAccount({ replyToMode, typingIndicator: "none" }),
+        onPlan: async ({ ctxPayload }) => {
+          expect(ctxPayload.TransportThreadId).toBeUndefined();
+        },
+        run: async () => {},
+      });
+    },
+  );
+
   it.each([
     { label: "rejected edit", error: new GoogleChatApiError(403, "edit forbidden"), deletes: true },
     { label: "lost response", error: new Error("response lost"), deletes: false },

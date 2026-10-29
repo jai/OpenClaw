@@ -110,6 +110,28 @@ export const googlechatSecurityAdapter = {
 };
 
 export const googlechatThreadingAdapter = {
+  resolveReplyTransport: ({
+    threadId,
+    replyToId,
+    replyToIsExplicit,
+    replyToCurrent,
+  }: {
+    cfg: OpenClawConfig;
+    threadId?: string | number | null;
+    replyToId?: string | null;
+    replyToIsExplicit?: boolean;
+    replyToCurrent?: boolean;
+  }) => {
+    if (replyToCurrent === false && !replyToId) {
+      return { threadId: null, replyToId: null };
+    }
+    return {
+      threadId:
+        replyToIsExplicit && replyToId && /^spaces\/[^/]+\/threads\/[^/]+$/.test(replyToId)
+          ? replyToId
+          : threadId,
+    };
+  },
   scopedAccountReplyToMode: {
     resolveAccount: adaptScopedAccountAccessor(resolveGoogleChatAccount),
     resolveReplyToMode: (account: ResolvedGoogleChatAccount, _chatType?: string | null) =>
