@@ -16,7 +16,6 @@ import {
 } from "openclaw/plugin-sdk/channel-policy";
 import { PAIRING_APPROVED_MESSAGE } from "openclaw/plugin-sdk/channel-status";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import type { ChatChannelThreadingOptions } from "openclaw/plugin-sdk/core";
 import {
   createChannelDirectoryAdapter,
   listResolvedDirectoryGroupEntriesFromMapKeys,
@@ -111,7 +110,18 @@ export const googlechatSecurityAdapter = {
 };
 
 export const googlechatThreadingAdapter = {
-  resolveReplyTransport: ({ threadId, replyToId, replyToIsExplicit, replyToCurrent }) => {
+  resolveReplyTransport: ({
+    threadId,
+    replyToId,
+    replyToIsExplicit,
+    replyToCurrent,
+  }: {
+    cfg: OpenClawConfig;
+    threadId?: string | number | null;
+    replyToId?: string | null;
+    replyToIsExplicit?: boolean;
+    replyToCurrent?: boolean;
+  }) => {
     if (replyToCurrent === false && !replyToId) {
       return { threadId: null, replyToId: null };
     }
@@ -151,7 +161,7 @@ export const googlechatThreadingAdapter = {
       hasRepliedRef,
     };
   },
-} satisfies ChatChannelThreadingOptions<ResolvedGoogleChatAccount>;
+};
 
 export const googlechatPairingTextAdapter = {
   idLabel: "googlechatUserId",
