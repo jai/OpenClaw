@@ -93,6 +93,7 @@ describe("normalizeGoogleChatReplyTarget", () => {
           payload,
           sourceMessageName: SOURCE_MESSAGE,
           replyThreadName: REPLY_THREAD,
+          replyToMode: "all",
         }),
       ).toBe(payload);
     });

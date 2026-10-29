@@ -308,13 +308,13 @@ describe("Google Chat automatic reply target reconciliation", () => {
     },
   );
 
-  it.each([undefined, "off"] as const)(
-    "keeps automatic replies top-level without typing with reply mode %s",
+  it.each([undefined, "off", "first", "batched"] as const)(
+    "keeps untargeted replies top-level without typing with reply mode %s",
     async (replyToMode) => {
       const account = createAccount({ replyToMode, typingIndicator: "none" });
       const core = createCore({
         run: async (delivery) => {
-          const payload = { text: "top-level reply", replyToId: "spaces/CLASSIFY/messages/1" };
+          const payload = { text: "top-level reply" };
           expect(delivery.durable(payload, { kind: "final" })).toEqual({
             to: "spaces/CLASSIFY",
             replyToId: null,
