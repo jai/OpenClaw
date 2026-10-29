@@ -272,6 +272,7 @@ async function processGoogleChatEvent(
       originatingTo: `googlechat:${spaceId}`,
       replyToId: replyThreadName,
       replyToIdFull: replyThreadName,
+      messageThreadId: account.config.replyToMode === "all" ? replyThreadName : undefined,
     },
     message: {
       body,
