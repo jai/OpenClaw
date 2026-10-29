@@ -1,6 +1,6 @@
 # Fork patch reference
 
-Base: [OpenClaw upstream main at `de6ac4ff02b`](https://github.com/openclaw/openclaw/commit/de6ac4ff02b1839c7af1816ddce12f7490ded83d), fetched 2026-10-27. Apply the four branches in the order shown in the [README](README.md). Each branch includes all earlier patches. Its linked commit shows only that patch's diff.
+Base: [OpenClaw upstream main at `de6ac4ff02b`](https://github.com/openclaw/openclaw/commit/de6ac4ff02b1839c7af1816ddce12f7490ded83d), fetched 2026-10-27. Apply the five branches in the order shown in the [README](README.md). Each branch includes all earlier patches. Its linked commit shows only that patch's diff.
 
 ## A. Google Chat activity status
 
@@ -18,9 +18,13 @@ Base: [OpenClaw upstream main at `de6ac4ff02b`](https://github.com/openclaw/open
 
 [`patch/d-rejected-edit-cleanup`](https://github.com/jai/OpenClaw/tree/patch/d-rejected-edit-cleanup) removes a typing placeholder after Google Chat definitively rejects editing it (HTTP 400, 401, or 403). If the response is lost or times out, it leaves the placeholder because the edit might have succeeded. A missing placeholder (404) uses the existing send fallback. [Review D](https://github.com/jai/OpenClaw/commit/4327ae50966).
 
+## E. Queued final reply thread
+
+[`patch/e-googlechat-terminal-thread`](https://github.com/jai/OpenClaw/tree/patch/e-googlechat-terminal-thread) records the inbound thread as transport metadata when `replyToMode` is `all`. A follow-up queued while another turn is running uses the generic outbound route for its final reply. That route needs the transport thread because it bypasses the monitor's conversion of source message references to thread references. [Review E](https://github.com/jai/OpenClaw/commit/06721d66432).
+
 ## Refresh and rollout
 
-1. Fetch upstream main, record its exact commit, and port A through D in order. Review each commit diff against the new base. Upstream contains the old Google Chat formatting backport, so do not replay it.
+1. Fetch upstream main, record its exact commit, and port A through E in order. Review each commit diff against the new base. Upstream contains the old Google Chat formatting backport, so do not replay it.
 2. Install the lockfile dependencies and run the Google Chat tests, TypeScript checks, and build. Before switching a gateway, run the candidate Codex extension's pinned binary with `--version`.
 3. Test on SysOps first. Keep its existing runtime checkout for rollback and preserve its session store. After the switch, require an isolated `gateway call agent --expect-final` turn with external delivery disabled, then verify a natural Google Chat reply and typing lifecycle. Gateway connectivity alone does not establish model readiness.
 
