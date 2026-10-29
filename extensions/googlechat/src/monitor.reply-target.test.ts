@@ -4,7 +4,6 @@ import {
 } from "openclaw/plugin-sdk/channel-inbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveRoutedDeliveryThreadId } from "../../../src/auto-reply/reply/routed-delivery-thread.js";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import { GoogleChatApiError } from "./api.js";
 import { googlechatOutboundAdapter } from "./channel.adapters.js";
@@ -177,7 +176,8 @@ describe("Google Chat automatic reply target reconciliation", () => {
         account: createAccount({ replyToMode: "all", typingIndicator: "none" }),
         event: createEvent({ spaceType }),
         onPlan: async ({ ctxPayload }) => {
-          const threadId = resolveRoutedDeliveryThreadId({ ctx: ctxPayload });
+          const threadId = ctxPayload.TransportThreadId;
+          expect(ctxPayload.MessageThreadId).toBeUndefined();
           await googlechatOutboundAdapter.attachedResults.sendText({
             cfg,
             to: SPACE,
@@ -200,7 +200,7 @@ describe("Google Chat automatic reply target reconciliation", () => {
       await processEvent({
         account: createAccount({ replyToMode, typingIndicator: "none" }),
         onPlan: async ({ ctxPayload }) => {
-          expect(ctxPayload.MessageThreadId).toBeUndefined();
+          expect(ctxPayload.TransportThreadId).toBeUndefined();
         },
         run: async () => {},
       });

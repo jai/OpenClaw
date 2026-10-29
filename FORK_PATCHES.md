@@ -20,7 +20,7 @@ Base: [OpenClaw upstream main at `de6ac4ff02b`](https://github.com/openclaw/open
 
 ## E. Queued final reply thread
 
-[`patch/e-googlechat-terminal-thread`](https://github.com/jai/OpenClaw/tree/patch/e-googlechat-terminal-thread) records the inbound thread as transport metadata when `replyToMode` is `all`. A follow-up queued while another turn is running uses the generic outbound route for its final reply. That route needs the transport thread because it bypasses the monitor's conversion of source message references to thread references. [Review E](https://github.com/jai/OpenClaw/commit/06721d66432).
+[`patch/e-googlechat-terminal-thread`](https://github.com/jai/OpenClaw/tree/patch/e-googlechat-terminal-thread) records the inbound thread as delivery-only transport metadata when `replyToMode` is `all`. A follow-up queued while another turn is running uses the generic outbound route for its final reply. That route needs the transport thread because it bypasses the monitor's conversion of source message references to thread references. Explicit thread targets and top-level sends override the inherited thread. Session keys and reset policies stay unchanged. [Review E](https://github.com/jai/OpenClaw/commit/1357b586bc9).
 
 ## Refresh and rollout
 
