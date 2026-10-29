@@ -278,7 +278,6 @@ async function processGoogleChatEvent(
       originatingTo: `googlechat:${spaceId}`,
       replyToId: replyThreadName,
       replyToIdFull: replyThreadName,
-      messageThreadId: account.config.replyToMode === "all" ? replyThreadName : undefined,
     },
     message: {
       body,
@@ -292,6 +291,7 @@ async function processGoogleChatEvent(
     },
     extra: {
       ChatType: isGroup ? "channel" : "direct",
+      TransportThreadId: account.config.replyToMode === "all" ? replyThreadName : undefined,
       WasMentioned: isGroup ? effectiveWasMentioned : undefined,
       CommandAuthorized: commandAuthorized,
       GroupSubject: undefined,

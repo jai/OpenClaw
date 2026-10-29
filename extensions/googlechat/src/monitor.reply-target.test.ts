@@ -1,8 +1,7 @@
 import { buildChannelInboundEventContext } from "openclaw/plugin-sdk/channel-inbound";
+import type { MsgContext } from "openclaw/plugin-sdk/reply-runtime";
 // Googlechat tests cover automatic reply target reconciliation at the monitor boundary.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveRoutedDeliveryThreadId } from "../../../src/auto-reply/reply/routed-delivery-thread.js";
-import type { MsgContext } from "../../../src/auto-reply/templating.js";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import { googlechatOutboundAdapter } from "./channel.adapters.js";
 import type { GoogleChatIngressLifecycle } from "./monitor-ingress.js";
@@ -196,6 +195,7 @@ describe("Google Chat automatic reply target reconciliation", () => {
   it("keeps a queued terminal reply in the source Google Chat thread", async () => {
     const core = createCore({
       run: async (_delivery, { ctxPayload }) => {
+        expect(ctxPayload.MessageThreadId).toBeUndefined();
         await googlechatOutboundAdapter.attachedResults.sendText({
           cfg: {
             channels: { googlechat: { serviceAccount: { client_email: "bot@example.com" } } },
@@ -203,7 +203,7 @@ describe("Google Chat automatic reply target reconciliation", () => {
           to: "spaces/CLASSIFY",
           text: "Four roles are open",
           replyToId: ctxPayload.MessageSid,
-          threadId: resolveRoutedDeliveryThreadId({ ctx: ctxPayload }),
+          threadId: ctxPayload.TransportThreadId,
         });
       },
     });
@@ -225,7 +225,7 @@ describe("Google Chat automatic reply target reconciliation", () => {
     async (replyToMode) => {
       const core = createCore({
         run: async (_delivery, { ctxPayload }) => {
-          expect(ctxPayload.MessageThreadId).toBeUndefined();
+          expect(ctxPayload.TransportThreadId).toBeUndefined();
         },
       });
       await processEvent({
