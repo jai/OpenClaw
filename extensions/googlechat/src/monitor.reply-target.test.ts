@@ -3,6 +3,7 @@ import type { MsgContext } from "openclaw/plugin-sdk/reply-runtime";
 // Googlechat tests cover automatic reply target reconciliation at the monitor boundary.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
+import { GoogleChatApiError } from "./api.js";
 import { googlechatOutboundAdapter } from "./channel.adapters.js";
 import type { GoogleChatIngressLifecycle } from "./monitor-ingress.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
@@ -39,7 +40,8 @@ vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => ({
   resolveChannelInboundRouteEnvelope: inboundMocks.resolveChannelInboundRouteEnvelope,
 }));
 
-vi.mock("./api.js", () => ({
+vi.mock("./api.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api.js")>()),
   deleteGoogleChatMessage: apiMocks.deleteGoogleChatMessage,
   downloadGoogleChatMedia: apiMocks.downloadGoogleChatMedia,
   sendGoogleChatMessage: apiMocks.sendGoogleChatMessage,
@@ -72,6 +74,7 @@ vi.mock("./monitor-routing.js", () => ({
 type GoogleChatTestReplyPayload = {
   text: string;
   replyToId?: string;
+  replyToCurrent?: boolean;
   isStatusNotice?: boolean;
   isCommentary?: boolean;
   isCompactionNotice?: boolean;
@@ -192,6 +195,45 @@ async function processEvent(params: {
 }
 
 describe("Google Chat automatic reply target reconciliation", () => {
+  it.each(["none", "message"] as const)(
+    "keeps a stop acknowledgement in its source thread with typing %s",
+    async (typingIndicator) => {
+      const account = createAccount({ replyToMode: "all", typingIndicator });
+      const payload = { text: "⚙️ Agent was aborted." };
+      const core = createCore({
+        run: async (delivery) => {
+          if (typingIndicator === "none") {
+            expect(delivery.durable(payload, { kind: "final" })).toEqual({
+              to: "spaces/CLASSIFY",
+              replyToId: "spaces/CLASSIFY/threads/requested",
+              threadId: "spaces/CLASSIFY/threads/requested",
+            });
+          }
+          await delivery.deliver(payload, { kind: "final" });
+        },
+      });
+      if (typingIndicator === "message") {
+        apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+          messageName: "spaces/CLASSIFY/messages/typing",
+          threadName: "spaces/CLASSIFY/threads/requested",
+        });
+        apiMocks.updateGoogleChatMessage.mockRejectedValueOnce(
+          new GoogleChatApiError(404, "Placeholder removed"),
+        );
+      }
+
+      await processEvent({ account, core });
+
+      expect(apiMocks.sendGoogleChatMessage).toHaveBeenLastCalledWith({
+        account,
+        space: "spaces/CLASSIFY",
+        text: "⚙️ Agent was aborted.",
+        thread: "spaces/CLASSIFY/threads/requested",
+      });
+      expect(apiMocks.deleteGoogleChatMessage).not.toHaveBeenCalled();
+    },
+  );
+
   it("keeps a queued terminal reply in the source Google Chat thread", async () => {
     const core = createCore({
       run: async (_delivery, { ctxPayload }) => {

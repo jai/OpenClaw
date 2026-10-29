@@ -86,8 +86,8 @@ describe("normalizeGoogleChatReplyTarget", () => {
       ).toBe(payload);
     });
 
-    it("keeps a payload that carries no reply target", () => {
-      const payload = { text: "hello" };
+    it("keeps an explicit top-level reply", () => {
+      const payload = { text: "hello", replyToCurrent: false };
       expect(
         normalizeGoogleChatReplyTarget({
           payload,
