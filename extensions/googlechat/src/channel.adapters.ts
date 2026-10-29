@@ -1,5 +1,6 @@
 import { adaptScopedAccountAccessor } from "openclaw/plugin-sdk/channel-config-helpers";
 import type {
+  ChannelThreadingAdapter,
   ChannelThreadingContext,
   ChannelThreadingToolContext,
 } from "openclaw/plugin-sdk/channel-contract";
@@ -108,6 +109,22 @@ export const googlechatSecurityAdapter = {
 };
 
 export const googlechatThreadingAdapter = {
+  resolveReplyTransport: ({
+    threadId,
+    replyToId,
+    replyToIsExplicit,
+    replyToCurrent,
+  }: Parameters<NonNullable<ChannelThreadingAdapter["resolveReplyTransport"]>>[0]) => {
+    if (replyToCurrent === false && !replyToId) {
+      return { threadId: null, replyToId: null };
+    }
+    return {
+      threadId:
+        replyToIsExplicit && replyToId && /^spaces\/[^/]+\/threads\/[^/]+$/.test(replyToId)
+          ? replyToId
+          : threadId,
+    };
+  },
   scopedAccountReplyToMode: {
     resolveAccount: adaptScopedAccountAccessor(resolveGoogleChatAccount),
     resolveReplyToMode: (account: ResolvedGoogleChatAccount, _chatType?: string | null) =>
