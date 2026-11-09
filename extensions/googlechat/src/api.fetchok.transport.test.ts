@@ -231,10 +231,84 @@ describe("Google Chat real guarded transport", () => {
             { method: "POST", path: "/v1/spaces/AAA/messages" },
           ]);
           const messages: Array<{ text: string }> = requests.map(({ body }) => JSON.parse(body));
-          expect(messages).toEqual([{ text: `*${paragraph}*` }, { text: "\n\n[x] done" }]);
+          expect(messages).toEqual([
+            { text: `*${paragraph}*`, markupSyntax: "MARKUP_SYNTAX_CHAT" },
+            { text: "\n\n[x] done", markupSyntax: "MARKUP_SYNTAX_CHAT" },
+          ]);
           expect(messages.every(({ text }) => Buffer.byteLength(text, "utf8") <= 32_000)).toBe(
             true,
           );
+        } finally {
+          await closeServer(server);
+        }
+      },
+    );
+  });
+
+  it("sends threaded final answers as Chat markup so line breaks and links render", async () => {
+    const { withOpenClawTestState } = await import("openclaw/plugin-sdk/test-state");
+    await withOpenClawTestState(
+      { label: "googlechat-final-markup", layout: "state-only" },
+      async () => {
+        const [
+          { sendDurableMessageBatch },
+          { createTestRegistry, withPluginRuntimeRegistryScope },
+          { googlechatPlugin },
+        ] = await Promise.all([
+          import("openclaw/plugin-sdk/channel-outbound"),
+          import("openclaw/plugin-sdk/channel-test-helpers"),
+          import("../api.js"),
+        ]);
+        const bodies: string[] = [];
+        const server = createServer((request, response) => {
+          let body = "";
+          request.setEncoding("utf8");
+          request.on("data", (chunk: string) => {
+            body += chunk;
+          });
+          request.on("end", () => {
+            bodies.push(body);
+            response.writeHead(200, { "Content-Type": "application/json" });
+            response.end(JSON.stringify({ name: "spaces/AAA/messages/final" }));
+          });
+        });
+
+        try {
+          loopback.baseUrl = await listen(server);
+          await withPluginRuntimeRegistryScope(
+            createTestRegistry([
+              { pluginId: "googlechat", plugin: googlechatPlugin, source: "test" },
+            ]),
+            () =>
+              sendDurableMessageBatch({
+                cfg: {
+                  channels: {
+                    googlechat: {
+                      serviceAccount: {
+                        client_email: "transport@example.test",
+                        private_key: "not-a-real-key",
+                      },
+                    },
+                  },
+                },
+                channel: "googlechat",
+                accountId: "default",
+                to: "spaces/AAA",
+                threadId: "spaces/AAA/threads/root",
+                payloads: [
+                  {
+                    text: "[Google](https://google.com)\n[GitHub](https://github.com)\n[Linear](https://linear.app)",
+                  },
+                ],
+              }),
+          );
+          expect(bodies.map((body) => JSON.parse(body))).toEqual([
+            {
+              text: "<https://google.com|Google>\n<https://github.com|GitHub>\n<https://linear.app|Linear>",
+              thread: { name: "spaces/AAA/threads/root" },
+              markupSyntax: "MARKUP_SYNTAX_CHAT",
+            },
+          ]);
         } finally {
           await closeServer(server);
         }

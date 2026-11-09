@@ -8,6 +8,7 @@ The base already includes Markdown conversion for normal replies and explicit me
 2. **DM and queued reply placement.** The current inbound thread travels with delivery independently of session identity. Automatic replies, explicit sends, and queued answers can retain their source thread. Explicit destinations and reply modes remain authoritative.
 3. **Deferred lifecycle.** A queued turn retains its activity message until its own delivery or settlement. Confirmed queued source delivery uses the existing observed-delivery callback. A send to another channel does not settle the source activity.
 4. **Optional room sessions.** `channels.googlechat.sessionThread: true` isolates room threads using the existing thread-session suffix. The default remains disabled. DMs keep their existing session identity. Restoring this existing fork option adds two generated config entries, at channel root and account scope, so the channel config budget increases from 4031 to 4033.
+5. **Chat markup syntax.** Message creates and edits send `markupSyntax: MARKUP_SYNTAX_CHAT` with their text. Chat apps created after 2026-10-16 default to Markdown, which shows `<url|label>` links literally and joins single line breaks.
 
 Final delivery no longer edits the activity message into an answer. Append-only final delivery supersedes the earlier final-edit cleanup patch. Activity failures are logged and do not block final delivery. Final sends retain the existing durable delivery and partial-receipt handling.
 
