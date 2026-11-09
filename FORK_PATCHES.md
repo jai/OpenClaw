@@ -21,7 +21,7 @@ This inventory covers the Google Chat overlay deployed to VOC. Fork `main` has i
 
 - Layers 1–10 at `6b6f5a7445`: FINN shared gateway on VOC, runtime `/home/finn-shared/runtimes/openclaw-2026.10.4-chat-6b6f5a7445`, pinned in [EWA-Services/openclaw-infrastructure](https://github.com/EWA-Services/openclaw-infrastructure/blob/main/infra/ansible/files/finn-shared-thread-patch.conf). The previous runtime, `openclaw-2026.10.4-chat-5b5c6ff859`, is kept for rollback.
 
-Layers 9 and 10 list their deployed PR commits. The squash merges keep the same code, so the branch differs from `6b6f5a7445` only in this file.
+Layers 9 and 10 list their deployed PR commits. The squash merges keep the same code: when they land, the branch differs from `6b6f5a7445` only in this file.
 
 ## Notes
 
