@@ -523,7 +523,11 @@ describe("updateGoogleChatMessage", () => {
     if (typeof init?.body !== "string") {
       throw new Error("Expected Google Chat request body");
     }
-    expect(JSON.parse(init.body)).toEqual({ text: "Resolved", cardsV2 });
+    expect(JSON.parse(init.body)).toEqual({
+      text: "Resolved",
+      cardsV2,
+      markupSyntax: "MARKUP_SYNTAX_CHAT",
+    });
   });
 });
 

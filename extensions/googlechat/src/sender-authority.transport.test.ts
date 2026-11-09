@@ -338,7 +338,7 @@ describe("Google Chat sender authority through real guarded HTTP", () => {
           method: "POST",
           path: "/v1/spaces/BBB/messages",
           authorization: "Bearer test-account-b",
-          body: JSON.stringify({ text: "hello" }),
+          body: JSON.stringify({ text: "hello", markupSyntax: "MARKUP_SYNTAX_CHAT" }),
         },
       ]);
       expect(dispatchA).not.toHaveBeenCalled();
