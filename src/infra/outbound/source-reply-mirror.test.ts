@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createMessageReceiptFromOutboundResults } from "../../channels/message/receipt.js";
 import {
   beginTerminalSourceReplyDelivery,
   isDeliveredCurrentSourceReply,
@@ -264,6 +265,43 @@ describe("source reply receipts", () => {
           currentThreadTs: "spaces/AAA/threads/canonical",
         },
         deliveredPayload: { receipt: { threadId } },
+      }),
+    })),
+    ...[true, false].map((withReceipt) => ({
+      // Google Chat message-tool sends inherit the source thread through replyTo.
+      name: `Google Chat inherited-thread send (receipt=${withReceipt})`,
+      expected: withReceipt,
+      params: source("googlechat", "spaces/AAA", {
+        sessionKey: "agent:main:googlechat:channel:spaces/AAA",
+        actionParams: { target: "spaces/AAA", message: "answer" },
+        toolContext: {
+          currentChannelProvider: "googlechat",
+          currentChannelId: "spaces/AAA",
+          currentMessageId: "spaces/AAA/threads/source",
+          currentThreadTs: "spaces/AAA/threads/source",
+        },
+        deliveredPayload: {
+          ok: true,
+          to: "spaces/AAA",
+          messageName: "spaces/AAA/messages/source.msg-1",
+          threadName: "spaces/AAA/threads/source",
+          ...(withReceipt
+            ? {
+                receipt: createMessageReceiptFromOutboundResults({
+                  results: [
+                    {
+                      channel: "googlechat",
+                      messageId: "spaces/AAA/messages/source.msg-1",
+                      chatId: "spaces/AAA",
+                      conversationId: "spaces/AAA",
+                    },
+                  ],
+                  threadId: "spaces/AAA/threads/source",
+                  kind: "text",
+                }),
+              }
+            : {}),
+        },
       }),
     })),
     {

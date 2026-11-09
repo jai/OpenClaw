@@ -4,6 +4,7 @@ import {
   readStringParam,
 } from "openclaw/plugin-sdk/channel-actions";
 import type { ChannelMessageActionContext } from "openclaw/plugin-sdk/channel-contract";
+import { createMessageReceiptFromOutboundResults } from "openclaw/plugin-sdk/channel-outbound";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveGoogleChatAccount } from "./accounts.js";
 import { sendGoogleChatMessage } from "./api.js";
@@ -70,6 +71,7 @@ export async function handleGoogleChatAction({
     const chunks = formatGoogleChatTextChunks(content);
     let thread = threadId ?? undefined;
     let sent: Awaited<ReturnType<typeof sendGoogleChatMessage>> = null;
+    const messageNames: string[] = [];
     for (const text of chunks.length > 0 ? chunks : [""]) {
       sent = await sendGoogleChatMessage({
         account,
@@ -80,8 +82,22 @@ export async function handleGoogleChatAction({
         onPlatformSendDispatch,
       });
       thread = sent?.threadName ?? thread;
+      if (sent?.messageName) {
+        messageNames.push(sent.messageName);
+      }
     }
-    return jsonResult({ ok: true, to: space, ...sent });
+    // The delivered thread proves a source reply when the send inherited it.
+    const receipt = createMessageReceiptFromOutboundResults({
+      results: messageNames.map((messageId) => ({
+        channel: "googlechat",
+        messageId,
+        chatId: space,
+        conversationId: space,
+      })),
+      threadId: thread,
+      kind: "text",
+    });
+    return jsonResult({ ok: true, to: space, ...sent, receipt });
   }
 
   throw new Error(`Action ${action} is not supported for provider googlechat.`);
