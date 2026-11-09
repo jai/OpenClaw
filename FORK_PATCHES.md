@@ -13,6 +13,7 @@ This branch carries Google Chat patches on upstream OpenClaw 2026.10.3 at `614f5
 | 5     | `9f1d6c7265`                                                  | Do not delete a placeholder after an ambiguous edit timeout. Previously deployed tip.                                                                                                                    |
 | 6     | [#16](https://github.com/jai/OpenClaw/pull/16) (`1c0088cc29`) | Append final answers after activity, keep DM and queued replies in their source thread, and restore optional room sessions. Details follow the table.                                                    |
 | 7     | [#20](https://github.com/jai/OpenClaw/pull/20) (`be351a45bc`) | Send `markupSyntax: MARKUP_SYNTAX_CHAT` with message creates and edits. Chat apps created after 2026-10-16 default to Markdown, which shows `<url\|label>` links literally and joins single line breaks. |
+| 8     | [#22](https://github.com/jai/OpenClaw/pull/22)                | Return a delivery receipt with the thread from message-tool sends. Without it, an answer sent with `final: true` was not recognized as the source reply, so settled-turn finalization posted it again.   |
 
 Layers 6 and 7 list their deployed PR commits. The squash merges keep the same code: when they land, the branch differs from `be351a45bc` only in this file.
 
