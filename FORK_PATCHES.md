@@ -16,6 +16,7 @@ This inventory covers the Google Chat overlay deployed to VOC. Fork `main` has i
 | 8     | `0f1f2fbe6c`                                                  | Keep rate-limit edit failures eligible for placeholder cleanup, exclude suppressed sends from delivery receipts, and limit synthetic session-suffix parsing to Google Chat groups.                      | Google Chat status, message actions, and session routing.                |
 | 9     | [#17](https://github.com/jai/OpenClaw/pull/17) (`5b5c6ff859`) | Append final answers after one mutable activity message, clean activity after confirmed source delivery, and preserve DM and queued reply threads independently of session identity.                    | Existing Chat accounts; room session settings stay authoritative.        |
 | 10    | [#19](https://github.com/jai/OpenClaw/pull/19) (`6b6f5a7445`) | Send `markupSyntax: MARKUP_SYNTAX_CHAT` with message text, because Chat apps created after 2026-10-16 default to Markdown and would show `<url\|label>` links and lose single line breaks.              | All Google Chat text creates and edits.                                  |
+| 11    | [#23](https://github.com/jai/OpenClaw/pull/23)                | Return a delivery receipt with the thread from message-tool sends, so an answer sent with `final: true` counts as the source reply and settled-turn finalization does not post it again.                | Google Chat message-tool sends.                                          |
 
 ## Deployed targets
 

@@ -1,4 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
+import { createMessageReceiptFromOutboundResults } from "../../channels/message/receipt.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
 import {
   beginTerminalSourceReplyDelivery,
@@ -228,6 +229,43 @@ it.each([
   });
   expect(isDeliveredCurrentSourceReply(params)).toBe(expected);
 });
+
+// Google Chat message-tool sends inherit the source thread through replyTo.
+it.each([true, false])(
+  "classifies a Google Chat inherited-thread send (receipt=%s)",
+  (withReceipt) => {
+    const params = source("googlechat", "spaces/AAA", {
+      sessionKey: "agent:main:googlechat:channel:spaces/AAA",
+      toolContext: {
+        currentMessageId: "spaces/AAA/threads/source",
+        currentThreadTs: "spaces/AAA/threads/source",
+      },
+      deliveredPayload: {
+        ok: true,
+        to: "spaces/AAA",
+        messageName: "spaces/AAA/messages/source.msg-1",
+        threadName: "spaces/AAA/threads/source",
+        ...(withReceipt
+          ? {
+              receipt: createMessageReceiptFromOutboundResults({
+                results: [
+                  {
+                    channel: "googlechat",
+                    messageId: "spaces/AAA/messages/source.msg-1",
+                    chatId: "spaces/AAA",
+                    conversationId: "spaces/AAA",
+                  },
+                ],
+                threadId: "spaces/AAA/threads/source",
+                kind: "text",
+              }),
+            }
+          : {}),
+      },
+    });
+    expect(isDeliveredCurrentSourceReply(params)).toBe(withReceipt);
+  },
+);
 
 // Completion eligibility does not grant transcript or restart-receipt ownership.
 it.each(["thread-reply", "upload-file", "sendAttachment", "sendWithEffect"])(
