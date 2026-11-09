@@ -657,7 +657,9 @@ describe("googlechat transport and session thread boundaries", () => {
       };
       const second = buildContext.mock.calls[1]?.[0] as typeof first;
       expect(first.route.routeSessionKey === second.route.routeSessionKey).toBe(!split);
-      if (!split) expect(first.route.routeSessionKey).toBe("session-1");
+      if (!split) {
+        expect(first.route.routeSessionKey).toBe("session-1");
+      }
       expect(first.reply.messageThreadId).toBe(split ? "spaces/THREADS/threads/first" : undefined);
       expect(first.extra.TransportThreadId).toBe(
         transport ? "spaces/THREADS/threads/first" : undefined,
