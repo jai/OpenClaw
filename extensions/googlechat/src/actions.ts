@@ -72,6 +72,7 @@ export async function handleGoogleChatAction({
     let thread = threadId ?? undefined;
     let sent: Awaited<ReturnType<typeof sendGoogleChatMessage>> = null;
     const messageNames: string[] = [];
+    let deliveredThread: string | undefined;
     for (const text of chunks.length > 0 ? chunks : [""]) {
       sent = await sendGoogleChatMessage({
         account,
@@ -85,8 +86,12 @@ export async function handleGoogleChatAction({
       if (sent?.messageName) {
         messageNames.push(sent.messageName);
       }
+      deliveredThread = sent?.threadName ?? deliveredThread;
     }
-    // The delivered thread proves a source reply when the send inherited it.
+    if (messageNames.length === 0) {
+      return jsonResult({ ok: true, to: space, ...sent });
+    }
+    // Only Chat's confirmed thread proves a source reply when the send inherited it.
     const receipt = createMessageReceiptFromOutboundResults({
       results: messageNames.map((messageId) => ({
         channel: "googlechat",
@@ -94,7 +99,7 @@ export async function handleGoogleChatAction({
         chatId: space,
         conversationId: space,
       })),
-      threadId: thread,
+      threadId: deliveredThread,
       kind: "text",
     });
     return jsonResult({ ok: true, to: space, ...sent, receipt });

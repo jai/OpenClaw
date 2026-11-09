@@ -170,6 +170,24 @@ describe("googlechat message actions", () => {
     });
   });
 
+  it("reports no receipt when Google Chat suppresses the send", async () => {
+    resolveGoogleChatAccount.mockReturnValue(buildAccount());
+    resolveGoogleChatOutboundSpace.mockResolvedValue("spaces/AAA");
+    sendGoogleChatMessage.mockResolvedValue(null);
+
+    const result = await googlechatMessageActions.handleAction({
+      action: "send",
+      params: { to: "spaces/AAA", message: "answer", replyTo: "spaces/AAA/threads/source" },
+      cfg: {},
+      accountId: "default",
+    } as never);
+
+    expect((result as { details: Record<string, unknown> }).details).toEqual({
+      ok: true,
+      to: "spaces/AAA",
+    });
+  });
+
   it("renders message-tool Markdown for Google Chat before sending", async () => {
     const account = buildAccount();
     resolveGoogleChatAccount.mockReturnValue(account);
