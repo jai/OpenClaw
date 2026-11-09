@@ -247,7 +247,8 @@ async function processGoogleChatEvent(
     body: rawBody,
   });
 
-  const replyThreadName = isGroup ? message.thread?.name : undefined;
+  const replyThreadName =
+    isGroup || message.threadReply === true ? message.thread?.name : undefined;
   const ctxPayload = core.channel.inbound.buildContext({
     channelIngress: access.channelIngress,
     channel: "googlechat",

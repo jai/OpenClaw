@@ -57,6 +57,7 @@ export type GoogleChatMessage = {
   argumentText?: string;
   sender?: GoogleChatUser;
   thread?: GoogleChatThread;
+  threadReply?: boolean;
   cardsV2?: GoogleChatCardV2[];
   attachment?: GoogleChatAttachment[];
   annotations?: GoogleChatAnnotation[];
