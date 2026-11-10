@@ -15,6 +15,12 @@ export type GoogleChatUser = {
   type?: string;
 };
 
+export type GoogleChatMembership = {
+  name?: string;
+  state?: string;
+  member?: GoogleChatUser;
+};
+
 type GoogleChatThread = {
   name?: string;
   threadKey?: string;

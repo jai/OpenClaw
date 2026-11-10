@@ -152,7 +152,11 @@ function createEvent(params?: {
     params?.threadName === undefined ? "spaces/CLASSIFY/threads/requested" : params.threadName;
   return {
     type: "MESSAGE",
-    space: { name: "spaces/CLASSIFY", spaceType: params?.spaceType ?? "SPACE" },
+    space: {
+      name: "spaces/CLASSIFY",
+      spaceType: params?.spaceType ?? "SPACE",
+      ...(params?.spaceType === "DIRECT_MESSAGE" ? { singleUserBotDm: true } : {}),
+    },
     message: {
       name: params?.messageName ?? "spaces/CLASSIFY/messages/1",
       text: "hello",

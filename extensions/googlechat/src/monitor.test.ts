@@ -17,11 +17,13 @@ import {
 } from "./monitor-ingress.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
 import "./monitor.js";
+import { clearGoogleChatSpaceMembersCacheForTest } from "./space-members.js";
 import type { GoogleChatEvent } from "./types.js";
 
 const apiMocks = vi.hoisted(() => ({
   deleteGoogleChatMessage: vi.fn(),
   downloadGoogleChatMedia: vi.fn(),
+  listGoogleChatSpaceMembers: vi.fn(),
   sendGoogleChatMessage: vi.fn(),
   updateGoogleChatMessage: vi.fn(),
 }));
@@ -61,6 +63,7 @@ vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => {
 vi.mock("./api.js", () => ({
   deleteGoogleChatMessage: apiMocks.deleteGoogleChatMessage,
   downloadGoogleChatMedia: apiMocks.downloadGoogleChatMedia,
+  listGoogleChatSpaceMembers: apiMocks.listGoogleChatSpaceMembers,
   sendGoogleChatMessage: apiMocks.sendGoogleChatMessage,
   updateGoogleChatMessage: apiMocks.updateGoogleChatMessage,
 }));
@@ -87,6 +90,8 @@ vi.mock("./monitor-routing.js", () => ({
 beforeEach(() => {
   apiMocks.deleteGoogleChatMessage.mockReset();
   apiMocks.downloadGoogleChatMedia.mockReset();
+  apiMocks.listGoogleChatSpaceMembers.mockReset().mockResolvedValue([]);
+  clearGoogleChatSpaceMembersCacheForTest();
   apiMocks.sendGoogleChatMessage.mockReset().mockResolvedValue(null);
   apiMocks.updateGoogleChatMessage.mockReset().mockResolvedValue({});
   accessMocks.applyGoogleChatInboundAccessPolicy.mockReset();
@@ -251,7 +256,28 @@ describe("googlechat monitor bot loop protection", () => {
 describe("googlechat monitor inbound space classification", () => {
   const cases = [
     { name: "legacy DM", space: { type: "DM" }, peerKind: "direct" },
-    { name: "modern direct message", space: { spaceType: "DIRECT_MESSAGE" }, peerKind: "direct" },
+    {
+      name: "1:1 app DM",
+      space: { spaceType: "DIRECT_MESSAGE", type: "DM", singleUserBotDm: true },
+      peerKind: "direct",
+    },
+    {
+      name: "human DM with the app added",
+      space: { spaceType: "DIRECT_MESSAGE", type: "ROOM" },
+      peerKind: "group",
+    },
+    {
+      name: "unmarked DM with two human members",
+      space: { spaceType: "DIRECT_MESSAGE" },
+      members: ["users/alice", "users/bob"],
+      peerKind: "group",
+    },
+    {
+      name: "unmarked DM with one human member",
+      space: { spaceType: "DIRECT_MESSAGE" },
+      members: ["users/alice"],
+      peerKind: "direct",
+    },
     { name: "modern group chat", space: { spaceType: "GROUP_CHAT" }, peerKind: "group" },
     {
       name: "modern space over legacy DM",
@@ -260,7 +286,13 @@ describe("googlechat monitor inbound space classification", () => {
     },
   ] as const;
 
-  it.each(cases)("$name uses the expected access and route branch", async ({ space, peerKind }) => {
+  it.each(cases)("$name uses the expected access and route branch", async (testCase) => {
+    const { space, peerKind } = testCase;
+    if ("members" in testCase) {
+      apiMocks.listGoogleChatSpaceMembers.mockResolvedValue(
+        testCase.members.map((name) => ({ member: { name, type: "HUMAN" }, state: "JOINED" })),
+      );
+    }
     const { buildContext, core, runTurn } = createInboundClassificationHarness();
     const account = {
       accountId: "work",
@@ -303,6 +335,80 @@ describe("googlechat monitor inbound space classification", () => {
     );
     expect(inboundMocks.toInboundMediaFactsWithMetadata).not.toHaveBeenCalled();
     expect(runTurn).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an unmarked DM direct when the member lookup fails", async () => {
+    const { core, runTurn } = createInboundClassificationHarness();
+    apiMocks.listGoogleChatSpaceMembers.mockRejectedValue(new Error("403"));
+    allowGoogleChatMediaSender();
+
+    await processGoogleChatTestEvent({
+      event: {
+        type: "MESSAGE",
+        space: { name: "spaces/UNMARKED", spaceType: "DIRECT_MESSAGE" },
+        message: {
+          name: "spaces/UNMARKED/messages/1",
+          text: "hello",
+          sender: { name: "users/alice", displayName: "Alice", type: "HUMAN" },
+        },
+      },
+      account: {
+        accountId: "work",
+        config: {},
+        credentialSource: "inline",
+      } as ResolvedGoogleChatAccount,
+      core,
+    });
+
+    expect(accessMocks.applyGoogleChatInboundAccessPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ isGroup: false }),
+    );
+    expect(runTurn).toHaveBeenCalledOnce();
+  });
+
+  it("labels a human DM with its members and reuses the cached lookup", async () => {
+    const { buildContext, core } = createInboundClassificationHarness();
+    apiMocks.listGoogleChatSpaceMembers.mockResolvedValue([
+      {
+        member: { name: "users/owner", displayName: "Jai Govindani", type: "HUMAN" },
+        state: "JOINED",
+      },
+      { member: { name: "users/guest", displayName: "Badiru Sulaimon Kolapo", type: "HUMAN" } },
+      { member: { name: "users/app", displayName: "Cosmo", type: "BOT" }, state: "JOINED" },
+    ]);
+    allowGoogleChatMediaSender();
+    const account = {
+      accountId: "work",
+      config: {},
+      credentialSource: "inline",
+    } as ResolvedGoogleChatAccount;
+
+    for (const id of ["1", "2"]) {
+      await processGoogleChatTestEvent({
+        event: {
+          type: "MESSAGE",
+          space: { name: "spaces/HUMANDM", spaceType: "DIRECT_MESSAGE", type: "ROOM" },
+          message: {
+            name: `spaces/HUMANDM/messages/${id}`,
+            text: "@Cosmo hello",
+            sender: { name: "users/owner", displayName: "Jai Govindani", type: "HUMAN" },
+          },
+        },
+        account,
+        core,
+      });
+    }
+
+    expect(buildContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversation: {
+          kind: "channel",
+          id: "spaces/HUMANDM",
+          label: "DM: Jai Govindani, Badiru Sulaimon Kolapo",
+        },
+      }),
+    );
+    expect(apiMocks.listGoogleChatSpaceMembers).toHaveBeenCalledOnce();
   });
 
   it.each([0, 1, 9])(

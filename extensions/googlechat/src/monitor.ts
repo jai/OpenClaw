@@ -49,7 +49,7 @@ import type {
 } from "./monitor-types.js";
 import { warnAppPrincipalMisconfiguration } from "./monitor-webhook.js";
 import { getGoogleChatRuntime } from "./runtime.js";
-import { isGoogleChatGroupSpace } from "./targets.js";
+import { resolveGoogleChatInboundIsGroup, resolveGoogleChatMemberLabel } from "./space-members.js";
 import type { GoogleChatAttachment, GoogleChatEvent } from "./types.js";
 
 setGoogleChatWebhookEventProcessor(processGoogleChatEvent);
@@ -116,7 +116,6 @@ async function processGoogleChatEvent(
   if (!spaceId) {
     return;
   }
-  const isGroup = isGoogleChatGroupSpace(space);
   const sender = message.sender ?? event.user;
   const senderId = sender?.name ?? "";
   const senderName = sender?.displayName ?? "";
@@ -142,6 +141,12 @@ async function processGoogleChatEvent(
   if (!rawBody && attachments.length === 0) {
     return;
   }
+
+  const isGroup = await resolveGoogleChatInboundIsGroup({
+    account,
+    space,
+    logVerbose: (messageLocal) => logVerbose(core, runtime, messageLocal),
+  });
 
   const { route, buildEnvelope } = resolveChannelInboundRouteEnvelope({
     cfg: config,
@@ -237,7 +242,13 @@ async function processGoogleChatEvent(
   const media = mediaInputs.length === 0 ? [] : await toInboundMediaFactsWithMetadata(mediaInputs);
 
   const fromLabel = isGroup
-    ? space.displayName || `space:${spaceId}`
+    ? space.displayName ||
+      (await resolveGoogleChatMemberLabel({
+        account,
+        space,
+        logVerbose: (messageLocal) => logVerbose(core, runtime, messageLocal),
+      })) ||
+      `space:${spaceId}`
     : senderName || `user:${senderId}`;
   const timestampMs = resolveGoogleChatTimestampMs(event.eventTime);
   const body = buildEnvelope({

@@ -261,6 +261,54 @@ describe("googlechat inbound access policy", () => {
     });
   });
 
+  it.each([
+    {
+      name: "admits the allowlisted sender who mentions the app",
+      sender: "users/owner",
+      mention: true,
+      ok: true,
+    },
+    {
+      name: "drops the allowlisted sender without a mention",
+      sender: "users/owner",
+      mention: false,
+      ok: false,
+    },
+    {
+      name: "drops the other human even with a mention",
+      sender: "users/guest",
+      mention: true,
+      ok: false,
+    },
+  ])("in a human DM with the app added, $name", async ({ sender, mention, ok }) => {
+    primeCommonDefaults();
+    allowInboundGroupTraffic();
+
+    const result = await applyInboundAccessPolicy({
+      account: {
+        accountId: "default",
+        config: {
+          botUser: "users/app-bot",
+          groupPolicy: "allowlist",
+          groups: { "*": { requireMention: true, users: ["users/owner"] } },
+          dmPolicy: "allowlist",
+          allowFrom: ["users/owner"],
+        },
+      } as never,
+      space: { name: "spaces/HUMANDM", spaceType: "DIRECT_MESSAGE", type: "ROOM" } as never,
+      message: {
+        annotations: mention
+          ? [{ type: "USER_MENTION", userMention: { user: { name: "users/app-bot" } } }]
+          : [],
+      } as never,
+      senderId: sender,
+      senderName: sender,
+      senderEmail: undefined,
+    });
+
+    expect(result.ok).toBe(ok);
+  });
+
   it("allows group traffic from generic message sender access groups", async () => {
     primeCommonDefaults();
     allowInboundGroupTraffic();

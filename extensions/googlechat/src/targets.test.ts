@@ -8,7 +8,7 @@ import {
   unregisterGoogleChatManualApprovalFollowupSuppression,
 } from "./approval-card-actions.js";
 import {
-  isGoogleChatGroupSpace,
+  resolveGoogleChatSpaceChatType,
   normalizeGoogleChatTarget,
   resolveGoogleChatOutboundSessionRoute,
 } from "./targets.js";
@@ -179,12 +179,22 @@ describe("normalizeGoogleChatTarget", () => {
 });
 
 describe("target helpers", () => {
-  it("classifies current and legacy space metadata through the group boundary", () => {
-    expect(isGoogleChatGroupSpace({ spaceType: "DIRECT_MESSAGE", type: "ROOM" })).toBe(false);
-    expect(isGoogleChatGroupSpace({ spaceType: "SPACE", type: "DM" })).toBe(true);
-    expect(isGoogleChatGroupSpace({ singleUserBotDm: true })).toBe(false);
-    expect(isGoogleChatGroupSpace({ type: "ROOM" })).toBe(true);
-    expect(isGoogleChatGroupSpace({})).toBe(true);
+  it.each([
+    {
+      space: { spaceType: "DIRECT_MESSAGE", type: "DM", singleUserBotDm: true },
+      chatType: "direct",
+    },
+    { space: { spaceType: "DIRECT_MESSAGE", singleUserBotDm: true }, chatType: "direct" },
+    { space: { spaceType: "DIRECT_MESSAGE", type: "DM" }, chatType: "direct" },
+    { space: { spaceType: "DIRECT_MESSAGE", type: "ROOM" }, chatType: "group" },
+    { space: { spaceType: "DIRECT_MESSAGE", singleUserBotDm: false }, chatType: "group" },
+    { space: { spaceType: "DIRECT_MESSAGE" }, chatType: undefined },
+    { space: { spaceType: "SPACE", type: "DM" }, chatType: "group" },
+    { space: { singleUserBotDm: true }, chatType: "direct" },
+    { space: { type: "ROOM" }, chatType: "group" },
+    { space: {}, chatType: undefined },
+  ] as const)("classifies $space as $chatType", ({ space, chatType }) => {
+    expect(resolveGoogleChatSpaceChatType(space)).toBe(chatType);
   });
 });
 
@@ -194,13 +204,18 @@ describe("outbound session routing", () => {
   });
 
   it.each([
-    { spaceType: "DIRECT_MESSAGE", chatType: "direct", peerKind: "direct" },
-    { spaceType: "SPACE", chatType: "group", peerKind: "group" },
-  ] as const)("classifies API space type $spaceType", async ({ spaceType, chatType, peerKind }) => {
+    {
+      space: { spaceType: "DIRECT_MESSAGE", type: "DM", singleUserBotDm: true },
+      peerKind: "direct",
+    },
+    { space: { spaceType: "DIRECT_MESSAGE", type: "ROOM" }, peerKind: "group" },
+    { space: { spaceType: "SPACE" }, peerKind: "group" },
+  ] as const)("classifies API space $space", async ({ space, peerKind }) => {
+    const chatType = peerKind;
     const fetchMock = vi
       .fn()
       .mockResolvedValue(
-        new Response(JSON.stringify({ name: "spaces/AAA", spaceType }), { status: 200 }),
+        new Response(JSON.stringify({ name: "spaces/AAA", ...space }), { status: 200 }),
       );
     vi.stubGlobal("fetch", fetchMock);
 
