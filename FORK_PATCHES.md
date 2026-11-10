@@ -20,9 +20,11 @@ This inventory covers the Google Chat overlay deployed to VOC. Fork `main` has i
 
 ## Deployed targets
 
-- Layers 1–10 at `6b6f5a7445`: FINN shared gateway on VOC, runtime `/home/finn-shared/runtimes/openclaw-2026.10.4-chat-6b6f5a7445`, pinned in [EWA-Services/openclaw-infrastructure](https://github.com/EWA-Services/openclaw-infrastructure/blob/main/infra/ansible/files/finn-shared-thread-patch.conf). The previous runtime, `openclaw-2026.10.4-chat-5b5c6ff859`, is kept for rollback.
+All FINN agents run layers 1–11 at `1bb039d6f6`. The [Linus overlay branch](https://github.com/jai/OpenClaw/blob/fix/googlechat-maintained-main-2026-10-15/FORK_PATCHES.md) is retired.
 
-Layers 9 and 10 list their deployed PR commits. The squash merges keep the same code: when they land, the branch differs from `6b6f5a7445` only in this file.
+- **Shared gateway (`finn-shared` on VOC):** runtime `/home/finn-shared/runtimes/openclaw-2026.10.4-chat-1bb039d6f6`, pinned in [EWA-Services/openclaw-infrastructure](https://github.com/EWA-Services/openclaw-infrastructure/blob/main/infra/ansible/files/finn-shared-thread-patch.conf) by [#958](https://github.com/EWA-Services/openclaw-infrastructure/pull/958). The previous runtime, `openclaw-2026.10.4-chat-6b6f5a7445`, is kept for rollback.
+- **SysOps (`jai-sysops` on VOC):** runtime `/home/jai-sysops/runtimes/openclaw-2026.10.4-chat-1bb039d6f6`, pinned in [the infrastructure inventory](https://github.com/EWA-Services/openclaw-infrastructure/blob/main/infra/ansible/inventory.yml) by [#958](https://github.com/EWA-Services/openclaw-infrastructure/pull/958). The previous runtime, the 2026.10.3 overlay `openclaw-2026.10.3-chat-8063a28213`, is kept for rollback.
+- **Linus:** container image built from the source pin in [#957](https://github.com/EWA-Services/openclaw-infrastructure/pull/957) and deployed by [#960](https://github.com/EWA-Services/openclaw-infrastructure/pull/960).
 
 ## Notes
 
