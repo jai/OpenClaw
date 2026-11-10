@@ -151,7 +151,11 @@ function createEvent(params?: {
 }): GoogleChatEvent {
   return {
     type: "MESSAGE",
-    space: { name: "spaces/CLASSIFY", spaceType: params?.spaceType ?? "SPACE" },
+    space: {
+      name: "spaces/CLASSIFY",
+      spaceType: params?.spaceType ?? "SPACE",
+      ...(params?.spaceType === "DIRECT_MESSAGE" ? { singleUserBotDm: true } : {}),
+    },
     message: {
       name:
         params?.messageName === null
