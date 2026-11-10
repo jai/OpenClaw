@@ -15,14 +15,14 @@ This branch carries Google Chat patches on upstream OpenClaw 2026.10.3 at `614f5
 | 7     | [#20](https://github.com/jai/OpenClaw/pull/20) (`be351a45bc`) | Send `markupSyntax: MARKUP_SYNTAX_CHAT` with message creates and edits. Chat apps created after 2026-10-16 default to Markdown, which shows `<url\|label>` links literally and joins single line breaks. |
 | 8     | [#22](https://github.com/jai/OpenClaw/pull/22)                | Return a delivery receipt with the thread from message-tool sends. Without it, an answer sent with `final: true` was not recognized as the source reply, so settled-turn finalization posted it again.   |
 
-Layers 6 and 7 list their deployed PR commits. The squash merges keep the same code: when they land, the branch differs from `be351a45bc` only in this file.
+Layers 6 and 7 list their deployed PR commits; their squash merges keep the same code.
 
 ## Deployed targets
 
-All targets run layers 1–7 at `be351a45bc`.
+All targets run layers 1–8 at `8063a28213`.
 
-- **Linus:** container image, pinned in EWA-Services/openclaw-infrastructure [#909](https://github.com/EWA-Services/openclaw-infrastructure/pull/909) and deployed by [#936](https://github.com/EWA-Services/openclaw-infrastructure/pull/936).
-- **SysOps (`jai-sysops` on VOC):** runtime `/home/jai-sysops/runtimes/openclaw-2026.10.3-chat-be351a45bc`, pinned in [the infrastructure inventory](https://github.com/EWA-Services/openclaw-infrastructure/blob/main/infra/ansible/inventory.yml). The previous runtime, `openclaw-2026.10.3-9f1d6c72`, is kept for rollback.
+- **Linus:** container image, built from the source pin in EWA-Services/openclaw-infrastructure [#949](https://github.com/EWA-Services/openclaw-infrastructure/pull/949) and deployed by [#954](https://github.com/EWA-Services/openclaw-infrastructure/pull/954).
+- **SysOps (`jai-sysops` on VOC):** runtime `/home/jai-sysops/runtimes/openclaw-2026.10.3-chat-8063a28213`, pinned in [the infrastructure inventory](https://github.com/EWA-Services/openclaw-infrastructure/blob/main/infra/ansible/inventory.yml) by [#948](https://github.com/EWA-Services/openclaw-infrastructure/pull/948). The previous runtime, `openclaw-2026.10.3-chat-be351a45bc`, is kept for rollback.
 
 ## Layer 6 details
 
