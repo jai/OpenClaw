@@ -12,7 +12,10 @@ import {
   registerGoogleChatManualApprovalFollowupSuppression,
   unregisterGoogleChatManualApprovalFollowupSuppression,
 } from "./approval-card-actions.js";
-import { isGoogleChatGroupSpace, resolveGoogleChatOutboundSessionRoute } from "./targets.js";
+import {
+  resolveGoogleChatOutboundSessionRoute,
+  resolveGoogleChatSpaceChatType,
+} from "./targets.js";
 
 const mocks = vi.hoisted(() => ({
   buildHostnameAllowlistPolicyFromSuffixAllowlist: vi.fn((hosts: string[]) => ({
@@ -162,12 +165,22 @@ function lastGuardedFetchOptions(): { timeoutMs?: number } {
 }
 
 describe("target helpers", () => {
-  it("classifies current and legacy space metadata through the group boundary", () => {
-    expect(isGoogleChatGroupSpace({ spaceType: "DIRECT_MESSAGE", type: "ROOM" })).toBe(false);
-    expect(isGoogleChatGroupSpace({ spaceType: "SPACE", type: "DM" })).toBe(true);
-    expect(isGoogleChatGroupSpace({ singleUserBotDm: true })).toBe(false);
-    expect(isGoogleChatGroupSpace({ type: "ROOM" })).toBe(true);
-    expect(isGoogleChatGroupSpace({})).toBe(true);
+  it.each([
+    {
+      space: { spaceType: "DIRECT_MESSAGE", type: "DM", singleUserBotDm: true },
+      chatType: "direct",
+    },
+    { space: { spaceType: "DIRECT_MESSAGE", singleUserBotDm: true }, chatType: "direct" },
+    { space: { spaceType: "DIRECT_MESSAGE", type: "DM" }, chatType: "direct" },
+    { space: { spaceType: "DIRECT_MESSAGE", type: "ROOM" }, chatType: "group" },
+    { space: { spaceType: "DIRECT_MESSAGE", singleUserBotDm: false }, chatType: "group" },
+    { space: { spaceType: "DIRECT_MESSAGE" }, chatType: undefined },
+    { space: { spaceType: "SPACE", type: "DM" }, chatType: "group" },
+    { space: { singleUserBotDm: true }, chatType: "direct" },
+    { space: { type: "ROOM" }, chatType: "group" },
+    { space: {}, chatType: undefined },
+  ] as const)("classifies $space as $chatType", ({ space, chatType }) => {
+    expect(resolveGoogleChatSpaceChatType(space)).toBe(chatType);
   });
 });
 
@@ -176,37 +189,42 @@ describe("outbound session routing", () => {
     vi.unstubAllGlobals();
   });
 
-  it.each([{ spaceType: "SPACE", chatType: "group", peerKind: "group" }] as const)(
-    "classifies API space type $spaceType",
-    async ({ spaceType, chatType, peerKind }) => {
-      const fetchMock = vi
-        .fn()
-        .mockResolvedValue(
-          new Response(JSON.stringify({ name: "spaces/AAA", spaceType }), { status: 200 }),
-        );
-      vi.stubGlobal("fetch", fetchMock);
-
-      const route = await resolveGoogleChatOutboundSessionRoute({
-        cfg: {},
-        agentId: "main",
-        target: "googlechat:spaces/AAA",
-      });
-
-      expect(route).toMatchObject({
-        peer: { kind: peerKind, id: "spaces/AAA" },
-        chatType,
-        from: "googlechat:spaces/AAA",
-        to: "spaces/AAA",
-      });
-      expect(fetchMock).toHaveBeenCalledWith("https://chat.googleapis.com/v1/spaces/AAA", {
-        method: "GET",
-        headers: {
-          Authorization: "Bearer token",
-          "Content-Type": "application/json",
-        },
-      });
+  it.each([
+    {
+      space: { spaceType: "DIRECT_MESSAGE", type: "DM", singleUserBotDm: true },
+      chatType: "direct",
+      peerKind: "direct",
     },
-  );
+    { space: { spaceType: "DIRECT_MESSAGE", type: "ROOM" }, chatType: "group", peerKind: "group" },
+    { space: { spaceType: "SPACE" }, chatType: "group", peerKind: "group" },
+  ] as const)("classifies API space $space", async ({ space, chatType, peerKind }) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ name: "spaces/AAA", ...space }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const route = await resolveGoogleChatOutboundSessionRoute({
+      cfg: {},
+      agentId: "main",
+      target: "googlechat:spaces/AAA",
+    });
+
+    expect(route).toMatchObject({
+      peer: { kind: peerKind, id: "spaces/AAA" },
+      chatType,
+      from: "googlechat:spaces/AAA",
+      to: "spaces/AAA",
+    });
+    expect(fetchMock).toHaveBeenCalledWith("https://chat.googleapis.com/v1/spaces/AAA", {
+      method: "GET",
+      headers: {
+        Authorization: "Bearer token",
+        "Content-Type": "application/json",
+      },
+    });
+  });
 
   it("rejects an unclassified space response", async () => {
     vi.stubGlobal(
