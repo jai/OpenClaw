@@ -5,6 +5,7 @@ import {
 } from "openclaw/plugin-sdk/channel-actions";
 import type { ChannelMessageActionContext } from "openclaw/plugin-sdk/channel-contract";
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
+import { createMessageReceiptFromOutboundResults } from "openclaw/plugin-sdk/channel-outbound";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveGoogleChatAccount } from "./accounts.js";
 import { sendGoogleChatMessage } from "./api.js";
@@ -72,6 +73,7 @@ export async function handleGoogleChatAction({
     let thread = threadId ?? undefined;
     let sent: Awaited<ReturnType<typeof sendGoogleChatMessage>> = null;
     const acceptedText: Array<{ id?: string; text: string }> = [];
+    let deliveredThread: string | undefined;
     for (const text of chunks.length > 0 ? chunks : [""]) {
       try {
         sent = await sendGoogleChatMessage({
@@ -96,8 +98,24 @@ export async function handleGoogleChatAction({
         acceptedText.push({ id: sent.messageName, text });
       }
       thread = sent?.threadName ?? thread;
+      deliveredThread = sent?.threadName ?? deliveredThread;
     }
-    return jsonResult({ ok: true, to: space, ...sent });
+    const messageNames = acceptedText.flatMap(({ id }) => (id ? [id] : []));
+    if (messageNames.length === 0) {
+      return jsonResult({ ok: true, to: space, ...sent });
+    }
+    // Only Chat's confirmed thread proves a source reply when the send inherited it.
+    const receipt = createMessageReceiptFromOutboundResults({
+      results: messageNames.map((messageId) => ({
+        channel: "googlechat",
+        messageId,
+        chatId: space,
+        conversationId: space,
+      })),
+      threadId: deliveredThread,
+      kind: "text",
+    });
+    return jsonResult({ ok: true, to: space, ...sent, receipt });
   }
 
   throw new Error(`Action ${action} is not supported for provider googlechat.`);

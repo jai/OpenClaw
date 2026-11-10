@@ -48,18 +48,6 @@ describe("googlechat message actions", () => {
     };
   }
 
-  function expectJsonResult(result: unknown, details: Record<string, unknown>) {
-    expect(result).toEqual({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(details, null, 2),
-        },
-      ],
-      details,
-    });
-  }
-
   it("describes only send actions when enabled accounts exist", () => {
     listGoogleChatAccountIds.mockReturnValueOnce([]);
     expect(googlechatMessageActions.describeMessageTool?.({ cfg: {} as never })).toBeNull();
@@ -128,11 +116,76 @@ describe("googlechat message actions", () => {
       text: "caption",
       thread: "thread-1",
     });
-    expectJsonResult(result, {
+    expect((result as { details: unknown }).details).toMatchObject({
       ok: true,
       to: "spaces/AAA",
       messageName: "spaces/AAA/messages/msg-1",
       threadName: "spaces/AAA/threads/thread-1",
+      receipt: {
+        platformMessageIds: ["spaces/AAA/messages/msg-1"],
+        threadId: "spaces/AAA/threads/thread-1",
+      },
+    });
+  });
+
+  it("reports the delivered thread for sends that inherit the source thread", async () => {
+    resolveGoogleChatAccount.mockReturnValue(buildAccount());
+    resolveGoogleChatOutboundSpace.mockResolvedValue("spaces/AAA");
+    sendGoogleChatMessage
+      .mockResolvedValueOnce({
+        messageName: "spaces/AAA/messages/source.msg-1",
+        threadName: "spaces/AAA/threads/source",
+      })
+      .mockResolvedValueOnce({
+        messageName: "spaces/AAA/messages/source.msg-2",
+        threadName: "spaces/AAA/threads/source",
+      });
+
+    const result = await googlechatMessageActions.handleAction({
+      action: "send",
+      params: {
+        to: "spaces/AAA",
+        message: "x".repeat(33_000),
+        replyTo: "spaces/AAA/threads/source",
+      },
+      cfg: {},
+      accountId: "default",
+    } as never);
+
+    // Source-reply completion needs the delivered thread. Without it, the
+    // runner cannot tell this answer from a send to another thread and
+    // generates a second final answer.
+    expect((result as { details: { receipt?: unknown } }).details.receipt).toMatchObject({
+      platformMessageIds: ["spaces/AAA/messages/source.msg-1", "spaces/AAA/messages/source.msg-2"],
+      threadId: "spaces/AAA/threads/source",
+      parts: [
+        {
+          platformMessageId: "spaces/AAA/messages/source.msg-1",
+          threadId: "spaces/AAA/threads/source",
+        },
+        {
+          platformMessageId: "spaces/AAA/messages/source.msg-2",
+          threadId: "spaces/AAA/threads/source",
+        },
+      ],
+    });
+  });
+
+  it("reports no receipt when Google Chat suppresses the send", async () => {
+    resolveGoogleChatAccount.mockReturnValue(buildAccount());
+    resolveGoogleChatOutboundSpace.mockResolvedValue("spaces/AAA");
+    sendGoogleChatMessage.mockResolvedValue(null);
+
+    const result = await googlechatMessageActions.handleAction({
+      action: "send",
+      params: { to: "spaces/AAA", message: "answer", replyTo: "spaces/AAA/threads/source" },
+      cfg: {},
+      accountId: "default",
+    } as never);
+
+    expect((result as { details: Record<string, unknown> }).details).toEqual({
+      ok: true,
+      to: "spaces/AAA",
     });
   });
 
