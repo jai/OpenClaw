@@ -1,5 +1,7 @@
 # Linus Google Chat overlay
 
+> **Retired 2026-11-10.** No target runs this branch. Linus, SysOps and the shared gateway all run [`maintain/googlechat-patch-stack-2026-10-17`](https://github.com/jai/OpenClaw/blob/maintain/googlechat-patch-stack-2026-10-17/FORK_PATCHES.md) (OpenClaw 2026.10.4, `1bb039d6f6`), which carries the equivalent of every layer here. Make new Google Chat fixes there.
+
 This branch carries Google Chat patches on upstream OpenClaw 2026.10.3 at `614f559915`. It changes Google Chat delivery without upgrading dependencies or database schemas.
 
 ## Patch layers
@@ -19,10 +21,7 @@ Layers 6 and 7 list their deployed PR commits; their squash merges keep the same
 
 ## Deployed targets
 
-All targets run layers 1–8 at `8063a28213`.
-
-- **Linus:** container image, built from the source pin in EWA-Services/openclaw-infrastructure [#949](https://github.com/EWA-Services/openclaw-infrastructure/pull/949) and deployed by [#954](https://github.com/EWA-Services/openclaw-infrastructure/pull/954).
-- **SysOps (`jai-sysops` on VOC):** runtime `/home/jai-sysops/runtimes/openclaw-2026.10.3-chat-8063a28213`, pinned in [the infrastructure inventory](https://github.com/EWA-Services/openclaw-infrastructure/blob/main/infra/ansible/inventory.yml) by [#948](https://github.com/EWA-Services/openclaw-infrastructure/pull/948). The previous runtime, `openclaw-2026.10.3-chat-be351a45bc`, is kept for rollback.
+None. The last deployments (layers 1–8 at `8063a28213` on Linus and SysOps) were replaced on 2026-11-10; `8063a28213` stays on VOC as SysOps's rollback runtime.
 
 ## Layer 6 details
 
