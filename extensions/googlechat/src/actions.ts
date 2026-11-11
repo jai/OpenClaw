@@ -43,6 +43,7 @@ export async function handleGoogleChatAction({
   assertDirectAdapterHandoff,
   onPlatformSendDispatch,
   sourceReplyFinal,
+  sessionKey,
 }: ChannelMessageActionContext) {
   if (action === "upload-file" || (action === "send" && hasGoogleChatOutboundAttachment(params))) {
     throw new Error(
@@ -85,8 +86,12 @@ export async function handleGoogleChatAction({
           threadId.startsWith(`${space}/threads/`)
             ? threadId
             : undefined,
+        sessionKey,
       });
-      if (activity && (await activity.update(content))) {
+      if (
+        activity &&
+        (await activity.update(content, { assertDirectAdapterHandoff, onPlatformSendDispatch }))
+      ) {
         const receipt = createMessageReceiptFromOutboundResults({
           results: [
             {
@@ -96,14 +101,14 @@ export async function handleGoogleChatAction({
               conversationId: space,
             },
           ],
-          threadId: activity.deliveredThreadName,
+          threadId: activity.threadName,
           kind: "text",
         });
         return jsonResult({
           ok: true,
           to: space,
           messageName: activity.messageName,
-          threadName: activity.deliveredThreadName,
+          threadName: activity.threadName,
           foldedIntoActivity: true,
           receipt,
         });

@@ -382,27 +382,21 @@ async function processGoogleChatEvent(
           accountId: account.accountId,
           spaceId,
           messageName: typingMessage.name,
-          deliveredThreadName: typingMessage.deliveredThreadName,
-          threadNames: [
-            ...new Set(
-              [typingMessage.requestedThreadName, typingMessage.deliveredThreadName].flatMap(
-                (name) => (name?.trim() ? [name.trim()] : []),
-              ),
-            ),
-          ],
-          update: async (text) => {
-            if (activity.isClosed()) {
-              return false;
-            }
+          ...(typingMessage.deliveredThreadName?.trim()
+            ? { threadName: typingMessage.deliveredThreadName.trim() }
+            : {}),
+          sessionKey: dispatchSessionKey,
+          update: async (text, hooks) => {
             const chunk = formatGoogleChatTextChunks(
               text,
               account.config.textChunkLimit ?? 4000,
             )[0];
-            if (!chunk) {
+            if (!chunk || activity.isClosed()) {
               return false;
             }
-            await activity.updateText(chunk);
-            return true;
+            hooks.assertDirectAdapterHandoff?.();
+            await hooks.onPlatformSendDispatch?.();
+            return await activity.updateText(chunk);
           },
         })
       : undefined;

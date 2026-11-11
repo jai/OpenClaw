@@ -10,12 +10,18 @@ export type GoogleChatProgressActivity = {
   spaceId: string;
   /** The activity message's resource name. */
   messageName: string;
-  /** Thread Chat placed the activity message in. */
-  deliveredThreadName?: string;
-  /** Thread names that identify the activity's placement; empty for top level. */
-  threadNames: readonly string[];
-  /** Returns false when the activity message can no longer be edited. */
-  update: (text: string) => Promise<boolean>;
+  /** Thread Chat placed the activity message in; absent for top level. */
+  threadName?: string;
+  /** Session that owns the turn, so concurrent turns never edit each other's activity. */
+  sessionKey: string;
+  /** Returns false when the activity message was not edited. */
+  update: (
+    text: string,
+    hooks: {
+      assertDirectAdapterHandoff?: () => void;
+      onPlatformSendDispatch?: () => Promise<void> | void;
+    },
+  ) => Promise<boolean>;
 };
 
 const liveActivities = new Set<GoogleChatProgressActivity>();
@@ -33,17 +39,19 @@ export function findGoogleChatProgressActivity(params: {
   accountId: string;
   spaceId: string;
   threadName?: string;
+  sessionKey?: string | null;
 }): GoogleChatProgressActivity | undefined {
-  const threadName = params.threadName?.trim();
+  const threadName = params.threadName?.trim() || undefined;
+  const sessionKey = params.sessionKey?.trim().toLowerCase();
+  if (!sessionKey) {
+    return undefined;
+  }
   let match: GoogleChatProgressActivity | undefined;
   for (const activity of liveActivities) {
     if (activity.accountId !== params.accountId || activity.spaceId !== params.spaceId) {
       continue;
     }
-    const placed = threadName
-      ? activity.threadNames.includes(threadName)
-      : activity.threadNames.length === 0;
-    if (placed) {
+    if (activity.threadName === threadName && activity.sessionKey.toLowerCase() === sessionKey) {
       // The most recently registered turn owns the visible activity message.
       match = activity;
     }

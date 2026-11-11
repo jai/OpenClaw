@@ -69,17 +69,23 @@ export async function createGoogleChatStatusMessage(params: {
 }) {
   let closed = false;
   let pendingWrite = Promise.resolve();
-  const updateText = (text: string) => {
+  // Resolves false when the activity closed before this queued edit ran.
+  const updateText = (text: string): Promise<boolean> => {
     const write = pendingWrite.then(async () => {
-      if (!closed) {
-        await updateGoogleChatMessage({
-          account: params.account,
-          messageName: params.messageName,
-          text,
-        });
+      if (closed) {
+        return false;
       }
+      await updateGoogleChatMessage({
+        account: params.account,
+        messageName: params.messageName,
+        text,
+      });
+      return true;
     });
-    pendingWrite = write.catch(() => {});
+    pendingWrite = write.then(
+      () => {},
+      () => {},
+    );
     return write;
   };
   const controller = createStatusReactionController({
