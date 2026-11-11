@@ -19,6 +19,7 @@ import { resolveWebhookPath } from "openclaw/plugin-sdk/webhook-ingress";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import {
   deleteGoogleChatMessage,
+  updateGoogleChatMessage,
   downloadGoogleChatMedia,
   GoogleChatApiError,
   sendGoogleChatMessage,
@@ -387,6 +388,10 @@ async function processGoogleChatEvent(
         onError: (error) => runtime.error?.(`Google Chat status update failed: ${String(error)}`),
       })
     : undefined;
+  // Progress folded into the activity message stays visible when the turn ends
+  // without a separately posted answer, e.g. after handing work to a subagent.
+  let foldedProgressText: string | undefined;
+  let answerPosted = false;
   const unregisterProgressActivity =
     activity && typingMessage
       ? registerGoogleChatProgressActivity({
@@ -407,7 +412,14 @@ async function processGoogleChatEvent(
             }
             hooks.assertDirectAdapterHandoff?.();
             await hooks.onPlatformSendDispatch?.();
-            return await activity.updateText(chunk);
+            const updated = await activity.updateText(chunk);
+            if (updated) {
+              foldedProgressText = chunk;
+            }
+            return updated;
+          },
+          noteSeparatePost: () => {
+            answerPosted = true;
           },
         })
       : undefined;
@@ -427,6 +439,18 @@ async function processGoogleChatEvent(
       }
       const placeholder = typingMessage;
       typingMessage = undefined;
+      if (placeholder && foldedProgressText && !answerPosted) {
+        try {
+          await updateGoogleChatMessage({
+            account,
+            messageName: placeholder.name,
+            text: foldedProgressText,
+          });
+          return;
+        } catch (error) {
+          runtime.error?.(`Google Chat folded progress restore failed: ${String(error)}`);
+        }
+      }
       if (placeholder) {
         try {
           await deleteGoogleChatMessage({ account, messageName: placeholder.name });
@@ -509,7 +533,13 @@ async function processGoogleChatEvent(
                 )[0];
                 if (text) {
                   try {
-                    await activity.updateText(text);
+                    const updated = await activity.updateText(text);
+                    if (
+                      updated &&
+                      (payload.isCommentary === true || payload.isStatusNotice === true)
+                    ) {
+                      foldedProgressText = text;
+                    }
                   } catch (error) {
                     runtime.error?.(`Google Chat progress update failed: ${String(error)}`);
                   }
@@ -549,6 +579,7 @@ async function processGoogleChatEvent(
                 !isProgressReply(payload, info?.kind)
               ) {
                 hasVisibleAnswer = true;
+                answerPosted = true;
                 if (resolveReplyThreadName(payload)) {
                   hasThreadedReply = true;
                 }

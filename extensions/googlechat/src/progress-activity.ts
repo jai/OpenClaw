@@ -14,6 +14,8 @@ export type GoogleChatProgressActivity = {
   threadName?: string;
   /** Session that owns the turn, so concurrent turns never edit each other's activity. */
   sessionKey: string;
+  /** Records a separate visible post in this placement, so the activity can be removed. */
+  noteSeparatePost?: () => void;
   /** Returns false when the activity message was not edited. */
   update: (
     text: string,
