@@ -24,6 +24,7 @@ import {
 } from "./api.js";
 import { maybeHandleGoogleChatApprovalCardClick } from "./approval-card-click.js";
 import type { GoogleChatAudienceType } from "./auth.js";
+import { formatGoogleChatTextChunks } from "./format.js";
 import { applyGoogleChatInboundAccessPolicy } from "./monitor-access.js";
 import { resolveGoogleChatDurableReplyOptions } from "./monitor-durable.js";
 import {
@@ -48,6 +49,7 @@ import type {
   WebhookTarget,
 } from "./monitor-types.js";
 import { warnAppPrincipalMisconfiguration } from "./monitor-webhook.js";
+import { registerGoogleChatProgressActivity } from "./progress-activity.js";
 import { getGoogleChatRuntime } from "./runtime.js";
 import { resolveGoogleChatInboundIsGroup, resolveGoogleChatMemberLabel } from "./space-members.js";
 import type { GoogleChatAttachment, GoogleChatEvent } from "./types.js";
@@ -378,12 +380,40 @@ async function processGoogleChatEvent(
           onError: (error) => runtime.error?.(`Google Chat status update failed: ${String(error)}`),
         })
       : undefined;
+  const unregisterProgressActivity =
+    activity && typingMessage
+      ? registerGoogleChatProgressActivity({
+          accountId: account.accountId,
+          spaceId,
+          messageName: typingMessage.name,
+          ...(typingMessage.placement === "thread"
+            ? { threadName: typingMessage.deliveredThreadName }
+            : {}),
+          sessionKey: route.sessionKey,
+          update: async (text, hooks) => {
+            const chunk = formatGoogleChatTextChunks(
+              text,
+              account.config.textChunkLimit ?? 4000,
+            )[0];
+            if (!chunk || activity.isClosed()) {
+              return false;
+            }
+            hooks.assertDirectAdapterHandoff?.();
+            await hooks.onPlatformSendDispatch?.();
+            return await activity.updateText(chunk);
+          },
+        })
+      : undefined;
+  const stopActivity = async () => {
+    unregisterProgressActivity?.();
+    await activity?.stop();
+  };
   let deferredToActiveRun = false;
   let lifecycleSettled = false;
   let settlement: Promise<void> | undefined;
   const settleStatus = () =>
     (settlement ??= (async () => {
-      await activity?.stop();
+      await stopActivity();
       // Message-tool replies and silent/failed turns may never consume the placeholder.
       if (typingMessage) {
         try {
@@ -464,7 +494,7 @@ async function processGoogleChatEvent(
               // the typing placeholder and can continue updating its status.
               const interimNotice = payload.isCompactionNotice || payload.isFallbackNotice;
               if (!interimNotice) {
-                await activity?.stop();
+                await stopActivity();
               }
               await deliverGoogleChatReply({
                 payload: normalizeGoogleChatReplyTarget({

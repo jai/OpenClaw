@@ -332,6 +332,9 @@ export const sendHandlers: GatewayRequestHandlers = {
                 cfg,
                 params: request.params,
                 reply: request.reply,
+                ...(trustedContext.sourceReplyFinal !== undefined
+                  ? { sourceReplyFinal: trustedContext.sourceReplyFinal }
+                  : {}),
                 accountId,
                 // Only the model's message tool mints an agent-runtime turn context, and
                 // it resends proven-not-sent failures itself, so its gateway-owned plugin

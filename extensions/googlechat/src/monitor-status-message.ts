@@ -67,6 +67,22 @@ export async function createGoogleChatStatusMessage(params: {
   onError: (error: unknown) => void;
 }) {
   let closed = false;
+  let pendingWrite: Promise<unknown> = Promise.resolve();
+  const updateText = (text: string): Promise<boolean> => {
+    const write = pendingWrite.then(async () => {
+      if (closed) {
+        return false;
+      }
+      await updateGoogleChatMessage({
+        account: params.account,
+        messageName: params.messageName,
+        text,
+      });
+      return true;
+    });
+    pendingWrite = write.catch(() => {});
+    return write;
+  };
   const controller = createStatusReactionController({
     enabled: true,
     initialEmoji: "👀",
@@ -75,14 +91,7 @@ export async function createGoogleChatStatusMessage(params: {
     emojis: { stallSoft: "⏳", stallHard: "⏳" },
     adapter: {
       setReaction: async (emoji) => {
-        if (closed) {
-          return;
-        }
-        await updateGoogleChatMessage({
-          account: params.account,
-          messageName: params.messageName,
-          text: `${emoji} ${LABELS[emoji] ?? "Working…"}`,
-        });
+        await updateText(`${emoji} ${LABELS[emoji] ?? "Working…"}`);
       },
     },
     onError: params.onError,
@@ -90,11 +99,14 @@ export async function createGoogleChatStatusMessage(params: {
   await controller.setQueued();
   return {
     controller,
+    updateText,
+    isClosed: () => closed,
     // clear() cancels timers and drains the controller's serialized writes.
     // Do not delete here: delivery can reuse this message for the final answer.
     stop: async () => {
       closed = true;
       await controller.clear();
+      await pendingWrite;
     },
   };
 }
