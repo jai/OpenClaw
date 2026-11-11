@@ -22,11 +22,12 @@ This inventory covers the Google Chat overlay deployed to VOC. Fork `main` has i
 
 ## Deployed targets
 
-All three targets run layers 1–12 at `44136e8ec1`; layer 13 is pending rollout. The [Linus overlay branch](https://github.com/jai/OpenClaw/blob/fix/googlechat-maintained-main-2026-10-15/FORK_PATCHES.md) is retired.
+Every agent runs layers 1–13 at `e1c1b82c36`, OpenClaw 2026.10.4. The [Linus overlay branch](https://github.com/jai/OpenClaw/blob/fix/googlechat-maintained-main-2026-10-15/FORK_PATCHES.md) and the separate Jai Work overlay are retired.
 
-- **Shared gateway (`finn-shared` on VOC):** runtime `/home/finn-shared/runtimes/openclaw-2026.10.4-chat-44136e8ec1`, pinned in [EWA-Services/openclaw-infrastructure](https://github.com/EWA-Services/openclaw-infrastructure/blob/main/infra/ansible/files/finn-shared-thread-patch.conf) by [#978](https://github.com/EWA-Services/openclaw-infrastructure/pull/978). The previous runtime, `openclaw-2026.10.4-chat-1bb039d6f6`, is kept for rollback.
-- **SysOps (`jai-sysops` on VOC):** runtime `/home/jai-sysops/runtimes/openclaw-2026.10.4-chat-44136e8ec1`, pinned in [the infrastructure inventory](https://github.com/EWA-Services/openclaw-infrastructure/blob/main/infra/ansible/inventory.yml) by [#978](https://github.com/EWA-Services/openclaw-infrastructure/pull/978). The previous runtime, `openclaw-2026.10.4-chat-1bb039d6f6`, is kept for rollback.
-- **Linus:** container image built from the source pin in [#978](https://github.com/EWA-Services/openclaw-infrastructure/pull/978) and deployed by [#982](https://github.com/EWA-Services/openclaw-infrastructure/pull/982).
+- **Shared gateway (`finn-shared` on VOC):** runtime `/home/finn-shared/runtimes/openclaw-2026.10.4-chat-e1c1b82c36`, pinned in [EWA-Services/openclaw-infrastructure](https://github.com/EWA-Services/openclaw-infrastructure/blob/main/infra/ansible/files/finn-shared-thread-patch.conf) by [#986](https://github.com/EWA-Services/openclaw-infrastructure/pull/986). Rollback runtime: `openclaw-2026.10.4-chat-55c729b861`.
+- **SysOps (`jai-sysops` on VOC):** runtime `/home/jai-sysops/runtimes/openclaw-2026.10.4-chat-e1c1b82c36`, pinned in [the infrastructure inventory](https://github.com/EWA-Services/openclaw-infrastructure/blob/main/infra/ansible/inventory.yml) by [#986](https://github.com/EWA-Services/openclaw-infrastructure/pull/986). Rollback runtime: `openclaw-2026.10.4-chat-44136e8ec1`.
+- **Linus:** container image built from the source pin in [#986](https://github.com/EWA-Services/openclaw-infrastructure/pull/986) and deployed by [#989](https://github.com/EWA-Services/openclaw-infrastructure/pull/989).
+- **Cosmo (`jai-work` on the Mac mini):** `~/openclaw` → `/Users/jai-work/openclaw-shared-stack-e1c1b82c36`, built natively with the pinned lockfile. The move from the 2026.9.7 Jai Work overlay ran `openclaw doctor --fix` (one-way agent database migration). Rollback: stop the gateway, restore `/Users/jai-work/backups/cosmo-shared-stack-e1c1b82c36-20261111T085805Z/openclaw-state.tar.zst` into `~/.openclaw`, point `~/openclaw` at `/Users/jai-work/openclaw-jaiwork-fold-progress-3900c1d1`, and start it.
 
 ## Notes
 
