@@ -49,6 +49,7 @@ import type {
   WebhookTarget,
 } from "./monitor-types.js";
 import { warnAppPrincipalMisconfiguration } from "./monitor-webhook.js";
+import { registerGoogleChatProgressActivity } from "./progress-activity.js";
 import { getGoogleChatRuntime } from "./runtime.js";
 import { isGoogleChatGroupSpace } from "./targets.js";
 import type { GoogleChatAttachment, GoogleChatEvent } from "./types.js";
@@ -375,13 +376,41 @@ async function processGoogleChatEvent(
         onError: (error) => runtime.error?.(`Google Chat status update failed: ${String(error)}`),
       })
     : undefined;
+  const unregisterProgressActivity =
+    activity && typingMessage
+      ? registerGoogleChatProgressActivity({
+          accountId: account.accountId,
+          spaceId,
+          messageName: typingMessage.name,
+          ...(typingMessage.deliveredThreadName?.trim()
+            ? { threadName: typingMessage.deliveredThreadName.trim() }
+            : {}),
+          sessionKey: dispatchSessionKey,
+          update: async (text, hooks) => {
+            const chunk = formatGoogleChatTextChunks(
+              text,
+              account.config.textChunkLimit ?? 4000,
+            )[0];
+            if (!chunk || activity.isClosed()) {
+              return false;
+            }
+            hooks.assertDirectAdapterHandoff?.();
+            await hooks.onPlatformSendDispatch?.();
+            return await activity.updateText(chunk);
+          },
+        })
+      : undefined;
+  const stopActivity = async () => {
+    unregisterProgressActivity?.();
+    await activity?.stop();
+  };
   let deferred = false;
   let lifecycleSettled = false;
   let deliveryFailed = false;
   let settlement: Promise<void> | undefined;
   const settleStatus = () =>
     (settlement ??= (async () => {
-      await activity?.stop();
+      await stopActivity();
       if (hasVisibleAnswer) {
         await cleanupProgress();
       }
@@ -408,7 +437,7 @@ async function processGoogleChatEvent(
           lifecycleSettled = true;
           if (deferred) {
             void (async () => {
-              await activity?.stop();
+              await stopActivity();
               if (hasVisibleAnswer && !deliveryFailed) {
                 await settleStatus();
               }
@@ -455,7 +484,7 @@ async function processGoogleChatEvent(
                 spaceId,
               });
               if (options) {
-                await activity?.stop();
+                await stopActivity();
               }
               return options;
             },
@@ -477,7 +506,7 @@ async function processGoogleChatEvent(
                 return;
               }
               if (!progress && !payload.isCompactionNotice && !payload.isFallbackNotice) {
-                await activity?.stop();
+                await stopActivity();
               }
               try {
                 await deliverGoogleChatReply({
@@ -575,7 +604,7 @@ async function processGoogleChatEvent(
     throw error;
   } finally {
     if (!deferred || lifecycleSettled) {
-      await activity?.stop();
+      await stopActivity();
       if (!deliveryFailed && (!deferred || hasVisibleAnswer)) {
         await settleStatus();
       }

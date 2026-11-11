@@ -69,17 +69,22 @@ export async function createGoogleChatStatusMessage(params: {
 }) {
   let closed = false;
   let pendingWrite = Promise.resolve();
-  const updateText = (text: string) => {
+  const updateText = (text: string): Promise<boolean> => {
     const write = pendingWrite.then(async () => {
-      if (!closed) {
-        await updateGoogleChatMessage({
-          account: params.account,
-          messageName: params.messageName,
-          text,
-        });
+      if (closed) {
+        return false;
       }
+      await updateGoogleChatMessage({
+        account: params.account,
+        messageName: params.messageName,
+        text,
+      });
+      return true;
     });
-    pendingWrite = write.catch(() => {});
+    pendingWrite = write.then(
+      () => {},
+      () => {},
+    );
     return write;
   };
   const controller = createStatusReactionController({
@@ -99,6 +104,7 @@ export async function createGoogleChatStatusMessage(params: {
   return {
     controller,
     updateText,
+    isClosed: () => closed,
     // Drain activity and commentary writes before final delivery or cleanup.
     stop: async () => {
       closed = true;
