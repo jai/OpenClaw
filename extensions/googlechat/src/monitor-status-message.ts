@@ -69,7 +69,6 @@ export async function createGoogleChatStatusMessage(params: {
 }) {
   let closed = false;
   let pendingWrite = Promise.resolve();
-  // Resolves false when the activity closed before this queued edit ran.
   const updateText = (text: string): Promise<boolean> => {
     const write = pendingWrite.then(async () => {
       if (closed) {
