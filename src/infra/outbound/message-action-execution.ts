@@ -644,6 +644,7 @@ export async function executeMessagePlugin(
     handled = await dispatchChannelMessageAction({
       ...createChannelActionContext({ ctx, action, mediaAccess }),
       progressSnapshot: input.progressSnapshot,
+      ...(input.sourceReplyFinal !== undefined ? { sourceReplyFinal: input.sourceReplyFinal } : {}),
       requesterAccountId:
         authorization !== undefined
           ? authorization.requesterAccountId

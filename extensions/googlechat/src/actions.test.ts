@@ -21,6 +21,8 @@ vi.mock("./targets.js", () => ({
   resolveGoogleChatOutboundSpace,
 }));
 
+import { registerGoogleChatProgressActivity } from "./progress-activity.js";
+
 let googlechatMessageActions: typeof import("./message-tool-api.js").googlechatMessageActions;
 
 describe("googlechat message actions", () => {
@@ -83,6 +85,99 @@ describe("googlechat message actions", () => {
       ).toEqual({
         actions: ["send"],
       });
+    }
+  });
+
+  it("folds a progress send into the live activity message in the same thread", async () => {
+    resolveGoogleChatAccount.mockReturnValue(buildAccount());
+    resolveGoogleChatOutboundSpace.mockResolvedValue("spaces/AAA");
+    const update = vi.fn(async () => true);
+    const unregister = registerGoogleChatProgressActivity({
+      accountId: "default",
+      spaceId: "spaces/AAA",
+      messageName: "spaces/AAA/messages/activity",
+      deliveredThreadName: "spaces/AAA/threads/t1",
+      threadNames: ["spaces/AAA/threads/t1"],
+      update,
+    });
+    try {
+      const result = await googlechatMessageActions.handleAction({
+        action: "send",
+        params: {
+          to: "spaces/AAA",
+          message: "Checking Linear next.",
+          threadId: "spaces/AAA/threads/t1",
+        },
+        cfg: {},
+        accountId: "default",
+        sourceReplyFinal: false,
+      } as never);
+      expect(update).toHaveBeenCalledWith("Checking Linear next.");
+      expect(sendGoogleChatMessage).not.toHaveBeenCalled();
+      expect((result as { details: unknown }).details).toMatchObject({
+        ok: true,
+        foldedIntoActivity: true,
+        messageName: "spaces/AAA/messages/activity",
+        receipt: {
+          platformMessageIds: ["spaces/AAA/messages/activity"],
+          threadId: "spaces/AAA/threads/t1",
+        },
+      });
+    } finally {
+      unregister();
+    }
+  });
+
+  it.each([
+    {
+      name: "a final send",
+      sourceReplyFinal: true,
+      threadId: "spaces/AAA/threads/t1",
+      updated: true,
+    },
+    {
+      name: "a send without finality",
+      sourceReplyFinal: undefined,
+      threadId: "spaces/AAA/threads/t1",
+      updated: true,
+    },
+    {
+      name: "a progress send to another thread",
+      sourceReplyFinal: false,
+      threadId: "spaces/AAA/threads/t2",
+      updated: true,
+    },
+    {
+      name: "a progress send after the activity closed",
+      sourceReplyFinal: false,
+      threadId: "spaces/AAA/threads/t1",
+      updated: false,
+    },
+  ])("posts $name as a separate message", async ({ sourceReplyFinal, threadId, updated }) => {
+    resolveGoogleChatAccount.mockReturnValue(buildAccount());
+    resolveGoogleChatOutboundSpace.mockResolvedValue("spaces/AAA");
+    sendGoogleChatMessage.mockResolvedValue({
+      messageName: "spaces/AAA/messages/msg-1",
+      threadName: threadId,
+    });
+    const unregister = registerGoogleChatProgressActivity({
+      accountId: "default",
+      spaceId: "spaces/AAA",
+      messageName: "spaces/AAA/messages/activity",
+      threadNames: ["spaces/AAA/threads/t1"],
+      update: vi.fn(async () => updated),
+    });
+    try {
+      await googlechatMessageActions.handleAction({
+        action: "send",
+        params: { to: "spaces/AAA", message: "Update", threadId },
+        cfg: {},
+        accountId: "default",
+        ...(sourceReplyFinal === undefined ? {} : { sourceReplyFinal }),
+      } as never);
+      expect(sendGoogleChatMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      unregister();
     }
   });
 

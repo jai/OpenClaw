@@ -10,6 +10,7 @@ import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveGoogleChatAccount } from "./accounts.js";
 import { sendGoogleChatMessage } from "./api.js";
 import { formatGoogleChatTextChunks } from "./format.js";
+import { findGoogleChatProgressActivity } from "./progress-activity.js";
 import { resolveGoogleChatOutboundSpace } from "./targets.js";
 
 const OUTBOUND_MEDIA_KEYS = ["media", "mediaUrl", "path", "filePath", "fileUrl"] as const;
@@ -41,6 +42,7 @@ export async function handleGoogleChatAction({
   accountId,
   assertDirectAdapterHandoff,
   onPlatformSendDispatch,
+  sourceReplyFinal,
 }: ChannelMessageActionContext) {
   if (action === "upload-file" || (action === "send" && hasGoogleChatOutboundAttachment(params))) {
     throw new Error(
@@ -68,6 +70,45 @@ export async function handleGoogleChatAction({
       target: to,
       assertDirectAdapterHandoff,
     });
+
+    // A progress send folds into the turn's live activity message, which the
+    // monitor removes when the turn settles, instead of posting a standalone
+    // message that is never cleaned up.
+    if (sourceReplyFinal === false && content.trim()) {
+      const activity = findGoogleChatProgressActivity({
+        accountId: account.accountId,
+        spaceId: space,
+        // Chat drops thread names outside this space, so the send would not land there.
+        threadName:
+          threadId &&
+          /^spaces\/[^/]+\/threads\/[^/]+$/.test(threadId) &&
+          threadId.startsWith(`${space}/threads/`)
+            ? threadId
+            : undefined,
+      });
+      if (activity && (await activity.update(content))) {
+        const receipt = createMessageReceiptFromOutboundResults({
+          results: [
+            {
+              channel: "googlechat",
+              messageId: activity.messageName,
+              chatId: space,
+              conversationId: space,
+            },
+          ],
+          threadId: activity.deliveredThreadName,
+          kind: "text",
+        });
+        return jsonResult({
+          ok: true,
+          to: space,
+          messageName: activity.messageName,
+          threadName: activity.deliveredThreadName,
+          foldedIntoActivity: true,
+          receipt,
+        });
+      }
+    }
 
     const chunks = formatGoogleChatTextChunks(content);
     let thread = threadId ?? undefined;

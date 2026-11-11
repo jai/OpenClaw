@@ -679,6 +679,8 @@ export type ChannelMessageActionContext = {
   params: Record<string, unknown>;
   /** Host-prepared progress display state; never sourced from model-controlled params. */
   progressSnapshot?: ChannelProgressDraftCompositorSnapshot;
+  /** Host-owned source-reply finality of a message-tool send; `false` marks progress. */
+  sourceReplyFinal?: boolean;
   reply?: OutboundReplyFacts;
   mediaAccess?: OutboundMediaAccess;
   mediaLocalRoots?: readonly string[];

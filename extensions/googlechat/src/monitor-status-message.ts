@@ -99,6 +99,7 @@ export async function createGoogleChatStatusMessage(params: {
   return {
     controller,
     updateText,
+    isClosed: () => closed,
     // Drain activity and commentary writes before final delivery or cleanup.
     stop: async () => {
       closed = true;
