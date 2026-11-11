@@ -22,6 +22,7 @@ type CompletionDeliveryDependencies = {
   unregisterChild: (child: ChildState) => void;
   abandon: (state: ParentState, child: ChildState, assertCurrent: () => void) => Promise<void>;
   releaseClientRetentionIfIdle: () => void;
+  releaseParentThreadIfChildrenTerminal: (parentThreadId: string) => void;
 };
 
 const DEFAULT_COMPLETION_DELIVERY_RETRY_DELAYS_MS = [
@@ -85,6 +86,9 @@ export class CodexNativeSubagentCompletionDelivery {
         deferredToForeground = state.owners.size > 0;
         return;
       }
+      // The wake turn may need to resume this parent thread; our own protection
+      // would refuse it as "claimed by active work" and retire the completion.
+      this.dependencies.releaseParentThreadIfChildrenTerminal(state.parentThreadId);
       const historyOwner = childState.historyOwner;
       const delivery = await this.dependencies.deliver({
         scope: state.completionScope,

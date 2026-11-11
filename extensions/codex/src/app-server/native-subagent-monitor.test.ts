@@ -5,6 +5,8 @@ import {
   consumeCodexAppServerLiveThread,
   ensureCodexAppServerClientRuntime,
   isCodexAppServerLiveThreadClaimed,
+  isCodexAppServerLiveThreadProtected,
+  protectCodexAppServerLiveThread,
   releaseCodexAppServerLiveThread,
   retainCodexAppServerLiveThread,
 } from "./client-runtime.js";
@@ -673,6 +675,35 @@ describe("CodexNativeSubagentMonitor", () => {
     expect(releaseParentThread).toHaveBeenCalledOnce();
     await monitor.dispose();
     expect(releaseParentThread).toHaveBeenCalledOnce();
+    client.close();
+  });
+
+  it("frees the parent thread before waking a detached parent with the last child result", async () => {
+    const client = createClient();
+    const runtime = createRuntime();
+    ensureCodexAppServerClientRuntime(client.client, { agentDir: "/tmp/agent" });
+    const protectedAtDelivery: boolean[] = [];
+    runtime.deliverAgentHarnessCompletion.mockImplementation(async () => {
+      protectedAtDelivery.push(isCodexAppServerLiveThreadProtected(client.client, "parent-thread"));
+      return { delivered: true, path: "direct" };
+    });
+    const monitor = new CodexNativeSubagentMonitor(client.client, runtime, {
+      retainParentThread: (threadId) => protectCodexAppServerLiveThread(client.client, threadId),
+      recoveryPollDelaysMs: [],
+    });
+    const parent = await registerParent(monitor);
+    await notifyChildStarted(client, "parent-thread", "child-a");
+    await notifyChildStarted(client, "parent-thread", "child-b");
+    await parent.unregister();
+    expect(isCodexAppServerLiveThreadProtected(client.client, "parent-thread")).toBe(true);
+
+    await client.notify(nativeCompletionNotification({ agentPath: "child-a" }));
+    await client.notify(nativeCompletionNotification({ agentPath: "child-b" }));
+
+    // A live sibling still needs the parent subscription; the last result's wake
+    // turn must be able to resume the parent instead of failing "claimed by active work".
+    expect(protectedAtDelivery).toEqual([true, false]);
+    await monitor.dispose();
     client.close();
   });
 

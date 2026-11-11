@@ -190,6 +190,8 @@ class Monitor {
       abandon: (state, child, assertCurrent) =>
         this.assignments.abandon(state, child, assertCurrent),
       releaseClientRetentionIfIdle: () => this.releaseClientRetentionIfIdle(),
+      releaseParentThreadIfChildrenTerminal: (parentThreadId) =>
+        this.releaseParentThreadIfChildrenTerminal(parentThreadId),
     });
     this.turnObservation = new CodexNativeSubagentTurnObservation({
       emitTaskEvent: (child, event) => this.admissionCustody.emitEvent(child, event),
@@ -2386,6 +2388,18 @@ class Monitor {
       }
     }
     return false;
+  }
+
+  /** Parent protection only keeps live children observable; terminal results are already held. */
+  private releaseParentThreadIfChildrenTerminal(parentThreadId: string): void {
+    for (const childState of this.childStates.values()) {
+      if (childState.parentThreadId === parentThreadId && !childState.terminal) {
+        return;
+      }
+    }
+    const releaseParentThread = this.parentThreadRetentions.get(parentThreadId);
+    this.parentThreadRetentions.delete(parentThreadId);
+    releaseParentThread?.();
   }
 
   private hasChildrenForParent(parentThreadId: string): boolean {
