@@ -120,10 +120,9 @@ export async function handleGoogleChatAction({
       }
     }
 
-    const liveActivities = describeGoogleChatProgressActivities(account.accountId, space);
-    if (!progressSend && sourceReplyFinal !== true && liveActivities) {
+    if (progressSend) {
       console.warn(
-        `[googlechat] send posted beside live activity: final=${String(sourceReplyFinal)} thread=${threadId ?? "none"} session=${sessionKey ?? "none"} live=[${liveActivities}]`,
+        `[googlechat] progress send posted separately: thread=${threadId ?? "none"} session=${sessionKey ?? "none"} live=[${describeGoogleChatProgressActivities(account.accountId, space)}]`,
       );
     }
     const chunks = formatGoogleChatTextChunks(content);
