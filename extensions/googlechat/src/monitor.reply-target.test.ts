@@ -373,6 +373,29 @@ describe("Google Chat automatic reply target reconciliation", () => {
     });
   });
 
+  it("keeps an automatic status notice visible when the turn ends without an answer", async () => {
+    const account = createAccount({ replyToMode: "all" });
+    const core = createCore({
+      run: async (delivery) => {
+        const notice = { text: "I’m continuing this work.", isStatusNotice: true };
+        await delivery.deliver(notice, { kind: "block" });
+      },
+    });
+    apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+      messageName: TYPING,
+      threadName: THREAD,
+    });
+
+    await processEvent({ account, core });
+
+    expect(apiMocks.deleteGoogleChatMessage).not.toHaveBeenCalled();
+    expect(apiMocks.updateGoogleChatMessage).toHaveBeenLastCalledWith({
+      account,
+      messageName: TYPING,
+      text: "I’m continuing this work.",
+    });
+  });
+
   it("removes folded progress once an answer is posted separately", async () => {
     const account = createAccount({ replyToMode: "all" });
     const core = createCore({

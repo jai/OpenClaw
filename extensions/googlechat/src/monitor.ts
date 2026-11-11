@@ -533,7 +533,13 @@ async function processGoogleChatEvent(
                 )[0];
                 if (text) {
                   try {
-                    await activity.updateText(text);
+                    const updated = await activity.updateText(text);
+                    if (
+                      updated &&
+                      (payload.isCommentary === true || payload.isStatusNotice === true)
+                    ) {
+                      foldedProgressText = text;
+                    }
                   } catch (error) {
                     runtime.error?.(`Google Chat progress update failed: ${String(error)}`);
                   }
