@@ -43,18 +43,27 @@ export function findGoogleChatProgressActivity(params: {
 }): GoogleChatProgressActivity | undefined {
   const threadName = params.threadName?.trim() || undefined;
   const sessionKey = params.sessionKey?.trim().toLowerCase();
-  if (!sessionKey) {
-    return undefined;
-  }
-  let match: GoogleChatProgressActivity | undefined;
+  const inThread: GoogleChatProgressActivity[] = [];
   for (const activity of liveActivities) {
-    if (activity.accountId !== params.accountId || activity.spaceId !== params.spaceId) {
-      continue;
-    }
-    if (activity.threadName === threadName && activity.sessionKey.toLowerCase() === sessionKey) {
-      // The most recently registered turn owns the visible activity message.
-      match = activity;
+    if (
+      activity.accountId === params.accountId &&
+      activity.spaceId === params.spaceId &&
+      activity.threadName === threadName
+    ) {
+      inThread.push(activity);
     }
   }
-  return match;
+  const sameSession = sessionKey
+    ? inThread.filter((activity) => activity.sessionKey.toLowerCase() === sessionKey).at(-1)
+    : undefined;
+  // Session keys can differ in shape for one turn; fall back to the thread
+  // only when a single turn owns it, so concurrent turns never edit each other.
+  return sameSession ?? (inThread.length === 1 ? inThread[0] : undefined);
+}
+
+export function describeGoogleChatProgressActivities(accountId: string, spaceId: string): string {
+  return [...liveActivities]
+    .filter((activity) => activity.accountId === accountId && activity.spaceId === spaceId)
+    .map((activity) => `${activity.sessionKey}@${activity.threadName ?? "top"}`)
+    .join(",");
 }

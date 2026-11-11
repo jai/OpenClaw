@@ -26,7 +26,7 @@ const find = (params: { threadName?: string; sessionKey?: string; accountId?: st
   });
 
 describe("Google Chat progress activity registry", () => {
-  it("matches only the same account, space, delivered thread and session", () => {
+  it("matches the same account, space and delivered thread", () => {
     const threaded = activity("spaces/AAA/threads/t1");
     const unregister = registerGoogleChatProgressActivity(threaded);
     expect(find({ threadName: "spaces/AAA/threads/t1" })).toBe(threaded);
@@ -35,23 +35,22 @@ describe("Google Chat progress activity registry", () => {
     );
     expect(find({ threadName: "spaces/AAA/threads/other" })).toBeUndefined();
     expect(find({ threadName: "spaces/AAA/threads/t1", accountId: "work" })).toBeUndefined();
-    expect(
-      find({ threadName: "spaces/AAA/threads/t1", sessionKey: "agent:other" }),
-    ).toBeUndefined();
+    expect(find({ threadName: "spaces/AAA/threads/t1", sessionKey: "agent:other" })).toBe(threaded);
     expect(find({})).toBeUndefined();
     unregister();
     expect(find({ threadName: "spaces/AAA/threads/t1" })).toBeUndefined();
   });
 
-  it("requires a session to fold", () => {
-    const unregister = registerGoogleChatProgressActivity(activity("spaces/AAA/threads/t1"));
+  it("folds without a session when the thread matches", () => {
+    const threaded = activity("spaces/AAA/threads/t1");
+    const unregister = registerGoogleChatProgressActivity(threaded);
     expect(
       findGoogleChatProgressActivity({
         accountId: "default",
         spaceId: "spaces/AAA",
         threadName: "spaces/AAA/threads/t1",
       }),
-    ).toBeUndefined();
+    ).toBe(threaded);
     unregister();
   });
 
@@ -69,6 +68,9 @@ describe("Google Chat progress activity registry", () => {
     const b = registerGoogleChatProgressActivity(second);
     expect(find({ threadName: "spaces/AAA/threads/t1", sessionKey: "agent:a" })).toBe(first);
     expect(find({ threadName: "spaces/AAA/threads/t1", sessionKey: "agent:b" })).toBe(second);
+    expect(
+      find({ threadName: "spaces/AAA/threads/t1", sessionKey: "agent:other" }),
+    ).toBeUndefined();
     a();
     b();
   });

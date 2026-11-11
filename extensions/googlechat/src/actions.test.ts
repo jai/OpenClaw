@@ -129,6 +129,38 @@ describe("googlechat message actions", () => {
     }
   });
 
+  it("folds a send carrying the host progress marker without finality", async () => {
+    resolveGoogleChatAccount.mockReturnValue(buildAccount());
+    resolveGoogleChatOutboundSpace.mockResolvedValue("spaces/AAA");
+    const update = vi.fn(async () => true);
+    const unregister = registerGoogleChatProgressActivity({
+      accountId: "default",
+      spaceId: "spaces/AAA",
+      messageName: "spaces/AAA/messages/activity",
+      threadName: "spaces/AAA/threads/t1",
+      sessionKey: "agent:main:main",
+      update,
+    });
+    try {
+      await googlechatMessageActions.handleAction({
+        action: "send",
+        params: {
+          to: "spaces/AAA",
+          message: "Checking Linear next.",
+          threadId: "spaces/AAA/threads/t1",
+          openclawSourceReplyProgress: true,
+        },
+        cfg: {},
+        accountId: "default",
+        sessionKey: "agent:main:googlechat:direct:users/1",
+      } as never);
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(sendGoogleChatMessage).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
+  });
+
   it.each([
     {
       name: "a final send",

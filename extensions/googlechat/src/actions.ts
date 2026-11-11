@@ -10,7 +10,10 @@ import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveGoogleChatAccount } from "./accounts.js";
 import { sendGoogleChatMessage } from "./api.js";
 import { formatGoogleChatTextChunks } from "./format.js";
-import { findGoogleChatProgressActivity } from "./progress-activity.js";
+import {
+  describeGoogleChatProgressActivities,
+  findGoogleChatProgressActivity,
+} from "./progress-activity.js";
 import { resolveGoogleChatOutboundSpace } from "./targets.js";
 
 const OUTBOUND_MEDIA_KEYS = ["media", "mediaUrl", "path", "filePath", "fileUrl"] as const;
@@ -75,7 +78,9 @@ export async function handleGoogleChatAction({
     // A progress send folds into the turn's live activity message, which the
     // monitor removes when the turn settles, instead of posting a standalone
     // message that is never cleaned up.
-    if (sourceReplyFinal === false && content.trim()) {
+    // Mirrors core's SOURCE_REPLY_PROGRESS_PARAM marker for progress sends.
+    const progressSend = sourceReplyFinal === false || params.openclawSourceReplyProgress === true;
+    if (progressSend && content.trim()) {
       const activity = findGoogleChatProgressActivity({
         accountId: account.accountId,
         spaceId: space,
@@ -115,6 +120,11 @@ export async function handleGoogleChatAction({
       }
     }
 
+    if (progressSend) {
+      console.warn(
+        `[googlechat] progress send posted separately: thread=${threadId ?? "none"} session=${sessionKey ?? "none"} live=[${describeGoogleChatProgressActivities(account.accountId, space)}]`,
+      );
+    }
     const chunks = formatGoogleChatTextChunks(content);
     let thread = threadId ?? undefined;
     let sent: Awaited<ReturnType<typeof sendGoogleChatMessage>> = null;
