@@ -43,24 +43,22 @@ export function findGoogleChatProgressActivity(params: {
 }): GoogleChatProgressActivity | undefined {
   const threadName = params.threadName?.trim() || undefined;
   const sessionKey = params.sessionKey?.trim().toLowerCase();
-  let match: GoogleChatProgressActivity | undefined;
-  let sessionMatch: GoogleChatProgressActivity | undefined;
+  const inThread: GoogleChatProgressActivity[] = [];
   for (const activity of liveActivities) {
     if (
-      activity.accountId !== params.accountId ||
-      activity.spaceId !== params.spaceId ||
-      activity.threadName !== threadName
+      activity.accountId === params.accountId &&
+      activity.spaceId === params.spaceId &&
+      activity.threadName === threadName
     ) {
-      continue;
-    }
-    // Session keys can differ in shape for one turn, so the thread decides and
-    // a same-session activity wins when two turns share the thread.
-    match = activity;
-    if (sessionKey && activity.sessionKey.toLowerCase() === sessionKey) {
-      sessionMatch = activity;
+      inThread.push(activity);
     }
   }
-  return sessionMatch ?? match;
+  const sameSession = sessionKey
+    ? inThread.filter((activity) => activity.sessionKey.toLowerCase() === sessionKey).at(-1)
+    : undefined;
+  // Session keys can differ in shape for one turn; fall back to the thread
+  // only when a single turn owns it, so concurrent turns never edit each other.
+  return sameSession ?? (inThread.length === 1 ? inThread[0] : undefined);
 }
 
 export function describeGoogleChatProgressActivities(accountId: string, spaceId: string): string {

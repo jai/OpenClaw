@@ -68,6 +68,9 @@ describe("Google Chat progress activity registry", () => {
     const b = registerGoogleChatProgressActivity(second);
     expect(find({ threadName: "spaces/AAA/threads/t1", sessionKey: "agent:a" })).toBe(first);
     expect(find({ threadName: "spaces/AAA/threads/t1", sessionKey: "agent:b" })).toBe(second);
+    expect(
+      find({ threadName: "spaces/AAA/threads/t1", sessionKey: "agent:other" }),
+    ).toBeUndefined();
     a();
     b();
   });
