@@ -78,7 +78,9 @@ export async function handleGoogleChatAction({
     // A progress send folds into the turn's live activity message, which the
     // monitor removes when the turn settles, instead of posting a standalone
     // message that is never cleaned up.
-    if (sourceReplyFinal === false && content.trim()) {
+    // Mirrors core's SOURCE_REPLY_PROGRESS_PARAM marker for progress sends.
+    const progressSend = sourceReplyFinal === false || params.openclawSourceReplyProgress === true;
+    if (progressSend && content.trim()) {
       const activity = findGoogleChatProgressActivity({
         accountId: account.accountId,
         spaceId: space,
@@ -119,7 +121,7 @@ export async function handleGoogleChatAction({
     }
 
     const liveActivities = describeGoogleChatProgressActivities(account.accountId, space);
-    if (sourceReplyFinal !== true && liveActivities) {
+    if (!progressSend && sourceReplyFinal !== true && liveActivities) {
       console.warn(
         `[googlechat] send posted beside live activity: final=${String(sourceReplyFinal)} thread=${threadId ?? "none"} session=${sessionKey ?? "none"} live=[${liveActivities}]`,
       );

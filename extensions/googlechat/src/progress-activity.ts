@@ -43,20 +43,24 @@ export function findGoogleChatProgressActivity(params: {
 }): GoogleChatProgressActivity | undefined {
   const threadName = params.threadName?.trim() || undefined;
   const sessionKey = params.sessionKey?.trim().toLowerCase();
-  if (!sessionKey) {
-    return undefined;
-  }
   let match: GoogleChatProgressActivity | undefined;
+  let sessionMatch: GoogleChatProgressActivity | undefined;
   for (const activity of liveActivities) {
-    if (activity.accountId !== params.accountId || activity.spaceId !== params.spaceId) {
+    if (
+      activity.accountId !== params.accountId ||
+      activity.spaceId !== params.spaceId ||
+      activity.threadName !== threadName
+    ) {
       continue;
     }
-    if (activity.threadName === threadName && activity.sessionKey.toLowerCase() === sessionKey) {
-      // The most recently registered turn owns the visible activity message.
-      match = activity;
+    // Session keys can differ in shape for one turn, so the thread decides and
+    // a same-session activity wins when two turns share the thread.
+    match = activity;
+    if (sessionKey && activity.sessionKey.toLowerCase() === sessionKey) {
+      sessionMatch = activity;
     }
   }
-  return match;
+  return sessionMatch ?? match;
 }
 
 export function describeGoogleChatProgressActivities(accountId: string, spaceId: string): string {
