@@ -69,9 +69,17 @@ export async function createGoogleChatStatusMessage(params: {
 }) {
   let closed = false;
   let pendingWrite = Promise.resolve();
-  const updateText = (text: string): Promise<boolean> => {
-    const write = pendingWrite.then(async () => {
-      if (closed) {
+  // Progress text stays visible; the latest status label is shown under it.
+  let progressText: string | undefined;
+  let statusLine: string | undefined;
+  const compose = () =>
+    [statusLine ? progressText?.slice(0, 3800) : progressText, statusLine]
+      .filter((part): part is string => Boolean(part))
+      .join("\n\n");
+  const write = (): Promise<boolean> => {
+    const text = compose();
+    const next = pendingWrite.then(async () => {
+      if (closed || !text) {
         return false;
       }
       await updateGoogleChatMessage({
@@ -81,11 +89,15 @@ export async function createGoogleChatStatusMessage(params: {
       });
       return true;
     });
-    pendingWrite = write.then(
+    pendingWrite = next.then(
       () => {},
       () => {},
     );
-    return write;
+    return next;
+  };
+  const updateText = (text: string): Promise<boolean> => {
+    progressText = text;
+    return write();
   };
   const controller = createStatusReactionController({
     enabled: params.enabled !== false,
@@ -95,7 +107,8 @@ export async function createGoogleChatStatusMessage(params: {
     emojis: { stallSoft: "⏳", stallHard: "⏳" },
     adapter: {
       setReaction: async (emoji) => {
-        await updateText(`${emoji} ${LABELS[emoji] ?? "Working…"}`);
+        statusLine = `${emoji} ${LABELS[emoji] ?? "Working…"}`;
+        await write();
       },
     },
     onError: params.onError,
