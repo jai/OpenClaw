@@ -10,7 +10,10 @@ import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveGoogleChatAccount } from "./accounts.js";
 import { sendGoogleChatMessage } from "./api.js";
 import { formatGoogleChatTextChunks } from "./format.js";
-import { findGoogleChatProgressActivity } from "./progress-activity.js";
+import {
+  describeGoogleChatProgressActivities,
+  findGoogleChatProgressActivity,
+} from "./progress-activity.js";
 import { resolveGoogleChatOutboundSpace } from "./targets.js";
 
 const OUTBOUND_MEDIA_KEYS = ["media", "mediaUrl", "path", "filePath", "fileUrl"] as const;
@@ -115,6 +118,12 @@ export async function handleGoogleChatAction({
       }
     }
 
+    const liveActivities = describeGoogleChatProgressActivities(account.accountId, space);
+    if (sourceReplyFinal !== true && liveActivities) {
+      console.warn(
+        `[googlechat] send posted beside live activity: final=${String(sourceReplyFinal)} thread=${threadId ?? "none"} session=${sessionKey ?? "none"} live=[${liveActivities}]`,
+      );
+    }
     const chunks = formatGoogleChatTextChunks(content);
     let thread = threadId ?? undefined;
     let sent: Awaited<ReturnType<typeof sendGoogleChatMessage>> = null;

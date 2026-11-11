@@ -58,3 +58,10 @@ export function findGoogleChatProgressActivity(params: {
   }
   return match;
 }
+
+export function describeGoogleChatProgressActivities(accountId: string, spaceId: string): string {
+  return [...liveActivities]
+    .filter((activity) => activity.accountId === accountId && activity.spaceId === spaceId)
+    .map((activity) => `${activity.sessionKey}@${activity.threadName ?? "top"}`)
+    .join(",");
+}
