@@ -5,6 +5,7 @@ import { GoogleChatApiError } from "./api.js";
 import type { GoogleChatIngressLifecycle } from "./monitor-ingress.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
 import "./monitor.js";
+import { findGoogleChatProgressActivity } from "./progress-activity.js";
 import type { GoogleChatEvent } from "./types.js";
 
 const apiMocks = vi.hoisted(() => ({
@@ -332,6 +333,59 @@ describe("Google Chat automatic reply target reconciliation", () => {
   it("removes an unused typing placeholder when the turn ends without a reply", async () => {
     const account = createAccount({ replyToMode: "all" });
     const core = createCore({ run: async () => {} });
+    apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+      messageName: TYPING,
+      threadName: THREAD,
+    });
+
+    await processEvent({ account, core });
+
+    expect(apiMocks.deleteGoogleChatMessage).toHaveBeenCalledExactlyOnceWith({
+      account,
+      messageName: TYPING,
+    });
+  });
+
+  it("keeps folded progress visible when the turn ends without an answer", async () => {
+    const account = createAccount({ replyToMode: "all" });
+    const core = createCore({
+      run: async () => {
+        const activity = findGoogleChatProgressActivity({
+          accountId: account.accountId,
+          spaceId: SPACE,
+          threadName: THREAD,
+        });
+        expect(await activity?.update("Checking the calendar next.", {})).toBe(true);
+      },
+    });
+    apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+      messageName: TYPING,
+      threadName: THREAD,
+    });
+
+    await processEvent({ account, core });
+
+    expect(apiMocks.deleteGoogleChatMessage).not.toHaveBeenCalled();
+    expect(apiMocks.updateGoogleChatMessage).toHaveBeenLastCalledWith({
+      account,
+      messageName: TYPING,
+      text: "Checking the calendar next.",
+    });
+  });
+
+  it("removes folded progress once an answer is posted separately", async () => {
+    const account = createAccount({ replyToMode: "all" });
+    const core = createCore({
+      run: async () => {
+        const activity = findGoogleChatProgressActivity({
+          accountId: account.accountId,
+          spaceId: SPACE,
+          threadName: THREAD,
+        });
+        await activity?.update("Checking the calendar next.", {});
+        activity?.noteSeparatePost?.();
+      },
+    });
     apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
       messageName: TYPING,
       threadName: THREAD,

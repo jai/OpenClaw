@@ -160,6 +160,12 @@ export async function handleGoogleChatAction({
     if (messageNames.length === 0) {
       return jsonResult({ ok: true, to: space, ...sent });
     }
+    findGoogleChatProgressActivity({
+      accountId: account.accountId,
+      spaceId: space,
+      threadName: deliveredThread,
+      sessionKey,
+    })?.noteSeparatePost?.();
     // Only Chat's confirmed thread proves a source reply when the send inherited it.
     const receipt = createMessageReceiptFromOutboundResults({
       results: messageNames.map((messageId) => ({
