@@ -499,3 +499,53 @@ describe("follow-up delivery channel boundary", () => {
     },
   );
 });
+
+describe("confirmed queued source delivery", () => {
+  it.each([
+    {
+      name: "complete source answer",
+      provider: "discord",
+      text: "answer",
+      status: false,
+      outcome: "delivered",
+      observed: true,
+    },
+    {
+      name: "source status notice",
+      provider: "discord",
+      text: "working",
+      status: true,
+      outcome: "delivered",
+      observed: false,
+    },
+    {
+      name: "failed source send",
+      provider: "discord",
+      text: "answer",
+      status: false,
+      outcome: "failed",
+      observed: false,
+    },
+    {
+      name: "answer to another channel",
+      provider: "imessage",
+      text: "answer",
+      status: false,
+      outcome: "delivered",
+      observed: false,
+    },
+  ] as const)(
+    "reports source delivery to the channel only after a $name",
+    async ({ provider, text, status, outcome, observed }) => {
+      const onObservedReplyDelivery = vi.fn(async () => {});
+      const defaults = createDefaults(vi.fn(async () => {}));
+      channelState.outcomes = [outcome];
+      await sendToOrigin(
+        createTurn(provider, "discord"),
+        [{ text, ...(status ? { isStatusNotice: true } : {}) }],
+        { defaults: { ...defaults, opts: { ...defaults.opts, onObservedReplyDelivery } } },
+      );
+      expect(onObservedReplyDelivery).toHaveBeenCalledTimes(observed ? 1 : 0);
+    },
+  );
+});

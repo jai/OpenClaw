@@ -46,7 +46,10 @@ import {
   retainAutomationReasoningWithFinal,
 } from "./automation-reply-payloads.js";
 import { deliverBlockReply } from "./block-reply-delivery.js";
-import { resolveFollowupDeliveryPayloads } from "./followup-delivery-payloads.js";
+import {
+  resolveFollowupDeliveryPayloads,
+  resolveFollowupPayloadContext,
+} from "./followup-delivery-payloads.js";
 import { createFollowupSpeechPreparer } from "./followup-delivery-tts.js";
 import type { InternalGetReplyOptions } from "./get-reply.types.js";
 import { resolveOriginMessageProvider } from "./origin-routing.js";
@@ -66,19 +69,6 @@ import {
 import { resolveStrandedReplyRecovery } from "./stranded-reply-recovery.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import { buildWaitingStatusPayload } from "./waiting-status.js";
-
-function resolveFollowupPayloadContext(turn: AdmittedFollowupTurn) {
-  return {
-    cfg: turn.config,
-    messageProvider: turn.queued.run.messageProvider,
-    originatingAccountId: turn.queued.originatingAccountId ?? turn.queued.run.agentAccountId,
-    originatingChannel: turn.queued.originatingChannel,
-    originatingChatType: turn.queued.originatingChatType,
-    originatingReplyToMode: turn.queued.originatingReplyToMode,
-    originatingTo: turn.queued.originatingTo,
-    originatingThreadId: turn.queued.originatingThreadId,
-  };
-}
 
 /** Resolves one final queued delivery action without performing transport I/O. */
 export async function resolveFollowupDeliveryDecision(params: {
@@ -684,6 +674,17 @@ export async function deliverFollowupDecision(params: {
               result.error ?? "unknown error"
             }`,
           );
+        }
+        // Lets the source channel settle per-turn feedback such as an activity message.
+        if (
+          result.ok &&
+          !result.ambiguous &&
+          !result.suppressed &&
+          sameChannelOrigin &&
+          kind === "final" &&
+          isReplyPayloadTerminalContent(payload)
+        ) {
+          await defaults.opts?.onObservedReplyDelivery?.();
         }
         deliveredCrossChannelOrigin ||= crossChannelOrigin;
       }
