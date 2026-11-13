@@ -12,7 +12,7 @@ import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import { shouldSuppressGoogleChatManualExecApprovalFollowupText } from "./approval-card-actions.js";
 import { getGoogleChatAccessToken } from "./auth.js";
-import type { GoogleChatCardV2, GoogleChatSpace } from "./types.js";
+import type { GoogleChatCardV2, GoogleChatMembership, GoogleChatSpace } from "./types.js";
 
 const CHAT_API_BASE = "https://chat.googleapis.com/v1";
 // format.ts renders Chat markup; apps created after 2026-10-16 default to Markdown.
@@ -301,6 +301,20 @@ export async function getGoogleChatSpace(params: {
     { method: "GET" },
     { assertDirectAdapterHandoff: params.assertDirectAdapterHandoff },
   );
+}
+
+export async function listGoogleChatSpaceMembers(params: {
+  account: ResolvedGoogleChatAccount;
+  spaceName: string;
+}): Promise<GoogleChatMembership[]> {
+  const url = new URL(`${CHAT_API_BASE}/${params.spaceName}/members`);
+  url.searchParams.set("pageSize", "100");
+  const response = await fetchJson<{ memberships?: GoogleChatMembership[] }>(
+    params.account,
+    url.toString(),
+    { method: "GET" },
+  );
+  return response.memberships ?? [];
 }
 
 export async function probeGoogleChat(account: ResolvedGoogleChatAccount): Promise<{

@@ -17,11 +17,13 @@ import {
 } from "./monitor-ingress.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
 import "./monitor.js";
+import { clearGoogleChatSpaceMembersCacheForTest } from "./space-members.js";
 import type { GoogleChatEvent } from "./types.js";
 
 const apiMocks = vi.hoisted(() => ({
   deleteGoogleChatMessage: vi.fn(),
   downloadGoogleChatMedia: vi.fn(),
+  listGoogleChatSpaceMembers: vi.fn(),
   sendGoogleChatMessage: vi.fn(),
   updateGoogleChatMessage: vi.fn(),
 }));
@@ -82,6 +84,8 @@ vi.mock("./monitor-routing.js", () => ({
 beforeEach(() => {
   apiMocks.deleteGoogleChatMessage.mockReset();
   apiMocks.downloadGoogleChatMedia.mockReset();
+  apiMocks.listGoogleChatSpaceMembers.mockReset().mockResolvedValue([]);
+  clearGoogleChatSpaceMembersCacheForTest();
   apiMocks.sendGoogleChatMessage.mockReset().mockResolvedValue(null);
   apiMocks.updateGoogleChatMessage.mockReset().mockResolvedValue({});
   accessMocks.applyGoogleChatInboundAccessPolicy.mockReset().mockResolvedValue({ ok: true });
@@ -266,6 +270,111 @@ it.each([
     accessMocks.applyGoogleChatInboundAccessPolicy.mock.calls[0]?.[0].contextBinding.sessionKey,
   ).toBe("session-1");
   expect(runTurn.mock.calls[0]?.[0].adapter.resolveTurn().route.sessionKey).toBe("session-1");
+});
+
+function classificationEvent(space: GoogleChatEvent["space"], id = "1"): GoogleChatEvent {
+  return {
+    type: "MESSAGE",
+    space,
+    message: {
+      name: `${space?.name}/messages/${id}`,
+      text: "hello",
+      sender: { name: "users/alice", displayName: "Alice", type: "HUMAN" },
+    },
+  };
+}
+
+it.each([
+  { name: "legacy DM", space: { type: "DM" }, peerKind: "direct" },
+  {
+    name: "1:1 app DM",
+    space: { spaceType: "DIRECT_MESSAGE", type: "DM", singleUserBotDm: true },
+    peerKind: "direct",
+  },
+  {
+    name: "human DM with the app added",
+    space: { spaceType: "DIRECT_MESSAGE", type: "ROOM" },
+    peerKind: "group",
+  },
+  {
+    name: "unmarked DM with two human members",
+    space: { spaceType: "DIRECT_MESSAGE" },
+    members: ["users/alice", "users/bob"],
+    peerKind: "group",
+  },
+  {
+    name: "unmarked DM with one human member",
+    space: { spaceType: "DIRECT_MESSAGE" },
+    members: ["users/alice"],
+    peerKind: "direct",
+  },
+  { name: "modern group chat", space: { spaceType: "GROUP_CHAT" }, peerKind: "group" },
+  {
+    name: "modern space over legacy DM",
+    space: { type: "DM", spaceType: "SPACE" },
+    peerKind: "group",
+  },
+] as const)("$name uses the expected access and route branch", async (testCase) => {
+  if ("members" in testCase) {
+    apiMocks.listGoogleChatSpaceMembers.mockResolvedValue(
+      testCase.members.map((name) => ({ member: { name, type: "HUMAN" }, state: "JOINED" })),
+    );
+  }
+  const { buildContext, runTurn, dispatch } = createHarness();
+  await dispatch(classificationEvent({ name: "spaces/CLASSIFY", ...testCase.space }));
+
+  const isGroup = testCase.peerKind === "group";
+  expect(accessMocks.applyGoogleChatInboundAccessPolicy).toHaveBeenCalledWith(
+    expect.objectContaining({ isGroup }),
+  );
+  expect(inboundMocks.resolveAgentRoute).toHaveBeenCalledWith(
+    expect.objectContaining({ peer: { kind: testCase.peerKind, id: "spaces/CLASSIFY" } }),
+  );
+  expect(buildContext).toHaveBeenCalledWith(
+    expect.objectContaining({
+      conversation: expect.objectContaining({ kind: isGroup ? "channel" : "direct" }),
+      extra: expect.objectContaining({ ChatType: isGroup ? "channel" : "direct" }),
+    }),
+  );
+  expect(runTurn).toHaveBeenCalledOnce();
+});
+
+it("keeps an unmarked DM direct when the member lookup fails", async () => {
+  apiMocks.listGoogleChatSpaceMembers.mockRejectedValue(new Error("403"));
+  const { runTurn, dispatch } = createHarness();
+  await dispatch(classificationEvent({ name: "spaces/UNMARKED", spaceType: "DIRECT_MESSAGE" }));
+
+  expect(accessMocks.applyGoogleChatInboundAccessPolicy).toHaveBeenCalledWith(
+    expect.objectContaining({ isGroup: false }),
+  );
+  expect(runTurn).toHaveBeenCalledOnce();
+});
+
+it("labels a human DM with its members and reuses the cached lookup", async () => {
+  apiMocks.listGoogleChatSpaceMembers.mockResolvedValue([
+    {
+      member: { name: "users/owner", displayName: "Alice Example", type: "HUMAN" },
+      state: "JOINED",
+    },
+    { member: { name: "users/guest", displayName: "Bob Example", type: "HUMAN" } },
+    { member: { name: "users/app", displayName: "Assistant", type: "BOT" }, state: "JOINED" },
+  ]);
+  const { buildContext, dispatch } = createHarness();
+  const space = { name: "spaces/HUMANDM", spaceType: "DIRECT_MESSAGE", type: "ROOM" };
+  for (const id of ["1", "2"]) {
+    await dispatch(classificationEvent(space, id));
+  }
+
+  expect(buildContext).toHaveBeenCalledWith(
+    expect.objectContaining({
+      conversation: {
+        kind: "channel",
+        id: "spaces/HUMANDM",
+        label: "DM: Alice Example, Bob Example",
+      },
+    }),
+  );
+  expect(apiMocks.listGoogleChatSpaceMembers).toHaveBeenCalledOnce();
 });
 
 it("suppresses bot loops before creating typing messages", async () => {
