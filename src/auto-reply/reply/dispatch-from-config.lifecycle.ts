@@ -30,6 +30,7 @@ import {
 import { isExplicitCommandTurnContext } from "../command-turn-detection.js";
 import { isActiveRunSafeCommandTurn } from "../commands-registry.js";
 import { waitForReplyDispatcherSettlement } from "../dispatch-dispatcher.js";
+import type { ReplyDeliveryObservation } from "../get-reply-options.types.js";
 import {
   createAbortAwareDispatcher,
   DispatchReplyOperationAbortedError,
@@ -615,13 +616,13 @@ export function createDispatchReplyOperationCoordinator(
     );
   };
 
-  const markObservedReplyDelivery = async () => {
+  const markObservedReplyDelivery = async (observation?: ReplyDeliveryObservation) => {
     if (observedReplyDelivery) {
       return;
     }
     observedReplyDelivery = true;
     dispatchReplyOperation?.watchdog.progress("finalization", "reply:delivery_observed");
-    await params.replyOptions?.onObservedReplyDelivery?.();
+    await params.replyOptions?.onObservedReplyDelivery?.(observation);
   };
   const getReplyOptions = (): DispatchFromConfigParams["replyOptions"] => {
     const abortSignal = getDispatchAbortSignal();

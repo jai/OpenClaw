@@ -10,6 +10,7 @@ import { createInternalHookEvent, triggerInternalHook } from "../../hooks/intern
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 import type { HandleCommandsParams } from "./commands-types.js";
+import type { InternalGetReplyOptions } from "./get-reply.types.js";
 
 export type ResetCommandAction = "new" | "reset";
 
@@ -67,7 +68,7 @@ export async function emitResetCommandHooks(params: {
   previousSessionEntry?: HandleCommandsParams["previousSessionEntry"];
   previousSessionMemory?: HandleCommandsParams["previousSessionMemory"];
   previousSessionResetMessages?: unknown[];
-  onObservedReplyDelivery?: () => Promise<void> | void;
+  onObservedReplyDelivery?: InternalGetReplyOptions["onObservedReplyDelivery"];
   workspaceDir: string;
 }): Promise<{ routedReply: boolean }> {
   const hookAgentId =
@@ -118,7 +119,7 @@ export async function emitResetCommandHooks(params: {
         replyKind: "final",
       });
       if (result.delivered) {
-        await params.onObservedReplyDelivery?.();
+        await params.onObservedReplyDelivery?.({ source: "channel" });
       }
       routedReply = result.delivered || result.suppressed === true;
     }

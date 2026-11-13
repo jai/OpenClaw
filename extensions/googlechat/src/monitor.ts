@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { resolveAgentConfig } from "openclaw/plugin-sdk/agent-scope-runtime";
 import {
   formatInboundMediaUnavailableText,
   recordChannelBotPairLoopAndCheckSuppression,
@@ -16,10 +15,8 @@ import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import { createRuntimeConfigReader } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { resolveWebhookPath } from "openclaw/plugin-sdk/webhook-ingress";
-import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import {
   deleteGoogleChatMessage,
-  downloadGoogleChatMedia,
   GoogleChatApiError,
   sendGoogleChatMessage,
   updateGoogleChatMessage,
@@ -27,6 +24,7 @@ import {
 import { maybeHandleGoogleChatApprovalCardClick } from "./approval-card-click.js";
 import { formatGoogleChatTextChunks } from "./format.js";
 import { applyGoogleChatInboundAccessPolicy } from "./monitor-access.js";
+import { downloadGoogleChatAttachment } from "./monitor-attachments.js";
 import {
   createGoogleChatIngressMonitor,
   type GoogleChatIngressLifecycle,
@@ -34,6 +32,7 @@ import {
 import {
   createGoogleChatTypingMessage,
   deliverGoogleChatReply,
+  resolveBotDisplayName,
   type GoogleChatTypingMessage,
 } from "./monitor-reply-delivery.js";
 import { resolveGoogleChatReplyThread } from "./monitor-reply-target.js";
@@ -49,9 +48,10 @@ import type {
   WebhookTarget,
 } from "./monitor-types.js";
 import { warnAppPrincipalMisconfiguration } from "./monitor-webhook.js";
+import { fitsGoogleChatActivity, registerGoogleChatActivityProgress } from "./progress-activity.js";
 import { getGoogleChatRuntime } from "./runtime.js";
 import { resolveGoogleChatInboundIsGroup, resolveGoogleChatMemberLabel } from "./space-members.js";
-import type { GoogleChatAttachment, GoogleChatEvent } from "./types.js";
+import type { GoogleChatEvent } from "./types.js";
 
 setGoogleChatWebhookEventProcessor(processGoogleChatEvent);
 
@@ -59,22 +59,6 @@ function logVerbose(core: GoogleChatCoreRuntime, runtime: GoogleChatRuntimeEnv, 
   if (core.logging.shouldLogVerbose()) {
     runtime.log?.(`[googlechat] ${message}`);
   }
-}
-
-function resolveBotDisplayName(params: {
-  accountName?: string;
-  agentId: string;
-  config: OpenClawConfig;
-}): string {
-  const { accountName, agentId, config } = params;
-  if (accountName?.trim()) {
-    return accountName.trim();
-  }
-  const agent = resolveAgentConfig(config, agentId);
-  if (agent?.name?.trim()) {
-    return agent.name.trim();
-  }
-  return agent?.identity?.name?.trim() || "OpenClaw";
 }
 
 async function processGoogleChatEvent(
@@ -208,7 +192,12 @@ async function processGoogleChatEvent(
   };
   for (const [index, attachment] of attachments.entries()) {
     try {
-      const attachmentData = await downloadAttachment(attachment, account, mediaMaxMb, core);
+      const attachmentData = await downloadGoogleChatAttachment(
+        attachment,
+        account,
+        mediaMaxMb,
+        core,
+      );
       if (attachmentData) {
         mediaInputs[index] = {
           path: attachmentData.path,
@@ -383,6 +372,7 @@ async function processGoogleChatEvent(
     }
   }
 
+  const chunkLimit = account.config.textChunkLimit ?? 4000;
   const activity = typingMessage
     ? await createGoogleChatStatusMessage({
         enabled: config.messages?.statusReactions?.enabled === true,
@@ -395,7 +385,22 @@ async function processGoogleChatEvent(
   // without a separately posted answer, e.g. after handing work to a subagent.
   let foldedProgressText: string | undefined;
   let answerPosted = false;
+  const unregisterProgressActivity =
+    activity && typingMessage
+      ? registerGoogleChatActivityProgress({
+          accountId: account.accountId,
+          spaceId,
+          sessionKey: dispatchSessionKey,
+          messageName: typingMessage.name,
+          threadName: typingMessage.deliveredThreadName,
+          chunkLimit,
+          activity,
+          onFolded: (text) => (foldedProgressText = text),
+          onSeparatePost: () => (answerPosted = true),
+        })
+      : undefined;
   const stopActivity = async () => {
+    unregisterProgressActivity?.();
     await activity?.stop();
   };
   let deferred = false;
@@ -502,11 +507,9 @@ async function processGoogleChatEvent(
             deliver: async (payload, info) => {
               const replyToId = resolveReplyThreadName(payload);
               const progress = isProgressReply(payload, info?.kind);
-              if (progress && activity && replyToId === resolveReplyThreadName({ text: "" })) {
-                const text = formatGoogleChatTextChunks(
-                  payload.text ?? "",
-                  account.config.textChunkLimit ?? 4000,
-                )[0];
+              const folds = progress && fitsGoogleChatActivity(payload, chunkLimit);
+              if (folds && activity && replyToId === resolveReplyThreadName({ text: "" })) {
+                const [text] = formatGoogleChatTextChunks(payload.text ?? "", chunkLimit);
                 if (text) {
                   try {
                     const updated = await activity.updateText(text);
@@ -578,8 +581,13 @@ async function processGoogleChatEvent(
           replyPipeline: {},
           replyOptions: {
             commentaryPayloadsEnabled: false,
-            onObservedReplyDelivery: async () => {
+            onObservedReplyDelivery: async (observation) => {
               hasVisibleAnswer = true;
+              // A folded progress send can itself satisfy the source reply.
+              // Only a separate post makes that activity safe to remove.
+              if (observation?.source !== "message-tool" || !foldedProgressText) {
+                answerPosted = true;
+              }
               await settleStatus();
             },
             ...(activity
@@ -625,28 +633,6 @@ async function processGoogleChatEvent(
       }
     }
   }
-}
-
-async function downloadAttachment(
-  attachment: GoogleChatAttachment,
-  account: ResolvedGoogleChatAccount,
-  mediaMaxMb: number,
-  core: GoogleChatCoreRuntime,
-): Promise<{ path: string; contentType?: string } | null> {
-  const resourceName = attachment.attachmentDataRef?.resourceName;
-  if (!resourceName) {
-    return null;
-  }
-  const maxBytes = mediaMaxMb * 1024 * 1024;
-  const downloaded = await downloadGoogleChatMedia({ account, resourceName, maxBytes });
-  const saved = await core.channel.media.saveMediaBuffer(
-    downloaded.buffer,
-    downloaded.contentType ?? attachment.contentType,
-    "inbound",
-    maxBytes,
-    attachment.contentName,
-  );
-  return { path: saved.path, contentType: saved.contentType };
 }
 
 export async function startGoogleChatMonitor(

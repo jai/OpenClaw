@@ -305,7 +305,7 @@ export async function prepareReplyAgentPayloads(state: {
     return recovery.kind === "diagnostic" ? recovery.payload : undefined;
   };
   if (sourceReplyDelivery === "delivered") {
-    await opts?.onObservedReplyDelivery?.();
+    await opts?.onObservedReplyDelivery?.({ source: "message-tool" });
   }
   const currentMessageId = sessionCtx.MessageSidFull ?? sessionCtx.MessageSid;
   // A terminal fallback is built separately after normal payload filtering.
@@ -580,7 +580,7 @@ export async function prepareReplyAgentPayloads(state: {
     replyPayloads = retainAutomationReasoningWithFinal(replyPayloads);
   }
   if (sourceReplyDelivery !== "delivered" && completion.outcome === "delivered") {
-    await opts?.onObservedReplyDelivery?.();
+    await opts?.onObservedReplyDelivery?.({ source: "message-tool" });
   }
   const replyPayloadsWithoutToolWarnings = waitingStatusPayload
     ? replyPayloads.filter((payload) => !isGeneratedToolWarning(payload))

@@ -783,6 +783,9 @@ describe("createFollowupRunner", () => {
       })(turn.queued);
 
       expect(onObservedReplyDelivery).toHaveBeenCalledTimes(visible ? 1 : 0);
+      if (visible) {
+        expect(onObservedReplyDelivery).toHaveBeenCalledWith({ source: "message-tool" });
+      }
       expect(endCorrelation).toHaveBeenCalledExactlyOnceWith({
         visibleReplySent: visible,
         failed: false,

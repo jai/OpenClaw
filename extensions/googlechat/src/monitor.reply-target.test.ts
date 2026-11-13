@@ -5,6 +5,7 @@ import { GoogleChatApiError } from "./api.js";
 import type { GoogleChatIngressLifecycle } from "./monitor-ingress.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
 import "./monitor.js";
+import { findGoogleChatProgressActivity } from "./progress-activity.js";
 import type { GoogleChatEvent } from "./types.js";
 
 const apiMocks = vi.hoisted(() => ({
@@ -346,6 +347,88 @@ describe("Google Chat automatic reply target reconciliation", () => {
     });
   });
 
+  it("sends progress that needs several Chat messages separately instead of cutting it", async () => {
+    const account = createAccount({ replyToMode: "all", textChunkLimit: 40 });
+    const core = createCore({
+      run: async () => {
+        const activity = findGoogleChatProgressActivity({
+          accountId: account.accountId,
+          spaceId: SPACE,
+          threadName: THREAD,
+        });
+        expect(await activity?.update("word ".repeat(30).trim(), {})).toBe(false);
+      },
+    });
+    apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+      messageName: TYPING,
+      threadName: THREAD,
+    });
+
+    await processEvent({ account, core });
+
+    expect(apiMocks.updateGoogleChatMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining("word word") }),
+    );
+  });
+
+  it.each([false, true])("keeps a folded source reply visible (deferred=%s)", async (deferred) => {
+    const account = createAccount({ replyToMode: "all" });
+    const core = createCore({
+      run: async (_delivery, options, lifecycle) => {
+        const activity = findGoogleChatProgressActivity({
+          accountId: account.accountId,
+          spaceId: SPACE,
+          threadName: THREAD,
+        });
+        expect(await activity?.update("Checking the calendar next.", {})).toBe(true);
+        if (deferred) {
+          lifecycle?.onDeferred?.();
+        }
+        await options?.onObservedReplyDelivery?.({ source: "message-tool" });
+      },
+    });
+    apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+      messageName: TYPING,
+      threadName: THREAD,
+    });
+
+    await processEvent({ account, core });
+
+    expect(apiMocks.deleteGoogleChatMessage).not.toHaveBeenCalled();
+    expect(apiMocks.updateGoogleChatMessage).toHaveBeenLastCalledWith({
+      account,
+      messageName: TYPING,
+      text: "Checking the calendar next.",
+    });
+  });
+
+  it("removes folded progress once an answer is posted separately", async () => {
+    const account = createAccount({ replyToMode: "all" });
+    const core = createCore({
+      run: async (_delivery, options) => {
+        const activity = findGoogleChatProgressActivity({
+          accountId: account.accountId,
+          spaceId: SPACE,
+          threadName: THREAD,
+        });
+        await activity?.update("Checking the calendar next.", {});
+        activity?.noteSeparatePost?.();
+        await options?.onObservedReplyDelivery?.({ source: "message-tool" });
+      },
+    });
+    apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+      messageName: TYPING,
+      threadName: THREAD,
+    });
+
+    await processEvent({ account, core });
+
+    expect(apiMocks.deleteGoogleChatMessage).toHaveBeenCalledExactlyOnceWith({
+      account,
+      messageName: TYPING,
+    });
+  });
+
   it("keeps an automatic status notice visible when the turn ends without an answer", async () => {
     const account = createAccount({ replyToMode: "all" });
     const core = createCore({
@@ -650,6 +733,12 @@ describe("Google Chat chronological final replies", () => {
       run: async (_delivery, options, lifecycle) => {
         observed = options?.onObservedReplyDelivery;
         settled = lifecycle?.onSettled;
+        const activity = findGoogleChatProgressActivity({
+          accountId: account.accountId,
+          spaceId: SPACE,
+          threadName: THREAD,
+        });
+        await activity?.update("Checking the calendar next.", {});
         lifecycle?.onDeferred?.();
       },
     });
@@ -666,7 +755,7 @@ describe("Google Chat chronological final replies", () => {
     });
     expect(apiMocks.deleteGoogleChatMessage).not.toHaveBeenCalled();
     expect(observed).toBeTypeOf("function");
-    await observed?.();
+    await observed?.({ source: "channel" });
     settled?.();
     await vi.waitFor(() =>
       expect(apiMocks.deleteGoogleChatMessage).toHaveBeenCalledExactlyOnceWith({

@@ -281,7 +281,7 @@ export async function resolveFollowupDeliveryDecision(params: {
       : undefined,
   });
   if (!completedSourceDelivery && completion.outcome === "delivered") {
-    await opts?.onObservedReplyDelivery?.();
+    await opts?.onObservedReplyDelivery?.({ source: "message-tool" });
   }
   const recovery =
     explicitSilence ||
@@ -422,7 +422,7 @@ export async function deliverFollowupDecision(params: {
   runId: string;
   runFollowup: (run: FollowupRun) => Promise<void>;
   kind?: ReplyDispatchKind;
-  onObservedReplyDelivery?: () => Promise<void> | void;
+  onObservedReplyDelivery?: InternalGetReplyOptions["onObservedReplyDelivery"];
 }) {
   const { decision, turn, defaults } = params;
   if (decision.kind === "suppress") {
@@ -557,7 +557,7 @@ export async function deliverFollowupDecision(params: {
         !delivery.pending &&
         (!originRoutable || sameChannelOrigin)
       ) {
-        await onObservedReplyDelivery?.();
+        await onObservedReplyDelivery?.({ source: "channel" });
       }
     }
   };
@@ -673,7 +673,7 @@ export async function deliverFollowupDecision(params: {
         for (const correlation of turn.queued.deliveryCorrelations ?? []) {
           correlation.onReplyDelivered?.(payload);
         }
-        await onObservedReplyDelivery?.();
+        await onObservedReplyDelivery?.({ source: "channel" });
         if (!result.ok) {
           logVerbose(
             `followup queue: route-reply partially failed after delivery: ${

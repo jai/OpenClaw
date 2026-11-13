@@ -198,6 +198,10 @@ export type ReasoningStreamPayload = Pick<
 /** Return false until the channel has accepted operator-visible progress. */
 type ProgressCallbackResult = boolean | void;
 
+export type ReplyDeliveryObservation = {
+  source: "message-tool" | "channel";
+};
+
 /** Reply generation options shared by auto-reply, webchat, channels, and tests. */
 export type GetReplyOptions = {
   /** Host-issued capability for the exact findings acknowledged by the current operator. */
@@ -478,8 +482,8 @@ export type GetReplyOptions = {
   onQueuedFollowupSettled?: () => Promise<void> | void;
   /** Allow channel-owned progress UI while final/source reply delivery remains message-tool-only. */
   allowProgressCallbacksWhenSourceDeliverySuppressed?: boolean;
-  /** Called when a suppressed source reply mode observes visible delivery through another path. */
-  onObservedReplyDelivery?: () => Promise<void> | void;
+  /** Reports visible source delivery, including message-tool progress promoted to a completed reply. */
+  onObservedReplyDelivery?: (observation?: ReplyDeliveryObservation) => Promise<void> | void;
   /** Emit tool result summaries for channel-owned progress UI even when verbose is off. */
   forceToolResultProgress?: boolean;
   disableBlockStreaming?: boolean;

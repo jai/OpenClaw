@@ -1012,7 +1012,7 @@ describe("sendPolicy deny — suppress delivery, not processing (#53328)", () =>
     const dispatcher = createDispatcher();
     const observedReplyDelivery = vi.fn();
     const replyResolver = vi.fn(async (_ctx: MsgContext, opts?: GetReplyOptions) => {
-      await opts?.onObservedReplyDelivery?.();
+      await opts?.onObservedReplyDelivery?.({ source: "message-tool" });
       return undefined;
     });
     const ctx = buildTestCtx({
@@ -1032,7 +1032,7 @@ describe("sendPolicy deny — suppress delivery, not processing (#53328)", () =>
       },
     });
 
-    expect(observedReplyDelivery).toHaveBeenCalledTimes(1);
+    expect(observedReplyDelivery).toHaveBeenCalledExactlyOnceWith({ source: "message-tool" });
     expect(dispatcher.sendFinalReply).not.toHaveBeenCalled();
     expect(result.queuedFinal).toBe(false);
     expect(result.observedReplyDelivery).toBe(true);

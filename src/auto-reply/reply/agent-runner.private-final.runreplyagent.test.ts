@@ -464,6 +464,7 @@ describe("runReplyAgent stranded message_tool_only finals (#85714)", () => {
             text: finalAssistantText,
           });
           expect(onObservedReplyDelivery).toHaveBeenCalledTimes(1);
+          expect(onObservedReplyDelivery).toHaveBeenCalledWith({ source: "message-tool" });
         }
       }
     },

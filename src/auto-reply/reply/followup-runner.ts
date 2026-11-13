@@ -19,6 +19,7 @@ import { withSessionControllerOwner } from "../../sessions/session-controller.co
 import type { ReplyOperation } from "../../sessions/session-controller.js";
 import { deferSessionControllerClaimBeforeExecution } from "../../sessions/session-controller.mailbox-claim.js";
 import { getReplyOperationSessionReader } from "../../sessions/session-controller.state.js";
+import type { ReplyDeliveryObservation } from "../get-reply-options.types.js";
 import { getReplyPayloadMetadata } from "../reply-payload.js";
 import type { ReplyPayload } from "../types.js";
 import { withAgentTurnCompletion } from "./agent-runner-completion.js";
@@ -140,12 +141,12 @@ export function createFollowupRunner(
     let visibleReplySent = false;
     let deliveryPending = false;
     let sourceRetryPending = false;
-    const onObservedReplyDelivery = async () => {
+    const onObservedReplyDelivery = async (observation?: ReplyDeliveryObservation) => {
       if (visibleReplySent) {
         return;
       }
       visibleReplySent = true;
-      await defaults.opts?.onObservedReplyDelivery?.();
+      await defaults.opts?.onObservedReplyDelivery?.(observation);
     };
     const deliverProgress = async (
       turn: AdmittedFollowupTurn,
@@ -304,7 +305,7 @@ export function createFollowupRunner(
         execution.execution.outcome.kind === "settled" &&
         hasCompletedSourceReplyDeliveryEvidence(execution.execution.outcome.result)
       ) {
-        await onObservedReplyDelivery();
+        await onObservedReplyDelivery({ source: "message-tool" });
       }
       const deliveryOpts = {
         ...defaults.opts,

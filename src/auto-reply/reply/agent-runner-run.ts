@@ -516,7 +516,9 @@ export async function runReplyAgent(
         return;
       }
       try {
-        void Promise.resolve(runOpts?.onObservedReplyDelivery?.()).catch(logObservedDeliveryError);
+        void Promise.resolve(runOpts?.onObservedReplyDelivery?.({ source: "message-tool" })).catch(
+          logObservedDeliveryError,
+        );
       } catch (error) {
         logObservedDeliveryError(error);
       }
