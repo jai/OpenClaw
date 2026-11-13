@@ -92,8 +92,10 @@ export function registerGoogleChatActivityProgress(params: {
     ...(params.threadName?.trim() ? { threadName: params.threadName.trim() } : {}),
     sessionKey: params.sessionKey,
     update: async (text, hooks) => {
-      const chunk = formatGoogleChatTextChunks(text, params.chunkLimit)[0];
-      if (!chunk || activity.isClosed()) {
+      // Progress that needs several Chat messages is sent normally instead of being cut.
+      const chunks = formatGoogleChatTextChunks(text, params.chunkLimit);
+      const chunk = chunks[0];
+      if (!chunk || chunks.length > 1 || activity.isClosed()) {
         return false;
       }
       hooks.assertDirectAdapterHandoff?.();
@@ -106,4 +108,12 @@ export function registerGoogleChatActivityProgress(params: {
     },
     noteSeparatePost: params.onSeparatePost,
   });
+}
+
+/** Media cannot live in the activity message, so such replies are delivered normally. */
+export function hasGoogleChatMedia(payload: {
+  mediaUrl?: string | null;
+  mediaUrls?: readonly string[];
+}): boolean {
+  return Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
 }

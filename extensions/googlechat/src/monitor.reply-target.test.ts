@@ -346,6 +346,30 @@ describe("Google Chat automatic reply target reconciliation", () => {
     });
   });
 
+  it("sends progress that needs several Chat messages separately instead of cutting it", async () => {
+    const account = createAccount({ replyToMode: "all", textChunkLimit: 40 });
+    const core = createCore({
+      run: async () => {
+        const activity = findGoogleChatProgressActivity({
+          accountId: account.accountId,
+          spaceId: SPACE,
+          threadName: THREAD,
+        });
+        expect(await activity?.update("word ".repeat(30).trim(), {})).toBe(false);
+      },
+    });
+    apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+      messageName: TYPING,
+      threadName: THREAD,
+    });
+
+    await processEvent({ account, core });
+
+    expect(apiMocks.updateGoogleChatMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining("word word") }),
+    );
+  });
+
   it("keeps folded progress visible when the turn ends without an answer", async () => {
     const account = createAccount({ replyToMode: "all" });
     const core = createCore({
