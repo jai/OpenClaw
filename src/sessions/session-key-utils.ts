@@ -129,6 +129,15 @@ export function isAcpSessionKey(sessionKey: string | undefined | null): boolean 
   return hasSessionKeyPrefix(sessionKey, "acp:");
 }
 
+// An opaque sub-session partitions conversation history but is not a physical
+// delivery thread. Remove its terminal hash only when interpreting a route.
+function stripOpaqueSubsessionSuffix(sessionKey: string | undefined): string | undefined {
+  const route = sessionKey && (parseAgentSessionKey(sessionKey)?.rest ?? sessionKey);
+  return route?.toLowerCase().startsWith("googlechat:group:")
+    ? sessionKey?.replace(/:subsession:[a-f0-9]{16}$/i, "")
+    : sessionKey;
+}
+
 /** Stored ACP bindings and stale ACP keys both belong to ACP dispatch, never local fallback. */
 export function resolveSessionDispatchKind(
   sessionKey: string | undefined | null,
@@ -140,7 +149,7 @@ export function resolveSessionDispatchKind(
 export function parseThreadSessionSuffix(
   sessionKey: string | undefined | null,
 ): ParsedThreadSessionSuffix {
-  const raw = normalizeOptionalString(sessionKey);
+  const raw = stripOpaqueSubsessionSuffix(normalizeOptionalString(sessionKey));
   if (!raw) {
     return { baseSessionKey: undefined, threadId: undefined };
   }
@@ -209,7 +218,7 @@ export function parseSessionDeliveryRoute(
 export function parseRawSessionConversationRef(
   sessionKey: string | undefined | null,
 ): RawSessionConversationRef | null {
-  const raw = normalizeOptionalString(sessionKey);
+  const raw = stripOpaqueSubsessionSuffix(normalizeOptionalString(sessionKey));
   if (!raw) {
     return null;
   }
