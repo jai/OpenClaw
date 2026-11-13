@@ -37,28 +37,41 @@ export function isGoogleChatSpaceTarget(value: string): boolean {
   return normalizeLowercaseStringOrEmpty(value).startsWith("spaces/");
 }
 
-function resolveGoogleChatSpaceChatType(space: GoogleChatSpace): "direct" | "group" | undefined {
+export function isGoogleChatDirectMessageSpace(space: GoogleChatSpace): boolean {
+  return (space.spaceType ?? "").toUpperCase() === "DIRECT_MESSAGE";
+}
+
+/**
+ * Returns undefined for a DIRECT_MESSAGE space that does not say whether it is
+ * the 1:1 app DM; callers decide how to resolve that from membership.
+ */
+export function resolveGoogleChatSpaceChatType(
+  space: GoogleChatSpace,
+): "direct" | "group" | undefined {
   const spaceType = (space.spaceType ?? "").toUpperCase();
+  const legacyType = (space.type ?? "").toUpperCase();
   // The current field wins when both current and deprecated fields are present.
   if (spaceType === "DIRECT_MESSAGE") {
-    return "direct";
+    // A DM between two humans that has the app added is also DIRECT_MESSAGE.
+    // Only the 1:1 app DM sets singleUserBotDm; its deprecated type is DM, not ROOM.
+    if (space.singleUserBotDm === true || legacyType === "DM") {
+      return "direct";
+    }
+    if (space.singleUserBotDm === false || legacyType === "ROOM") {
+      return "group";
+    }
+    return undefined;
   }
   if (spaceType === "SPACE" || spaceType === "GROUP_CHAT") {
     return "group";
   }
-  if (space.singleUserBotDm === true || (space.type ?? "").toUpperCase() === "DM") {
+  if (space.singleUserBotDm === true || legacyType === "DM") {
     return "direct";
   }
-  if ((space.type ?? "").toUpperCase() === "ROOM") {
+  if (legacyType === "ROOM") {
     return "group";
   }
   return undefined;
-}
-
-export function isGoogleChatGroupSpace(space: GoogleChatSpace): boolean {
-  // Legacy webhook payloads can omit type metadata. Preserve their historical
-  // group default while outbound routing requires an exact API classification.
-  return resolveGoogleChatSpaceChatType(space) !== "direct";
 }
 
 function stripMessageSuffix(target: string): string {
@@ -114,8 +127,9 @@ export async function resolveGoogleChatOutboundSessionRoute(
   if (!isGoogleChatSpaceTarget(spaceName)) {
     return null;
   }
+  // findDirectMessage returns the app's own 1:1 DM with the user.
   let chatType = resolvedSpace.resource
-    ? resolveGoogleChatSpaceChatType(resolvedSpace.resource)
+    ? (resolveGoogleChatSpaceChatType(resolvedSpace.resource) ?? "direct")
     : undefined;
   if (!chatType) {
     try {

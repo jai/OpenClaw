@@ -12,7 +12,10 @@ import {
   registerGoogleChatManualApprovalFollowupSuppression,
   unregisterGoogleChatManualApprovalFollowupSuppression,
 } from "./approval-card-actions.js";
-import { isGoogleChatGroupSpace, resolveGoogleChatOutboundSessionRoute } from "./targets.js";
+import {
+  resolveGoogleChatOutboundSessionRoute,
+  resolveGoogleChatSpaceChatType,
+} from "./targets.js";
 
 const mocks = vi.hoisted(() => ({
   buildHostnameAllowlistPolicyFromSuffixAllowlist: vi.fn((hosts: string[]) => ({
@@ -169,12 +172,23 @@ function requestBody(mock: ReturnType<typeof vi.fn>): Record<string, unknown> {
   return JSON.parse(init.body);
 }
 
-it("classifies current and legacy space metadata through the group boundary", () => {
-  expect(isGoogleChatGroupSpace({ spaceType: "DIRECT_MESSAGE", type: "ROOM" })).toBe(false);
-  expect(isGoogleChatGroupSpace({ spaceType: "SPACE", type: "DM" })).toBe(true);
-  expect(isGoogleChatGroupSpace({ singleUserBotDm: true })).toBe(false);
-  expect(isGoogleChatGroupSpace({ type: "ROOM" })).toBe(true);
-  expect(isGoogleChatGroupSpace({})).toBe(true);
+it.each([
+  {
+    space: { spaceType: "DIRECT_MESSAGE", type: "DM", singleUserBotDm: true },
+    chatType: "direct",
+  },
+  { space: { spaceType: "DIRECT_MESSAGE", singleUserBotDm: true }, chatType: "direct" },
+  { space: { spaceType: "DIRECT_MESSAGE", type: "DM" }, chatType: "direct" },
+  // A DM between two humans that has the app added.
+  { space: { spaceType: "DIRECT_MESSAGE", type: "ROOM" }, chatType: "group" },
+  { space: { spaceType: "DIRECT_MESSAGE", singleUserBotDm: false }, chatType: "group" },
+  { space: { spaceType: "DIRECT_MESSAGE" }, chatType: undefined },
+  { space: { spaceType: "SPACE", type: "DM" }, chatType: "group" },
+  { space: { singleUserBotDm: true }, chatType: "direct" },
+  { space: { type: "ROOM" }, chatType: "group" },
+  { space: {}, chatType: undefined },
+] as const)("classifies $space as $chatType", ({ space, chatType }) => {
+  expect(resolveGoogleChatSpaceChatType(space)).toBe(chatType);
 });
 describe("outbound session routing", () => {
   it.each([
@@ -208,6 +222,17 @@ describe("outbound session routing", () => {
       });
     },
   );
+
+  it.each([
+    [{ spaceType: "DIRECT_MESSAGE", type: "DM", singleUserBotDm: true }, "direct"],
+    [{ spaceType: "DIRECT_MESSAGE", type: "ROOM" }, "group"],
+  ] as const)("classifies space lookup %o as %s", async (space, kind) => {
+    stubResponse(jsonResponse({ name: "spaces/AAA", ...space }));
+    await expect(sessionRoute()).resolves.toMatchObject({
+      peer: { kind, id: "spaces/AAA" },
+      chatType: kind,
+    });
+  });
 
   it("rejects an unclassified space response", async () => {
     stubResponse(jsonResponse({ name: "spaces/AAA" }));
