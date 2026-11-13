@@ -348,6 +348,7 @@ describe("sendGoogleChatMessage", () => {
     expect(String(url)).toContain("messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD");
     expect(requestBody(fetchMock)).toEqual({
       text: "hello",
+      markupSyntax: "MARKUP_SYNTAX_CHAT",
       thread: { name: "spaces/AAA/threads/xyz" },
       cardsV2,
     });
@@ -407,7 +408,11 @@ it("updates text and cardsV2 with a matching update mask", async () => {
   expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
     "spaces/AAA/messages/123?updateMask=text,cardsV2",
   );
-  expect(requestBody(fetchMock)).toEqual({ text: "Resolved", cardsV2 });
+  expect(requestBody(fetchMock)).toEqual({
+    text: "Resolved",
+    cardsV2,
+    markupSyntax: "MARKUP_SYNTAX_CHAT",
+  });
 });
 function mockTicket(payload: Record<string, unknown>) {
   mocks.verifyIdToken.mockReset().mockResolvedValue({

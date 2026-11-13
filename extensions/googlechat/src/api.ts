@@ -15,6 +15,8 @@ import { getGoogleChatAccessToken } from "./auth.js";
 import type { GoogleChatCardV2, GoogleChatSpace } from "./types.js";
 
 const CHAT_API_BASE = "https://chat.googleapis.com/v1";
+// format.ts renders Chat markup; apps created after 2026-10-16 default to Markdown.
+const GOOGLE_CHAT_MARKUP_SYNTAX = "MARKUP_SYNTAX_CHAT";
 const GOOGLECHAT_API_TIMEOUT_MS = 30_000;
 const GOOGLECHAT_MEDIA_TIMEOUT_GRACE_MS = 30_000;
 const GOOGLECHAT_MEDIA_MIN_BYTES_PER_SECOND = 256 * 1024;
@@ -220,6 +222,7 @@ export async function sendGoogleChatMessage(
         text: text || undefined,
         cardsV2: cardsV2?.length ? cardsV2 : undefined,
         thread: usableThread ? { name: usableThread } : undefined,
+        markupSyntax: text ? GOOGLE_CHAT_MARKUP_SYNTAX : undefined,
       }),
     },
     {
@@ -247,7 +250,11 @@ export async function updateGoogleChatMessage(params: {
   const url = `${CHAT_API_BASE}/${messageName}?updateMask=${updateMask.join(",")}`;
   const result = await fetchJson<{ name?: string }>(account, url, {
     method: "PATCH",
-    body: JSON.stringify({ text, cardsV2 }),
+    body: JSON.stringify({
+      text,
+      cardsV2,
+      markupSyntax: text !== undefined ? GOOGLE_CHAT_MARKUP_SYNTAX : undefined,
+    }),
   });
   return { messageName: result.name };
 }
