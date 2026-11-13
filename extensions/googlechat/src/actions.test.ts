@@ -70,12 +70,89 @@ it.each([
     text,
     thread,
   });
-  expect(result.details).toEqual({
+  expect(result.details).toMatchObject({
     ok: true,
     to: "spaces/AAA",
     messageName: "spaces/AAA/messages/msg-1",
     threadName: "spaces/AAA/threads/thread-1",
+    receipt: {
+      platformMessageIds: ["spaces/AAA/messages/msg-1"],
+      threadId: "spaces/AAA/threads/thread-1",
+    },
   });
+});
+
+it("renders message-tool Markdown for Google Chat before sending", async () => {
+  sendGoogleChatMessage.mockResolvedValue({ messageName: "spaces/AAA/messages/msg-1" });
+
+  await send({
+    to: "spaces/AAA",
+    message: "**Completed ✅**\n\nThe [tracker item](https://example.com/item) is updated.",
+    threadId: "spaces/AAA/threads/source",
+  });
+
+  expect(sendGoogleChatMessage.mock.lastCall?.[0]).toMatchObject({
+    space: "spaces/AAA",
+    text: "*Completed ✅*\n\nThe <https://example.com/item|tracker item> is updated.",
+    thread: "spaces/AAA/threads/source",
+  });
+});
+
+it("keeps long sends in the first thread and reports the delivered thread", async () => {
+  sendGoogleChatMessage
+    .mockResolvedValueOnce({
+      messageName: "spaces/AAA/messages/msg-1",
+      threadName: "spaces/AAA/threads/new-thread",
+    })
+    .mockResolvedValueOnce({
+      messageName: "spaces/AAA/messages/msg-2",
+      threadName: "spaces/AAA/threads/new-thread",
+    });
+
+  const result = await send({ to: "spaces/AAA", message: "x".repeat(33_000) });
+
+  expect(sendGoogleChatMessage).toHaveBeenCalledTimes(2);
+  expect(sendGoogleChatMessage.mock.calls[0]?.[0].thread).toBeUndefined();
+  expect(sendGoogleChatMessage.mock.calls[1]?.[0].thread).toBe("spaces/AAA/threads/new-thread");
+  // Source-reply completion needs the delivered thread. Without it, the runner
+  // cannot tell this answer from a send to another thread and answers twice.
+  expect(result.details).toMatchObject({
+    receipt: {
+      platformMessageIds: ["spaces/AAA/messages/msg-1", "spaces/AAA/messages/msg-2"],
+      threadId: "spaces/AAA/threads/new-thread",
+    },
+  });
+});
+
+it("reports the accepted prefix when a later message chunk fails", async () => {
+  sendGoogleChatMessage
+    .mockResolvedValueOnce({
+      messageName: "spaces/AAA/messages/msg-1",
+      threadName: "spaces/AAA/threads/new-thread",
+    })
+    .mockRejectedValueOnce(new Error("second chunk failed"));
+
+  const error = await send({ to: "spaces/AAA", message: "x".repeat(33_000) }).catch(
+    (caught: unknown) => caught,
+  );
+
+  expect(error).toMatchObject({
+    code: "CHANNEL_PARTIAL_DELIVERY",
+    message: "second chunk failed",
+    deliveryResult: {
+      messageIds: ["spaces/AAA/messages/msg-1"],
+      content: sendGoogleChatMessage.mock.calls[0]?.[0].text,
+      visibleReplySent: true,
+    },
+  });
+});
+
+it("reports no receipt when Google Chat suppresses the send", async () => {
+  sendGoogleChatMessage.mockResolvedValue(null);
+
+  const result = await send({ to: "spaces/AAA", message: "answer" });
+
+  expect(result.details).toEqual({ ok: true, to: "spaces/AAA" });
 });
 
 it.each([

@@ -219,10 +219,74 @@ describe("Google Chat real guarded transport", () => {
           const messages: Array<{ text: string }> = requests
             .filter(({ method }) => method === "POST")
             .map(({ body }) => JSON.parse(body));
-          expect(messages).toEqual([{ text: `*${paragraph}*` }, { text: "\n\n[x] done" }]);
+          expect(messages).toEqual([
+            { text: `*${paragraph}*`, markupSyntax: "MARKUP_SYNTAX_CHAT" },
+            { text: "\n\n[x] done", markupSyntax: "MARKUP_SYNTAX_CHAT" },
+          ]);
           expect(messages.every(({ text }) => Buffer.byteLength(text, "utf8") <= 32_000)).toBe(
             true,
           );
+        });
+      },
+    );
+  });
+
+  it("sends threaded final answers as Chat markup so line breaks and links render", async () => {
+    const { withDurableGoogleChatTransport } = await import("./durable-transport.test-support.js");
+    await withDurableGoogleChatTransport(
+      "googlechat-final-markup",
+      async (sendDurableMessageBatch) => {
+        const bodies: string[] = [];
+        const server = createServer((request, response) => {
+          let body = "";
+          request.setEncoding("utf8");
+          request.on("data", (chunk: string) => {
+            body += chunk;
+          });
+          request.on("end", () => {
+            if (request.method === "POST") {
+              bodies.push(body);
+            }
+            response.writeHead(200, { "Content-Type": "application/json" });
+            response.end(
+              JSON.stringify(
+                request.method === "GET"
+                  ? { name: "spaces/AAA", spaceType: "SPACE" }
+                  : { name: "spaces/AAA/messages/final" },
+              ),
+            );
+          });
+        });
+
+        await withTransportServer(server, async () => {
+          await sendDurableMessageBatch({
+            cfg: {
+              channels: {
+                googlechat: {
+                  serviceAccount: {
+                    client_email: "transport@example.test",
+                    private_key: "not-a-real-key",
+                  },
+                },
+              },
+            },
+            channel: "googlechat",
+            accountId: "default",
+            to: "spaces/AAA",
+            threadId: "spaces/AAA/threads/root",
+            payloads: [
+              {
+                text: "[Google](https://google.com)\n[GitHub](https://github.com)\n[Linear](https://linear.app)",
+              },
+            ],
+          });
+          expect(bodies.map((body) => JSON.parse(body))).toEqual([
+            {
+              text: "<https://google.com|Google>\n<https://github.com|GitHub>\n<https://linear.app|Linear>",
+              thread: { name: "spaces/AAA/threads/root" },
+              markupSyntax: "MARKUP_SYNTAX_CHAT",
+            },
+          ]);
         });
       },
     );

@@ -139,7 +139,10 @@ describe("session-derived Google Chat delivery", () => {
         expect(result.details).toMatchObject({ ok: true, to: CANONICAL_SPACE });
         expect(sends).toHaveLength(1);
         expect(sends[0]?.path).toBe(`/v1/${CANONICAL_SPACE}/messages`);
-        expect(JSON.parse(sends[0]!.body)).toEqual({ text: "session-derived reply" });
+        expect(JSON.parse(sends[0]!.body)).toEqual({
+          text: "session-derived reply",
+          markupSyntax: "MARKUP_SYNTAX_CHAT",
+        });
       });
     });
   }, 60_000);
