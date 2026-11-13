@@ -19,6 +19,8 @@ vi.mock("./targets.js", () => ({
   resolveGoogleChatOutboundSpace,
 }));
 
+import { registerGoogleChatProgressActivity } from "./progress-activity.js";
+
 let googlechatMessageActions: typeof import("./message-tool-api.js").googlechatMessageActions;
 const remoteMedia = "https://example.invalid/image.png";
 const link = `Attachment: ${remoteMedia}`;
@@ -175,4 +177,123 @@ it("rejects unsupported actions without provider access", async () => {
   );
 
   expect(sendGoogleChatMessage).not.toHaveBeenCalled();
+});
+
+function registerActivity(
+  update = vi.fn(async () => true),
+  sessionKey = "agent:main:googlechat:group:spaces/aaa",
+) {
+  return registerGoogleChatProgressActivity({
+    accountId: "default",
+    spaceId: "spaces/AAA",
+    messageName: "spaces/AAA/messages/activity",
+    threadName: "spaces/AAA/threads/t1",
+    sessionKey,
+    update,
+  });
+}
+
+function sendWithContext(params: Record<string, unknown>, context: Record<string, unknown>) {
+  return googlechatMessageActions.handleAction({
+    action: "send",
+    params,
+    cfg: {},
+    accountId: "default",
+    ...context,
+  } as never);
+}
+
+it("folds a progress send into the live activity message in the same thread", async () => {
+  resolveGoogleChatAccount.mockReturnValue({ accountId: "default", credentialSource: "inline" });
+  const update = vi.fn(async () => true);
+  const unregister = registerActivity(update);
+  try {
+    const result = await sendWithContext(
+      {
+        to: "spaces/AAA",
+        message: "Checking Linear next.",
+        threadId: "spaces/AAA/threads/t1",
+        openclawSourceReplyProgress: true,
+      },
+      { sessionKey: "agent:main:googlechat:group:spaces/aaa" },
+    );
+    expect(update).toHaveBeenCalledWith("Checking Linear next.", expect.any(Object));
+    expect(sendGoogleChatMessage).not.toHaveBeenCalled();
+    expect(result.details).toMatchObject({
+      ok: true,
+      foldedIntoActivity: true,
+      messageName: "spaces/AAA/messages/activity",
+      receipt: {
+        platformMessageIds: ["spaces/AAA/messages/activity"],
+        threadId: "spaces/AAA/threads/t1",
+      },
+    });
+  } finally {
+    unregister();
+  }
+});
+
+it("folds a progress send from a differently shaped session when one turn owns the thread", async () => {
+  resolveGoogleChatAccount.mockReturnValue({ accountId: "default", credentialSource: "inline" });
+  const update = vi.fn(async () => true);
+  const unregister = registerActivity(update, "agent:main:main");
+  try {
+    await sendWithContext(
+      {
+        to: "spaces/AAA",
+        message: "Checking Linear next.",
+        threadId: "spaces/AAA/threads/t1",
+        openclawSourceReplyProgress: true,
+      },
+      { sessionKey: "agent:main:googlechat:direct:users/1" },
+    );
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(sendGoogleChatMessage).not.toHaveBeenCalled();
+  } finally {
+    unregister();
+  }
+});
+
+it.each([
+  {
+    name: "a send without the progress marker",
+    progress: false,
+    threadId: "spaces/AAA/threads/t1",
+    updated: true,
+  },
+  {
+    name: "a progress send to another thread",
+    progress: true,
+    threadId: "spaces/AAA/threads/t2",
+    updated: true,
+  },
+  {
+    name: "a progress send after the activity closed",
+    progress: true,
+    threadId: "spaces/AAA/threads/t1",
+    updated: false,
+  },
+] as const)("posts $name as a separate message", async ({ progress, threadId, updated }) => {
+  resolveGoogleChatAccount.mockReturnValue({ accountId: "default", credentialSource: "inline" });
+  sendGoogleChatMessage.mockResolvedValue({
+    messageName: "spaces/AAA/messages/msg-1",
+    threadName: threadId,
+  });
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const unregister = registerActivity(vi.fn(async () => updated));
+  try {
+    await sendWithContext(
+      {
+        to: "spaces/AAA",
+        message: "Update",
+        threadId,
+        ...(progress ? { openclawSourceReplyProgress: true } : {}),
+      },
+      { sessionKey: "agent:main:googlechat:group:spaces/aaa" },
+    );
+    expect(sendGoogleChatMessage).toHaveBeenCalledTimes(1);
+  } finally {
+    unregister();
+    warn.mockRestore();
+  }
 });

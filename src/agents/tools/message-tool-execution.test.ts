@@ -313,6 +313,10 @@ describe("registered message action source completion", () => {
             accountId: "default",
             params: { to: target === "C999" ? "C999" : "C123" },
           });
+          // Channel actions without the trusted turn context read this host-set progress marker.
+          expect(handleAction.mock.calls[0]?.[0].params.openclawSourceReplyProgress).toBe(
+            mode === "progress" && action === "send" ? true : undefined,
+          );
         }
         if (result) {
           const deliveryFact = readEmbeddedMessageDeliveryFact(

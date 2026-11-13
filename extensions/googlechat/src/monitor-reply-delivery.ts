@@ -1,3 +1,4 @@
+import { resolveAgentConfig } from "openclaw/plugin-sdk/agent-scope-runtime";
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { PlatformMessageNotDispatchedError } from "openclaw/plugin-sdk/error-runtime";
@@ -7,6 +8,23 @@ import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import { sendGoogleChatMessage } from "./api.js";
 import { formatGoogleChatMediaText, formatGoogleChatTextChunks } from "./format.js";
 import type { GoogleChatCoreRuntime, GoogleChatRuntimeEnv } from "./monitor-types.js";
+
+/** Names the bot in the typing message: account name, then agent name, then identity. */
+export function resolveBotDisplayName(params: {
+  accountName?: string;
+  agentId: string;
+  config: OpenClawConfig;
+}): string {
+  const { accountName, agentId, config } = params;
+  if (accountName?.trim()) {
+    return accountName.trim();
+  }
+  const agent = resolveAgentConfig(config, agentId);
+  if (agent?.name?.trim()) {
+    return agent.name.trim();
+  }
+  return agent?.identity?.name?.trim() || "OpenClaw";
+}
 
 export type GoogleChatTypingMessage = ReturnType<typeof createGoogleChatTypingMessage>;
 

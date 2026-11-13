@@ -10,6 +10,10 @@ import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveGoogleChatAccount } from "./accounts.js";
 import { sendGoogleChatMessage } from "./api.js";
 import { formatGoogleChatMediaText, formatGoogleChatTextChunks } from "./format.js";
+import {
+  describeGoogleChatProgressActivities,
+  findGoogleChatProgressActivity,
+} from "./progress-activity.js";
 import { resolveGoogleChatOutboundSpace } from "./targets.js";
 
 const OUTBOUND_MEDIA_KEYS = ["media", "mediaUrl", "path", "filePath", "fileUrl"] as const;
@@ -34,6 +38,7 @@ export async function handleGoogleChatAction({
   accountId,
   assertDirectAdapterHandoff,
   onPlatformSendDispatch,
+  sessionKey,
 }: ChannelMessageActionContext) {
   if (action === "upload-file") {
     throw new Error(
@@ -69,6 +74,56 @@ export async function handleGoogleChatAction({
       target: to,
       assertDirectAdapterHandoff,
     });
+
+    // A progress send folds into the turn's live activity message, which the
+    // monitor removes when the turn settles, instead of posting a standalone
+    // message that is never cleaned up. The message tool sets this host-owned
+    // marker (core SOURCE_REPLY_PROGRESS_PARAM) on final:false sends on every path.
+    const progressSend = params.openclawSourceReplyProgress === true;
+    if (progressSend && mediaUrls.length === 0 && content.trim()) {
+      const activity = findGoogleChatProgressActivity({
+        accountId: account.accountId,
+        spaceId: space,
+        // Chat drops thread names outside this space, so the send would not land there.
+        threadName:
+          threadId &&
+          /^spaces\/[^/]+\/threads\/[^/]+$/.test(threadId) &&
+          threadId.startsWith(`${space}/threads/`)
+            ? threadId
+            : undefined,
+        sessionKey,
+      });
+      if (
+        activity &&
+        (await activity.update(content, { assertDirectAdapterHandoff, onPlatformSendDispatch }))
+      ) {
+        const receipt = createMessageReceiptFromOutboundResults({
+          results: [
+            {
+              channel: "googlechat",
+              messageId: activity.messageName,
+              chatId: space,
+              conversationId: space,
+            },
+          ],
+          threadId: activity.threadName,
+          kind: "text",
+        });
+        return jsonResult({
+          ok: true,
+          to: space,
+          messageName: activity.messageName,
+          threadName: activity.threadName,
+          foldedIntoActivity: true,
+          receipt,
+        });
+      }
+    }
+    if (progressSend) {
+      console.warn(
+        `[googlechat] progress send posted separately: thread=${threadId ?? "none"} session=${sessionKey ?? "none"} live=[${describeGoogleChatProgressActivities(account.accountId, space)}]`,
+      );
+    }
 
     // Render CommonMark into Chat markup and keep every chunk in the first chunk's thread.
     const chunks = formatGoogleChatTextChunks(content);
@@ -107,6 +162,12 @@ export async function handleGoogleChatAction({
     if (messageNames.length === 0) {
       return jsonResult({ ok: true, to: space, ...sent });
     }
+    findGoogleChatProgressActivity({
+      accountId: account.accountId,
+      spaceId: space,
+      threadName: deliveredThread,
+      sessionKey,
+    })?.noteSeparatePost?.();
     // Only Chat's confirmed thread proves a source reply when the send inherited it.
     const receipt = createMessageReceiptFromOutboundResults({
       results: messageNames.map((messageId) => ({
