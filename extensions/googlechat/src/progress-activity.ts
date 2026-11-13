@@ -110,10 +110,13 @@ export function registerGoogleChatActivityProgress(params: {
   });
 }
 
-/** Media cannot live in the activity message, so such replies are delivered normally. */
-export function hasGoogleChatMedia(payload: {
-  mediaUrl?: string | null;
-  mediaUrls?: readonly string[];
-}): boolean {
-  return Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
+/** Only a single-message, media-free reply can live in the activity message; others are delivered normally. */
+export function fitsGoogleChatActivity(
+  payload: { text?: string; mediaUrl?: string | null; mediaUrls?: readonly string[] },
+  chunkLimit: number,
+): boolean {
+  if (payload.mediaUrl || (payload.mediaUrls?.length ?? 0) > 0) {
+    return false;
+  }
+  return formatGoogleChatTextChunks(payload.text ?? "", chunkLimit).length <= 1;
 }

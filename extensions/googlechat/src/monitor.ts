@@ -49,7 +49,7 @@ import type {
   WebhookTarget,
 } from "./monitor-types.js";
 import { warnAppPrincipalMisconfiguration } from "./monitor-webhook.js";
-import { hasGoogleChatMedia, registerGoogleChatActivityProgress } from "./progress-activity.js";
+import { fitsGoogleChatActivity, registerGoogleChatActivityProgress } from "./progress-activity.js";
 import { getGoogleChatRuntime } from "./runtime.js";
 import { resolveGoogleChatInboundIsGroup, resolveGoogleChatMemberLabel } from "./space-members.js";
 import type { GoogleChatAttachment, GoogleChatEvent } from "./types.js";
@@ -503,7 +503,7 @@ async function processGoogleChatEvent(
             deliver: async (payload, info) => {
               const replyToId = resolveReplyThreadName(payload);
               const progress = isProgressReply(payload, info?.kind);
-              const folds = progress && !hasGoogleChatMedia(payload);
+              const folds = progress && fitsGoogleChatActivity(payload, chunkLimit);
               if (folds && activity && replyToId === resolveReplyThreadName({ text: "" })) {
                 const [text] = formatGoogleChatTextChunks(payload.text ?? "", chunkLimit);
                 if (text) {
