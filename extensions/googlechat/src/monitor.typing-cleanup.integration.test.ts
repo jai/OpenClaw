@@ -72,7 +72,7 @@ type TurnArgs = {
 };
 type RequestRecord = { method: string; pathname: string; text?: string };
 
-function googleStub(invalidPatchResponse: boolean) {
+function googleStub() {
   const requests: RequestRecord[] = [];
   let messageText: string | undefined;
   const handler = (request: IncomingMessage, response: ServerResponse) => {
@@ -99,14 +99,8 @@ function googleStub(invalidPatchResponse: boolean) {
         messageText = undefined;
         response.writeHead(204).end();
       } else if (request.method === "PATCH") {
-        // The mutation succeeds but the caller cannot decode its response.
         messageText = payload.text;
-        if (invalidPatchResponse) {
-          response.setHeader("Content-Type", "application/json");
-          response.end("{");
-        } else {
-          json({ name: typingName });
-        }
+        json({ name: typingName });
       } else {
         if (payload.text === "_OpenClaw is typing..._") {
           messageText = payload.text;
@@ -121,10 +115,7 @@ function googleStub(invalidPatchResponse: boolean) {
   return { handler, requests, getMessageText: () => messageText };
 }
 
-async function runWebhookTurn(
-  mode: Mode,
-  options: { invalidPatchResponse?: boolean; withIngressLifecycle?: boolean } = {},
-) {
+async function runWebhookTurn(mode: Mode, options: { withIngressLifecycle?: boolean } = {}) {
   const account: ResolvedGoogleChatAccount = {
     accountId: `typing-${mode}`,
     enabled: true,
@@ -136,7 +127,7 @@ async function runWebhookTurn(
     },
     config: { typingIndicator: "message" },
   };
-  const stub = googleStub(options.invalidPatchResponse ?? false);
+  const stub = googleStub();
   const errors: string[] = [];
   let accepted: boolean | undefined;
   let failedDeliveries = 0;
@@ -285,15 +276,16 @@ async function runWebhookTurn(
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Google Chat typing cleanup through the webhook and HTTP transport", () => {
-  it("keeps the placeholder for a buffered reply after the immediate agent lifecycle settles", async () => {
+  it("appends a buffered reply after the activity message and then removes it", async () => {
     const result = await runWebhookTurn("visible");
     expect(result.webhookStatus).toBe(200);
     expect(result.requests).toEqual([
       { method: "POST", pathname: "/v1/spaces/AAA/messages", text: "_OpenClaw is typing..._" },
-      { method: "PATCH", pathname: `/v1/${typingName}`, text: answer },
+      { method: "POST", pathname: "/v1/spaces/AAA/messages", text: answer },
       { method: "POST", pathname: "/v1/spaces/AAA/messages", text: "Second chunk" },
+      { method: "DELETE", pathname: `/v1/${typingName}` },
     ]);
-    expect(result.getMessageText()).toBe(answer);
+    expect(result.getMessageText()).toBeUndefined();
   });
 
   it.each(["silent", "failed"] as const)("cleans the placeholder after a %s turn", async (mode) => {
@@ -329,18 +321,11 @@ describe("Google Chat typing cleanup through the webhook and HTTP transport", ()
           ? [typing, { method: "DELETE", pathname: `/v1/${typingName}` }]
           : [
               typing,
-              { method: "PATCH", pathname: `/v1/${typingName}`, text: answer },
+              { method: "POST", pathname: "/v1/spaces/AAA/messages", text: answer },
               { method: "POST", pathname: "/v1/spaces/AAA/messages", text: "Second chunk" },
+              { method: "DELETE", pathname: `/v1/${typingName}` },
             ],
       );
     },
   );
-
-  it("preserves a possible answer after PATCH applied but its response failed", async () => {
-    const result = await runWebhookTurn("visible", { invalidPatchResponse: true });
-    expect(result.webhookStatus).toBe(200);
-    expect(result.failedDeliveries).toBe(1);
-    expect(result.requests.map(({ method }) => method)).toEqual(["POST", "PATCH"]);
-    expect(result.getMessageText()).toBe(answer);
-  });
 });
